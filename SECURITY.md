@@ -52,7 +52,9 @@ token. Without a pin, Node's certificate and hostname checks apply.
   claimed name is still that file; any error after the claim goes through the same cleanup. The
   status says what became of the file in a part of its own, never shortened, built from the file's
   final state: "wiped" only when every byte was overwritten through the checked handle and synced
-  (else "in part" or "not wiped"), and removed or still present, then always with its exact path. The connection is validated field by
+  (else "in part" or "not wiped"), and removed or still present, then always with its exact path:
+  in that part and in the log only the secret itself is masked, so no folder name that merely
+  looks like a credential is changed, and claimed files are named with a time and hex digits. The connection is validated field by
   field (messages never contain values) and **tested against PDM before it replaces the current
   one**; on failure the current connection stays. A save or removal in Settings at any time during
   an import, reading the file included, wins: the import then changes neither the connection nor

@@ -381,3 +381,25 @@ test('the documented Windows PowerShell steps write a file the plugin imports', 
     if (result.state === 'imported') assert.deepEqual(result.connection, GOOD, how)
   }
 })
+
+test('paths that look like credentials stay exact in the file fate and the log', async () => {
+  const { scrubText } = await import('../src/scrub')
+  // A folder named like a UUID (as some XDG_CONFIG_HOME are) and one with credential-like words.
+  const odd = join(await mkdtemp(join(tmpdir(), 'pdm-import-')), '3f2a1c9e-7b4d-4e8a-9c21-5d6f7a8b9c0d', 'password=hunter22')
+  await mkdir(odd, { recursive: true })
+  await chmod(odd, 0o777) // others may write: refused before the file is taken, on any OS
+  const path = join(odd, 'connection-import.json')
+  await writeFile(path, JSON.stringify(GOOD))
+  assert.notEqual(scrubText(path), path, 'the generic scrubber would have changed this path')
+  await mounted(path, { platform: 'linux' })
+  const config = await worker!.request('config.import')
+  assert.equal(config.importStatus?.ok, false)
+  assert.equal(config.importStatus!.file, `The file was not taken: it is still at ${path}.`)
+  assert.ok(worker!.logs.includes(`Import file: The file was not taken: it is still at ${path}.`))
+  assert.ok(worker!.logs.includes(`Connection import file: ${path}`))
+  // Claimed names cannot look like a credential either.
+  const { claimedName } = await import('../src/importer')
+  const name = claimedName(path)
+  assert.match(name, /\.connection-import\.json\.\d{13}-[0-9a-f]{16}\.claimed$/)
+  assert.equal(scrubText(name.slice(path.length - 'connection-import.json'.length)), name.slice(path.length - 'connection-import.json'.length))
+})

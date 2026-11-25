@@ -96,6 +96,14 @@ async function folderProblem(dir: string, env: Env): Promise<string | undefined>
   return undefined
 }
 
+/**
+ * A unique name for the claimed file next to `path`. It cannot look like a credential (a time and 16
+ * hex digits: no UUID, no words), so no scrubbing can change it in a status or a log.
+ */
+export function claimedName(path: string): string {
+  return join(dirname(path), `.${basename(path)}.${Date.now()}-${randomBytes(8).toString('hex')}.claimed`)
+}
+
 /** The claimed name's final state: gone, or still there (with its path). */
 async function finalState(claimed: string, wiped: 'all' | 'part' | 'none', code?: string): Promise<Cleanup> {
   const gone = await lstat(claimed).then(
@@ -165,7 +173,7 @@ export async function takeImport(path = importFile(), env: Env = here()): Promis
   // A folder (or anything but a file or a link) is not taken at all.
   if (!published.isFile() && !published.isSymbolicLink()) return { state: 'refused', reason: 'The import file is not a file; it was not taken.', cleanup: untouched }
   // 2. Claim it: one atomic rename; whoever loses finds nothing.
-  const claimed = join(dirname(path), `.${basename(path)}.${randomBytes(6).toString('hex')}.claimed`)
+  const claimed = claimedName(path)
   try {
     await rename(path, claimed)
   } catch (error) {

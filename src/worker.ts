@@ -26,7 +26,7 @@ import { parseLink, type OrcaLinks } from './orca/match'
 import { OrcaService } from './orca/service'
 import { switchArgs, terminalPlan } from './orca/terminal'
 import { Background } from './background'
-import { outboundSnapshot, redactDeep, scrubLine, scrubText } from './scrub'
+import { outboundSnapshot, redactDeep, scrubLine } from './scrub'
 import { fileVault, memoryVault, type Binding, type Vault } from './vault'
 import { cleanupText, importFile, takeImport } from './importer'
 import type { AlertState } from './features/alerts'
@@ -147,6 +147,8 @@ export default function activate(orca: OrcaWorkerApi): void {
   /** Every message logged passes through here, so a secret that slipped into one is masked. */
   const knownSecrets = new Set<string>()
   const log = (text: string) => orca.log(scrubLine(text, knownSecrets, 2000))
+  /** Only the known secret values replaced: for text that must stay exact, like file paths. */
+  const maskKnown = (text: string) => [...knownSecrets].reduce((out, secret) => (secret.length >= 4 ? out.split(secret).join('[redacted]') : out), text)
   const sealer = () => (vault ??= fileVault())
 
   async function readSecret(connection: ConnectionConfig): Promise<string | null> {
@@ -440,9 +442,11 @@ export default function activate(orca: OrcaWorkerApi): void {
    */
   async function recordImport(ok: boolean, message: string, file?: string): Promise<void> {
     const status: ImportStatus = { at: clock(), ok, message: scrubLine(message, knownSecrets, 400) }
-    if (file) status.file = scrubText(file, knownSecrets)
+    // Exact paths matter here (the person may have to delete a file by hand): only the known
+    // secret values are masked, never generic patterns that a folder name could match.
+    if (file) status.file = maskKnown(file)
     log(`Import: ${status.message}`)
-    if (status.file) log(`Import file: ${status.file}`)
+    if (status.file) orca.log(`Import file: ${status.file}`)
     await orca.storage.set(IMPORT_STATUS_KEY, status as unknown as JsonValue).catch(() => undefined)
   }
 
@@ -456,7 +460,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     return status?.message ?? 'Imported.'
   })
   // The path is logged (it holds nothing secret) so an agent finds it with `orca plugin logs`.
-  log(`Connection import file: ${importPath ?? importFile()}`)
+  orca.log(maskKnown(`Connection import file: ${importPath ?? importFile()}`))
   void importConnection('start')
 
   orca.panels.handle('config.clear', async () => {
