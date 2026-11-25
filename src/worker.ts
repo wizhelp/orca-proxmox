@@ -26,7 +26,7 @@ import { parseLink, type OrcaLinks } from './orca/match'
 import { OrcaService } from './orca/service'
 import { switchArgs, terminalPlan } from './orca/terminal'
 import { Background } from './background'
-import { outboundSnapshot, redactDeep, scrubLine } from './scrub'
+import { outboundSnapshot, redactDeep, scrubLine, scrubText } from './scrub'
 import { fileVault, memoryVault, type Binding, type Vault } from './vault'
 import { cleanupText, importFile, takeImport } from './importer'
 import type { AlertState } from './features/alerts'
@@ -345,23 +345,39 @@ export default function activate(orca: OrcaWorkerApi): void {
     /** Publishes the outcome under the config lock, unless Settings changed meanwhile. */
     const finish = (ok: boolean, message: string, fileFate: string) =>
       withConfigLock(async () => {
-        if (epoch !== configEpoch) await recordImport(false, `The connection was changed in Settings while the file was imported; the import was dropped. ${fileFate}`)
-        else await recordImport(ok, message)
+        if (epoch !== configEpoch) await recordImport(false, 'The connection was changed in Settings while the file was imported; the import was dropped.', fileFate)
+        else await recordImport(ok, message, fileFate)
       })
     const result = await takeImport(importPath ?? importFile(), { platform: importPlatform, uid: typeof process.getuid === 'function' ? process.getuid() : undefined })
     if (result.state === 'none') return false
     const fileFate = cleanupText(result.cleanup)
     if (result.state === 'refused') {
-      // A refusal after the claim already says what became of the file; before it, say it here.
-      await finish(false, result.cleanup.untouched ? `${result.reason} ${fileFate}` : result.reason, fileFate)
+      await finish(false, result.reason, fileFate)
       return true
     }
+    try {
+      return await useImported(result.connection, fileFate, epoch, trigger, finish)
+    } catch (error) {
+      // Whatever fails after the file was taken, the status still says what became of it.
+      await finish(false, `The import failed (${error instanceof Error ? error.name : 'error'}); nothing was changed.`, fileFate)
+      return true
+    }
+  }
+
+  async function useImported(
+    imported: { baseUrl: string; tokenId: string; fingerprint: string; secret: string },
+    fileFate: string,
+    epoch: number,
+    trigger: string,
+    finish: (ok: boolean, message: string, fileFate: string) => Promise<void>
+  ): Promise<boolean> {
+    const result = { connection: imported }
     const { secret, ...fields } = result.connection
     // Known before anything can mention it, so every log and status line masks it exactly.
     if (secret.trim()) knownSecrets.add(secret.trim())
     const problem = importProblem(result.connection)
     if (problem) {
-      await finish(false, `${problem} Nothing was changed. ${fileFate}`, fileFate)
+      await finish(false, `${problem} Nothing was changed.`, fileFate)
       return true
     }
     const candidate: ConnectionConfig = { ...validate({ ...fields, secret }, 'default') }
@@ -373,7 +389,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       const info = toSourceError(error)
       await finish(
         false,
-        `The imported connection did not pass the connection test (${info.kind}: ${info.message})${info.presentedFingerprint ? `; the server presents ${info.presentedFingerprint}` : ''}. The current connection was kept. ${fileFate}`,
+        `The imported connection did not pass the connection test (${info.kind}: ${info.message})${info.presentedFingerprint ? `; the server presents ${info.presentedFingerprint}` : ''}. The current connection was kept.`,
         fileFate
       )
       return true
@@ -381,11 +397,11 @@ export default function activate(orca: OrcaWorkerApi): void {
     // Commit and status in one step under the lock, so neither can land after a newer manual change.
     await withConfigLock(async () => {
       if (epoch !== configEpoch) {
-        await recordImport(false, `The connection was changed in Settings while the file was imported; the import was dropped. ${fileFate}`)
+        await recordImport(false, 'The connection was changed in Settings while the file was imported; the import was dropped.', fileFate)
         return
       }
       await saveConnection({ ...fields, secret })
-      await recordImport(true, `Imported the connection to ${candidate.baseUrl} as ${candidate.tokenId}${candidate.fingerprint ? ', pinned' : ''} (${trigger}). Connection test: PDM ${access.version}, ${access.remotes} remotes visible. ${fileFate}`)
+      await recordImport(true, `Imported the connection to ${candidate.baseUrl} as ${candidate.tokenId}${candidate.fingerprint ? ', pinned' : ''} (${trigger}). Connection test: PDM ${access.version}, ${access.remotes} remotes visible.`, fileFate)
     })
     return true
   }
@@ -418,9 +434,15 @@ export default function activate(orca: OrcaWorkerApi): void {
     return run
   }
 
-  async function recordImport(ok: boolean, message: string): Promise<void> {
+  /**
+   * The reason is capped; what became of the file is kept whole and apart, so the path of any
+   * plaintext left behind is never cut off by a long URL or diagnostic.
+   */
+  async function recordImport(ok: boolean, message: string, file?: string): Promise<void> {
     const status: ImportStatus = { at: clock(), ok, message: scrubLine(message, knownSecrets, 400) }
+    if (file) status.file = scrubText(file, knownSecrets)
     log(`Import: ${status.message}`)
+    if (status.file) log(`Import file: ${status.file}`)
     await orca.storage.set(IMPORT_STATUS_KEY, status as unknown as JsonValue).catch(() => undefined)
   }
 

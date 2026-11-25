@@ -13,7 +13,11 @@ export type ConnectionInput = {
 export type SecretsProtection = 'os-keyring' | 'unavailable' | 'unknown'
 
 /** The last import from the import file: when, whether it worked, and why not. Never its content. */
-export type ImportStatus = { at: number; ok: boolean; message: string }
+/**
+ * The last import from the import file: when, whether it worked and why not (`message`, capped),
+ * and what became of the file (`file`, never cut: it names any path where the secret may remain).
+ */
+export type ImportStatus = { at: number; ok: boolean; message: string; file?: string }
 
 export type ConfigAnswer = {
   connection: ConnectionView | null

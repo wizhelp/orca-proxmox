@@ -128,7 +128,7 @@ export function settingsView(): HTMLElement {
         : null,
     // The last import's outcome, for a day.
     cfg?.importStatus && Date.now() - cfg.importStatus.at < 86_400_000
-      ? callout(cfg.importStatus.ok ? 'ok' : 'bad', cfg.importStatus.ok ? 'Imported from a file' : 'The import file was not imported', `${cfg.importStatus.message} (${new Date(cfg.importStatus.at).toLocaleString()})`)
+      ? callout(cfg.importStatus.ok ? 'ok' : 'bad', cfg.importStatus.ok ? 'Imported from a file' : 'The import file was not imported', `${cfg.importStatus.message} (${new Date(cfg.importStatus.at).toLocaleString()})`, cfg.importStatus.file ? h('div', { class: 'small' }, cfg.importStatus.file) : null)
       : null,
     h(
       'details',
