@@ -38,11 +38,19 @@ token. Without a pin, Node's certificate and hostname checks apply.
   old entry is deleted once reads of it have finished.
 - It is never returned to the panel and never logged.
 - **The import file** (for agents and scripts, see [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md))
-  sits next to the worker's key file. The worker reads it only when it is a regular file (not a
-  link) that, on Linux and macOS, group and others cannot read (on Windows the folder under
-  `%LOCALAPPDATA%` is private to the user). It saves it exactly as the Settings form does
-  (sealed and bound to its endpoint), then overwrites and deletes it; a malformed file is deleted
-  too, an unsafe one left in place and reported. Only the outcome is logged, never the content.
+  sits next to the worker's key file; the producer writes it privately and publishes it with an
+  atomic rename. The worker claims it with an atomic rename to a unique name (so of several
+  workers one gets it, and a file published later is not touched), opens it once without
+  following links where the OS allows, and checks that handle: a regular file with a single
+  link, within a size bound, and on Linux and macOS owned by the user, not readable by others,
+  in a folder owned by the user that others cannot write to. It reads the content from that
+  handle, overwrites the file through it and unlinks the claimed name only if it is still the
+  same file. The connection is validated field by field (messages never contain values) and
+  **tested against PDM before it replaces the current one**; on failure the current connection
+  stays. Saves in Settings made meanwhile win over the import. The outcome, including whether the
+  file really was deleted, goes to the panel and the plugin log; never the content.
+- **What the logs and the panel show**: the PDM URL, the token ID and the import file's path
+  (which contains your account's folder name), as connection metadata. Never the secret.
 
 **What leaves the worker.** HTTP errors are described by the plugin itself (path and status),
 never with the server's response body, since a proxy can echo request headers in it. Everything
@@ -83,7 +91,13 @@ text before it is copied.
 - **The setup form** holds a freshly entered secret in the panel until it is sent to the worker.
 - **The import file holds the secret in plain text** until the worker imports it (normally
   seconds). Overwriting before deleting does not guarantee that copy-on-write file systems or
-  SSDs drop the old blocks; anyone running as your user can read the file while it exists.
+  SSDs drop the old blocks; anyone running as your user can read the file while it exists. If the
+  status says it could not be deleted (for example another program holds it open), delete it by
+  hand.
+- **On Windows the import file's permissions are not checked**: the plugin does not read ACLs,
+  relies on the folder under your profile being private (do not redirect it to a shared place),
+  and Windows cannot open a file "without following links", so a link is detected by a check just
+  before opening, which leaves a short race for a process already running as you.
 - **Anyone running as your user account** can read the key file and, through Orca, the sealed
   value; the scheme separates the panel from the worker, not your account from itself.
 - **Server text shown in the panel** (a remote's error, a task's status) is scrubbed, but its

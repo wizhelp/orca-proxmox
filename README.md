@@ -18,9 +18,12 @@ in PDM, pins the certificate and hands the connection to the plugin, following
 Set up the Proxmox plugin for Orca (https://github.com/wizhelp/orca-proxmox) for me, following
 docs/AGENT_SETUP.md in that repository exactly. My Proxmox Datacenter Manager is at
 <https://pdm.example.com:8443>; you can <log in to it as root@pam / ssh to it as root>.
-Never ask me to paste a password or token secret into this chat: open a prompt in a terminal
-for me to type it, and never print it. Show me each change before you make it in PDM. If the
-plugin is not installed yet, install it and tell me the command to approve it.
+Before you send any password or token, show me PDM's certificate fingerprint so I can compare
+it with PDM's web interface (or read it on the host over SSH), and pin that certificate for
+every call; never use curl -k. Never ask me to paste a password or token secret into this chat:
+open a prompt in a terminal for me to type it, and never print it. Show me each change before
+you make it in PDM. If the plugin is not installed yet, install it and tell me the command to
+approve it.
 ```
 
 The agent needs the PDM URL and either an admin login to PDM or SSH to its host. No PDM yet? The
@@ -182,7 +185,8 @@ Open the **Proxmox** panel in Orca's right sidebar, go to **Settings**, and ente
 Press **Test connection**, then **Save**.
 
 Without the panel (an agent or a script): write the same four fields as JSON to the plugin's
-import file, readable by you only, and the plugin imports it, then deletes it; see
+import file (readable by you only, written to a temporary name and renamed into place); the
+plugin tests the connection, imports it only if the test passes, then deletes the file; see
 [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md#4-hand-the-connection-to-the-plugin). The path is shown under
 Settings → *Set up from a file*, with an *Import now* button.
 

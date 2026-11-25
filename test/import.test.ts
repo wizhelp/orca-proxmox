@@ -233,3 +233,26 @@ test('what the status says about the file', () => {
   assert.match(cleanupText('not-deleted', 'EBUSY'), /could NOT be deleted \(EBUSY\): delete it by hand, it holds the token secret/)
   assert.equal(cleanupText('kept'), 'The file was left in place.')
 })
+
+test('the documented Windows PowerShell commands write a file the plugin imports', async () => {
+  if (!ON_WINDOWS) return
+  const { execFile } = await import('node:child_process')
+  const ps = (script: string) =>
+    new Promise<void>((resolve, reject) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], (e) => (e ? reject(e) : resolve())))
+  for (const how of ['documented', 'set-content']) {
+    const dir = await mkdtemp(join(tmpdir(), 'pdm-import-ps-'))
+    const target = join(dir, 'connection-import.json')
+    const secretFile = join(dir, 'secret.txt')
+    await writeFile(secretFile, SECRET)
+    const fields = `$PdmUrl = '${GOOD.baseUrl}'; $Fp = '${PIN}'; $secretFile = '${secretFile}'; $import = '${target}'`
+    const script =
+      how === 'documented'
+        ? `${fields}; $secret = (Get-Content -Raw $secretFile).Trim(); $json = @{ baseUrl = $PdmUrl; tokenId = 'monitor@pdm!orca'; fingerprint = $Fp; secret = $secret } | ConvertTo-Json -Compress; [IO.File]::WriteAllText("$import.tmp", $json, (New-Object Text.UTF8Encoding $false)); Move-Item -Force "$import.tmp" $import`
+        : // What people often write instead: Windows PowerShell 5.1 adds a byte-order mark here.
+          `${fields}; $secret = (Get-Content -Raw $secretFile).Trim(); @{ baseUrl = $PdmUrl; tokenId = 'monitor@pdm!orca'; fingerprint = $Fp; secret = $secret } | ConvertTo-Json | Set-Content -Encoding utf8 $import`
+    await ps(script)
+    const result = await takeImport(target, { platform: 'win32', uid: undefined })
+    assert.equal(result.state, 'imported', how)
+    if (result.state === 'imported') assert.deepEqual(result.connection, GOOD, how)
+  }
+})

@@ -137,7 +137,7 @@ export function settingsView(): HTMLElement {
       h(
         'p',
         { class: 'muted small' },
-        'Write the connection as JSON (baseUrl, tokenId, fingerprint, secret) to this file, readable by you only. The plugin imports it when it starts, on the command “Proxmox: Import the connection file”, or here, then deletes it. See docs/AGENT_SETUP.md.'
+        'Write the connection as JSON (baseUrl, tokenId, fingerprint, secret) to this file, readable by you only. Write it to a temporary name, then rename it into place. The plugin imports it when it starts, on the command “Proxmox: Import the connection file”, or here; it keeps the current connection unless the imported one passes a connection test, then deletes the file. See docs/AGENT_SETUP.md.'
       ),
       h('code', { class: 'path small' }, cfg?.importPath ?? ''),
       h('div', { class: 'toolbar' }, button(busy === 'import' ? 'Importing…' : 'Import now', () => void run('import'), { icon: 'download', disabled: busy !== null }))
