@@ -31,9 +31,13 @@ in Proxmox Datacenter Manager (PDM) and hands it to the plugin.
    - an **admin login** (for example `root@pam`) they type into a prompt you open on this
      machine; then `ADMIN_URL=$PDM_URL`; or
    - **SSH to the PDM host**: you open an SSH session in a terminal and run steps 0–2 there
-     against `ADMIN_URL=https://127.0.0.1:8443`. A PDM login (typed into a prompt in that session)
-     is still needed; SSH only keeps the admin traffic on the host. The token secret is then
-     brought back to Orca's machine (step 4), and `PDM_URL` stays the address Orca uses.
+     against `ADMIN_URL=https://127.0.0.1:8443`. Only over a host key that is already trusted
+     (in `known_hosts`), or that the person confirms first: compare `ssh-keyscan pdm-host |
+     ssh-keygen -lf -` with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` read on the
+     host's console; then use `ssh -o StrictHostKeyChecking=yes`. A PDM login (typed into a prompt
+     in that session) is still needed; SSH only keeps the admin traffic on the host. The token
+     secret is then brought back to Orca's machine (step 4), and `PDM_URL` stays the address Orca
+     uses: its certificate is verified separately (step 3).
 3. **Which remotes** the plugin should see: all (Auditor on `/resource`) or only some (Auditor on
    `/resource/<remote>` for each).
 4. Whether Orca is installed with this plugin (`orca plugin list` shows `…proxmox-visualizer`).
@@ -172,7 +176,9 @@ PY
 code=$(curl -K "$WORK/curl.cfg" -H @"$WORK/auth.hdr" -o "$WORK/list.json" -w '%{http_code}' \
   "$ADMIN_URL/api2/json/resources/list")
 rm -f "$WORK/auth.hdr"
-[ "$code" = 200 ] && python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["data"]), "remotes visible")' "$WORK/list.json"
+[ "$code" = 200 ] || { echo "The token cannot read the resources (HTTP $code): stop and check step 2."; exit 1; }
+python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["data"]), "remotes visible")' "$WORK/list.json" ||
+  { echo "Unexpected answer from PDM: stop."; exit 1; }
 rm -f "$WORK/list.json" "$WORK/jar" "$WORK/csrf.hdr"
 ```
 
@@ -181,9 +187,18 @@ ask the person which.
 
 ## 3. The fingerprint for the plugin
 
-The plugin pins the SHA-256 fingerprint confirmed in step 0 (`AB:CD:…`). With a certificate from
-a trusted CA it can stay empty. When PDM's certificate is renewed, the pin changes and the plugin
-asks for the new one.
+The plugin pins a SHA-256 fingerprint (`AB:CD:…`) for `PDM_URL`, the address **Orca** uses.
+
+- If `PDM_URL` is the address you used in step 0 (`ADMIN_URL=$PDM_URL`), use the fingerprint
+  confirmed there.
+- If it differs (you worked over SSH on the host, or Orca reaches PDM through a different name, a
+  proxy or a TLS-terminating front end), **verify the certificate `PDM_URL` presents separately**,
+  from Orca's machine: run step 0's `openssl s_client` against `PDM_URL` and have the person
+  confirm that fingerprint (with the front end's operator, or on that host) before using it. The
+  plugin pins exactly what Orca's machine sees; a fingerprint from another endpoint fails closed.
+
+With a certificate from a trusted CA it can stay empty. When the certificate is renewed, the pin
+changes and the plugin asks for the new one.
 
 ## 4. Hand the connection to the plugin
 
@@ -203,53 +218,72 @@ redirected profile can differ from `%LOCALAPPDATA%`.
 
 **If you ran steps 0–2 over SSH on the PDM host**, the secret is in that session's `$WORK`
 (`echo $WORK` there gives `REMOTE_WORK`; keep that session open, its folder is removed when it
-ends). Bring the secret to Orca's machine without printing it, then remove it on the host, and use
-`$LOCAL/secret` where the next step says `$WORK/secret`:
+ends). Bring the secret to Orca's machine without printing it, into a private folder that is
+removed on exit too, then remove it on the host; use `$LOCAL/secret` where the next step says
+`$WORK/secret`:
 
 ```sh
-# On Orca's machine, in a private work folder of its own:
-umask 077; LOCAL=$(mktemp -d)
-ssh root@pdm-host "cat '$REMOTE_WORK/secret' && rm -f '$REMOTE_WORK/secret'" > "$LOCAL/secret"
+# On Orca's machine:
+set +x; umask 077; LOCAL=$(mktemp -d); trap 'rm -rf "$LOCAL"' EXIT INT TERM HUP
+ssh -o StrictHostKeyChecking=yes root@pdm-host "cat '$REMOTE_WORK/secret' && rm -f '$REMOTE_WORK/secret'" > "$LOCAL/secret"
+[ -s "$LOCAL/secret" ] || { echo "No secret came back: stop."; exit 1; }
 ```
 
-Write the file **completely under a temporary name in the same folder, then rename it** to the
-final name, so the plugin never sees a half-written file. Linux/macOS:
+Publish the file safely: write it **to a new, unique file created exclusively in the same folder**
+(never an existing or predictable name), completely, then **rename it** to the final name, so the
+plugin never sees a half-written or foreign file. If a file is still waiting under the final name,
+let the plugin import it first. Linux/macOS:
 
 ```sh
 IMPORT="<path from the log>"; DIR=$(dirname "$IMPORT")
 mkdir -p "$DIR" && chmod 700 "$DIR"
-PDM_URL="$PDM_URL" FP="AB:CD:…" python3 - "$WORK/secret" "$IMPORT" <<'PY'
+[ -e "$IMPORT" ] && { echo "An earlier import file is still waiting: import it first."; exit 1; }
+TMP=$(mktemp "$DIR/.connection-import.XXXXXXXX")        # new, unique, 0600, created exclusively
+trap 'rm -rf "$WORK" "$LOCAL"; rm -f "$TMP"' EXIT INT TERM HUP
+PDM_URL="$PDM_URL" FP="AB:CD:…" python3 - "$WORK/secret" "$TMP" "$IMPORT" <<'PY'
 import json, os, sys
-secret_file, target = sys.argv[1], sys.argv[2]
-tmp = target + ".tmp"
-fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(fd, "w", encoding="utf-8") as f:
+secret_file, tmp, target = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(tmp, "w", encoding="utf-8") as f:   # the file mktemp just created, private to you
     json.dump({"baseUrl": os.environ["PDM_URL"], "tokenId": "monitor@pdm!orca",
                "fingerprint": os.environ["FP"], "secret": open(secret_file).read().strip()}, f)
-os.replace(tmp, target)
+    f.flush(); os.fsync(f.fileno())
+os.rename(tmp, target)
 PY
 rm -f "$WORK/secret"
 ```
 
-Windows (Windows PowerShell 5.1 or PowerShell 7; UTF-8 without a byte-order mark, though the
-plugin also accepts one):
+Windows (Windows PowerShell 5.1 or PowerShell 7). The folder is made private to you (and
+SYSTEM) first, the file is created exclusively under a new unique name, written as UTF-8 without a
+byte-order mark (the plugin also accepts one), and only then renamed, without replacing anything:
 
 ```powershell
 $import = '<path from the log>'; $dir = Split-Path $import
 New-Item -ItemType Directory -Force $dir | Out-Null
-$secret = (Get-Content -Raw $secretFile).Trim()
-$json = @{ baseUrl = $PdmUrl; tokenId = 'monitor@pdm!orca'; fingerprint = $Fp; secret = $secret } | ConvertTo-Json -Compress
-[IO.File]::WriteAllText("$import.tmp", $json, (New-Object Text.UTF8Encoding $false))
-Move-Item -Force "$import.tmp" $import
-Remove-Variable secret, json; Remove-Item $secretFile
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+icacls $dir /inheritance:r /grant:r "*$($me):(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'Could not make the import folder private.' }
+if (Test-Path -LiteralPath $import) { throw 'An earlier import file is still waiting: import it first.' }
+$tmp = Join-Path $dir ('.connection-import.' + [guid]::NewGuid().ToString('N') + '.tmp')
+$stream = [IO.File]::Open($tmp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+try {
+  $secret = (Get-Content -Raw $secretFile).Trim()
+  $json = @{ baseUrl = $PdmUrl; tokenId = 'monitor@pdm!orca'; fingerprint = $Fp; secret = $secret } | ConvertTo-Json -Compress
+  $bytes = (New-Object Text.UTF8Encoding $false).GetBytes($json)
+  $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true)
+} catch { $stream.Dispose(); Remove-Item -LiteralPath $tmp -Force; throw } finally { $stream.Dispose() }
+Move-Item -LiteralPath $tmp -Destination $import
+Remove-Variable secret, json, bytes; Remove-Item -LiteralPath $secretFile
 ```
 
-On Windows the plugin does not inspect file permissions (ACLs): the folder under your profile is
-private by default; do not use a shared or redirected folder others can read.
+On Windows the plugin itself does not inspect file permissions (ACLs); the step above makes the
+folder private, and the file inherits that. Do not use a shared or redirected folder.
 
 The file holds exactly `baseUrl`, `tokenId`, `secret` and optionally `fingerprint`, all strings.
-The plugin refuses a file it cannot trust (a link, other hard links, another owner, readable by
-others, a folder others can write to) and leaves it in place; it deletes any file it read.
+The plugin refuses a file in a folder it cannot trust (a link, another owner, others can write
+to it) and leaves it as it is. A file it has taken is never put back: one it cannot trust (a link,
+other hard links, another owner, readable by others) or cannot use is removed, wiped first when it
+is a plain file of yours; the status says exactly what became of it, with its path if it could
+not be removed.
 
 Then make the plugin import it: when its worker starts, on the command *Proxmox: Import the
 connection file*, or on *Import now* in Settings. From a terminal:

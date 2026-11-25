@@ -38,17 +38,21 @@ token. Without a pin, Node's certificate and hostname checks apply.
   old entry is deleted once reads of it have finished.
 - It is never returned to the panel and never logged.
 - **The import file** (for agents and scripts, see [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md))
-  sits next to the worker's key file; the producer writes it privately and publishes it with an
-  atomic rename. The worker claims it with an atomic rename to a unique name (so of several
+  sits next to the worker's key file. The producer makes the folder private, writes the file to a
+  new, unique name created exclusively in it (`mktemp`; `FileMode.CreateNew` on Windows) and then
+  renames it into place. The worker claims it with an atomic rename to a unique name (so of several
   workers one gets it, and a file published later is not touched), opens it once without
   following links where the OS allows, and checks that handle: a regular file with a single
   link, within a size bound, and on Linux and macOS owned by the user, not readable by others,
-  in a folder owned by the user that others cannot write to. It reads the content from that
-  handle, overwrites the file through it and unlinks the claimed name only if it is still the
-  same file. The connection is validated field by field (messages never contain values) and
-  **tested against PDM before it replaces the current one**; on failure the current connection
-  stays. Saves in Settings made meanwhile win over the import. The outcome, including whether the
-  file really was deleted, goes to the panel and the plugin log; never the content.
+  in a folder owned by the user that others cannot write to. A claimed file is **never put back**:
+  it is read from that handle (when it can be trusted) and then removed in every case, wiped
+  through the same handle first when it is a plain file of the user's, and unlinked only while the
+  claimed name is still that file. The status is built from the file's final state: overwritten or
+  not, removed or still present (then with its exact path). The connection is validated field by
+  field (messages never contain values) and **tested against PDM before it replaces the current
+  one**; on failure the current connection stays. A save or removal in Settings at any time during
+  an import, reading the file included, wins: the import then changes neither the connection nor
+  the status beyond saying it was dropped. Nothing of the content is logged.
 - **What the logs and the panel show**: the PDM URL, the token ID and the import file's path
   (which contains your account's folder name), as connection metadata. Never the secret.
 
