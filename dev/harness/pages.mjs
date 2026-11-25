@@ -26,6 +26,7 @@ const stub = `<script>
         if (name === 'config.get') return d.config;
         if (name === 'connection.test') return { ok: true, version: '1.1.10', remotes: 5 };
         if (name === 'config.save') return d.config;
+        if (name === 'config.import') return { ...d.config, found: false };
         if (name === 'orca.link') return { links: {} };
         if (name === 'orca.terminal') return { how: 'workspace', navigated: true, where: 'the example workspace' };
         throw Object.assign(new Error('unknown ' + name), { code: 'unknown_method' });

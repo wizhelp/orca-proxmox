@@ -48,7 +48,7 @@ export const app = {
   formDirty: false,
   testResult: null as TestAnswer | null,
   settingsMessage: null as { tone: Tone; text: string } | null,
-  busy: null as 'test' | 'save' | 'clear' | null
+  busy: null as 'test' | 'save' | 'clear' | 'import' | null
 }
 
 type Actions = {

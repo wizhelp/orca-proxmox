@@ -20,12 +20,25 @@ export function fillForm(): void {
   app.formDirty = false
 }
 
-async function run(kind: 'test' | 'save' | 'clear'): Promise<void> {
+async function run(kind: 'test' | 'save' | 'clear' | 'import'): Promise<void> {
   app.busy = kind
   app.settingsMessage = null
   actions.render()
   try {
-    if (kind === 'test') {
+    if (kind === 'import') {
+      const answer = await orca.plugin.request('config.import', undefined, { timeoutMs: 60000 })
+      const { found, ...config } = answer
+      app.config = config
+      fillForm()
+      if (!found) app.settingsMessage = { tone: 'off', text: `No import file at ${config.importPath}.` }
+      else if (config.importStatus?.ok) {
+        actions.discardRefresh()
+        app.snap = null
+        app.response = null
+        actions.setTab('hosts')
+        await actions.refresh(true)
+      }
+    } else if (kind === 'test') {
       app.testResult = await orca.plugin.request('connection.test', app.form, { timeoutMs: 60000 })
     } else if (kind === 'save') {
       app.config = await orca.plugin.request('config.save', app.form)
@@ -113,6 +126,21 @@ export function settingsView(): HTMLElement {
       : test
         ? errorCallout(test.error, { pin: pinFingerprint, openSettings: () => actions.setTab('settings') })
         : null,
+    cfg?.importStatus
+      ? callout(cfg.importStatus.ok ? 'ok' : 'bad', cfg.importStatus.ok ? 'Imported from a file' : 'The import file was not imported', `${cfg.importStatus.message} (${new Date(cfg.importStatus.at).toLocaleString()})`)
+      : null,
+    h(
+      'details',
+      { class: 'fold' },
+      h('summary', null, icon('download', 14), ' Set up from a file (for agents and scripts)'),
+      h(
+        'p',
+        { class: 'muted small' },
+        'Write the connection as JSON (baseUrl, tokenId, fingerprint, secret) to this file, readable by you only. The plugin imports it when it starts, on the command “Proxmox: Import the connection file”, or here, then deletes it. See docs/AGENT_SETUP.md.'
+      ),
+      h('code', { class: 'path small' }, cfg?.importPath ?? ''),
+      h('div', { class: 'toolbar' }, button(busy === 'import' ? 'Importing…' : 'Import now', () => void run('import'), { icon: 'download', disabled: busy !== null }))
+    ),
     h(
       'details',
       { class: 'fold', open: !cfg?.connection },
