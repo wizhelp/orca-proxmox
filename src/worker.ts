@@ -16,7 +16,7 @@ import {
   type PluginSettings,
   type SourceError
 } from './model'
-import type { ConfigAnswer, ConnectionInput, SecretsProtection, TestAnswer } from './protocol'
+import type { ConfigAnswer, ConnectionInput, ImportStatus, SecretsProtection, TestAnswer } from './protocol'
 import { ApiError, normalizeBaseUrl, ProxmoxClient } from './proxmox/client'
 import { nodeTransport, type Transport } from './proxmox/http'
 import { createSource } from './proxmox/source'
@@ -28,6 +28,7 @@ import { switchArgs, terminalPlan } from './orca/terminal'
 import { Background } from './background'
 import { outboundSnapshot, redactDeep, scrubLine } from './scrub'
 import { fileVault, memoryVault, type Binding, type Vault } from './vault'
+import { importFile, takeImport } from './importer'
 import type { AlertState } from './features/alerts'
 import type { JsonValue } from 'orca/worker'
 
@@ -57,6 +58,10 @@ let probe: ((url: URL) => Promise<string | null>) | undefined
 let clock: () => number = Date.now
 let cliRunner: (() => CliRunner) | undefined
 let vault: Vault | undefined
+/** The import file; tests point it at a temporary folder (or nowhere). */
+let importPath: string | undefined
+let importPlatform: NodeJS.Platform = process.platform
+const IMPORT_STATUS_KEY = 'import.status'
 /** The background loop (status bar, alerts); off in tests unless they ask for it. */
 let background = true
 const ALERT_STATE_KEY = 'alerts.state'
@@ -72,8 +77,13 @@ export function useTestDoubles(doubles: {
   orcaCli?: CliRunner
   background?: boolean
   vault?: Vault
+  importPath?: string
+  importPlatform?: NodeJS.Platform
 }): void {
   background = doubles.background ?? false
+  // Never the real import file in tests: a path that does not exist unless a test makes it.
+  importPath = doubles.importPath ?? '\0no-import-file-in-tests'
+  importPlatform = doubles.importPlatform ?? process.platform
   // Never the real key file in tests.
   vault = doubles.vault ?? memoryVault()
   transport = doubles.transport
@@ -238,10 +248,13 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   async function configAnswer(): Promise<ConfigAnswer> {
     const connection = await loadConnection()
+    const status = await orca.storage.get(IMPORT_STATUS_KEY)
     return toJson<ConfigAnswer>({
       connection: await view(connection),
       secretsProtection: await secretsProtection(),
-      settings: await loadSettings()
+      settings: await loadSettings(),
+      importPath: importPath ?? importFile(),
+      importStatus: status && typeof status === 'object' && !Array.isArray(status) ? (status as unknown as ImportStatus) : null
     })
   }
 
@@ -271,7 +284,10 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   orca.panels.handle('config.get', () => configAnswer())
 
-  orca.panels.handle('config.save', async (input) => {
+  orca.panels.handle('config.save', (input) => saveConnection(input).then(() => configAnswer()))
+
+  /** Saves a connection as the Settings form does: new revision, sealed and bound secret, switch. */
+  async function saveConnection(input: ConnectionInput): Promise<ConnectionConfig> {
     const current = await loadConnection()
     const next: ConnectionConfig = { ...validate(input, current?.id ?? 'default'), revision: randomUUID() }
     const fresh = cleanSecret(input.secret)
@@ -290,8 +306,65 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
     await switched(current)
     log(`Saved connection to ${next.baseUrl} as ${next.tokenId}${next.fingerprint ? ' (pinned)' : ''}`)
-    return configAnswer()
+    return next
+  }
+
+  /**
+   * Imports the import file if there is one (see importer.ts), then tests the connection, and
+   * records the outcome for the panel and in the plugin log (`orca plugin logs`), where an agent
+   * can read it. Never logs the file's content.
+   */
+  let importing: Promise<boolean> | undefined
+  /** True when there was a file (imported or refused); a missing file changes no status. */
+  function importConnection(trigger: string): Promise<boolean> {
+    importing ??= (async () => {
+      const result = await takeImport(importPath ?? importFile(), importPlatform)
+      if (result.state === 'none') return false
+      if (result.state === 'refused') {
+        await recordImport(false, result.reason)
+        return true
+      }
+      const { secret, ...fields } = result.connection
+      if (!cleanSecret(secret)) {
+        await recordImport(false, 'The import file has no token secret; nothing was imported.')
+        return true
+      }
+      try {
+        const saved = await saveConnection({ ...fields, secret })
+        let check = ''
+        try {
+          const client = new ProxmoxClient({ connection: saved, secret: secret.trim(), transport, probe })
+          const access = await createSource(saved.kind, client).checkAccess()
+          check = ` Connection test: PDM ${access.version}, ${access.remotes} remotes visible.`
+        } catch (error) {
+          const info = toSourceError(error)
+          check = ` Connection test failed: ${info.kind}: ${info.message}${info.presentedFingerprint ? ` (the server presents ${info.presentedFingerprint})` : ''}`
+        }
+        await recordImport(true, `Imported the connection to ${saved.baseUrl} as ${saved.tokenId}${saved.fingerprint ? ', pinned' : ''} (${trigger}).${check}`)
+      } catch (error) {
+        await recordImport(false, `The import file was read but not saved: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      return true
+    })().finally(() => (importing = undefined))
+    return importing
+  }
+
+  async function recordImport(ok: boolean, message: string): Promise<void> {
+    const status: ImportStatus = { at: clock(), ok, message: scrubLine(message, knownSecrets, 400) }
+    log(`Import: ${status.message}`)
+    await orca.storage.set(IMPORT_STATUS_KEY, status as unknown as JsonValue).catch(() => undefined)
+  }
+
+  orca.panels.handle('config.import', async () => {
+    const found = await importConnection('panel')
+    return { ...(await configAnswer()), found }
   })
+  orca.commands.register('proxmox.importConnection', async () => {
+    if (!(await importConnection('command'))) return `No import file at ${importPath ?? importFile()}.`
+    const status = (await orca.storage.get(IMPORT_STATUS_KEY)) as unknown as ImportStatus | null
+    return status?.message ?? 'Imported.'
+  })
+  void importConnection('start')
 
   orca.panels.handle('config.clear', async () => {
     const current = await loadConnection()

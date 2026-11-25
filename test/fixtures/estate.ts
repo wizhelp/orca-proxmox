@@ -67,7 +67,9 @@ export function fixtureConfig(configured: boolean): ConfigAnswer {
   return {
     connection: configured ? { ...fixtureConnection, hasSecret: true } : null,
     secretsProtection: 'os-keyring',
-    settings: DEFAULT_SETTINGS
+    settings: DEFAULT_SETTINGS,
+    importPath: '~/.config/orca-proxmox-visualizer/connection-import.json',
+    importStatus: null
   }
 }
 

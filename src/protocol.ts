@@ -12,10 +12,16 @@ export type ConnectionInput = {
 
 export type SecretsProtection = 'os-keyring' | 'unavailable' | 'unknown'
 
+/** The last import from the import file: when, whether it worked, and why not. Never its content. */
+export type ImportStatus = { at: number; ok: boolean; message: string }
+
 export type ConfigAnswer = {
   connection: ConnectionView | null
   secretsProtection: SecretsProtection
   settings: PluginSettings
+  /** Where an agent or script puts a connection to import (see docs/AGENT_SETUP.md). */
+  importPath: string
+  importStatus: ImportStatus | null
 }
 
 export type TestAnswer =
@@ -30,6 +36,8 @@ declare module 'orca' {
     'config.save': { input: ConnectionInput; output: ConfigAnswer }
     /** Removes the connection and its stored secret. */
     'config.clear': { output: ConfigAnswer }
+    /** Imports the import file now, if there is one. */
+    'config.import': { output: ConfigAnswer & { found: boolean } }
     /** Tries the given (unsaved) connection: PDM version and how many remotes the token sees. */
     'connection.test': { input: ConnectionInput; output: TestAnswer }
     /**
