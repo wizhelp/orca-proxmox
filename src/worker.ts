@@ -364,6 +364,8 @@ export default function activate(orca: OrcaWorkerApi): void {
     const status = (await orca.storage.get(IMPORT_STATUS_KEY)) as unknown as ImportStatus | null
     return status?.message ?? 'Imported.'
   })
+  // The path is logged (it holds nothing secret) so an agent finds it with `orca plugin logs`.
+  log(`Connection import file: ${importPath ?? importFile()}`)
   void importConnection('start')
 
   orca.panels.handle('config.clear', async () => {
