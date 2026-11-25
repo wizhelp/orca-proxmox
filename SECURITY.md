@@ -37,6 +37,12 @@ token. Without a pin, Node's certificate and hostname checks apply.
   can only use the old secret, so a replacement token is never sent to the previous server; the
   old entry is deleted once reads of it have finished.
 - It is never returned to the panel and never logged.
+- **The import file** (for agents and scripts, see [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md))
+  sits next to the worker's key file. The worker reads it only when it is a regular file (not a
+  link) that, on Linux and macOS, group and others cannot read (on Windows the folder under
+  `%LOCALAPPDATA%` is private to the user). It saves it exactly as the Settings form does
+  (sealed and bound to its endpoint), then overwrites and deletes it; a malformed file is deleted
+  too, an unsafe one left in place and reported. Only the outcome is logged, never the content.
 
 **What leaves the worker.** HTTP errors are described by the plugin itself (path and status),
 never with the server's response body, since a proxy can echo request headers in it. Everything
@@ -75,6 +81,9 @@ text before it is copied.
   Settings form (that is how you set it up); a new endpoint or pin always needs the secret entered
   with it.
 - **The setup form** holds a freshly entered secret in the panel until it is sent to the worker.
+- **The import file holds the secret in plain text** until the worker imports it (normally
+  seconds). Overwriting before deleting does not guarantee that copy-on-write file systems or
+  SSDs drop the old blocks; anyone running as your user can read the file while it exists.
 - **Anyone running as your user account** can read the key file and, through Orca, the sealed
   value; the scheme separates the panel from the worker, not your account from itself.
 - **Server text shown in the panel** (a remote's error, a task's status) is scrubbed, but its

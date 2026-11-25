@@ -8,6 +8,24 @@ clusters and PBS servers, so one read-only API token is all it needs.
 
 It is **read-only**: it only sends `GET` requests, and the token it needs cannot change anything.
 
+## Set it up with your agent
+
+Let your coding agent (Claude Code, Codex, an Orca bot) do the setup: it creates a read-only token
+in PDM, pins the certificate and hands the connection to the plugin, following
+[docs/AGENT_SETUP.md](docs/AGENT_SETUP.md). Give it this prompt:
+
+```text
+Set up the Proxmox plugin for Orca (https://github.com/wizhelp/orca-proxmox) for me, following
+docs/AGENT_SETUP.md in that repository exactly. My Proxmox Datacenter Manager is at
+<https://pdm.example.com:8443>; you can <log in to it as root@pam / ssh to it as root>.
+Never ask me to paste a password or token secret into this chat: open a prompt in a terminal
+for me to type it, and never print it. Show me each change before you make it in PDM. If the
+plugin is not installed yet, install it and tell me the command to approve it.
+```
+
+The agent needs the PDM URL and either an admin login to PDM or SSH to its host. No PDM yet? The
+guide's appendix shows a small setup.
+
 ## Screenshots
 
 Rendered from the bundled example estate (no real servers):
@@ -162,6 +180,11 @@ Open the **Proxmox** panel in Orca's right sidebar, go to **Settings**, and ente
 - **Pinned certificate fingerprint** (optional): `AA:BB:…` (colons and case don't matter)
 
 Press **Test connection**, then **Save**.
+
+Without the panel (an agent or a script): write the same four fields as JSON to the plugin's
+import file, readable by you only, and the plugin imports it, then deletes it; see
+[docs/AGENT_SETUP.md](docs/AGENT_SETUP.md#4-hand-the-connection-to-the-plugin). The path is shown under
+Settings → *Set up from a file*, with an *Import now* button.
 
 Under Orca **Settings → Plugins → Proxmox** you can change the refresh interval (default 30 s),
 the backup age warning (default 26 h) and how often PBS snapshot lists are read (default 5 min;
@@ -331,6 +354,7 @@ src/ui/logic.ts          labels, filters and sorts, tested in Node
 src/arrange.ts           the saved order: moves, drops, the estate in that order
 dev/harness/             the panel in a plain browser with recorded data
 src/worker.ts            config, secrets, request handlers
+src/importer.ts          the one-shot connection import file
 src/vault.ts             sealing the token secret with a worker-only key
 src/scrub.ts             scrubbing what leaves the worker, and the Copy for AI text
 src/features/targets.ts  strict IP and DNS name checks for ssh commands and links
