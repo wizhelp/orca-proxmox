@@ -28,7 +28,7 @@ import { switchArgs, terminalPlan } from './orca/terminal'
 import { Background } from './background'
 import { outboundSnapshot, redactDeep, scrubLine } from './scrub'
 import { fileVault, memoryVault, type Binding, type Vault } from './vault'
-import { importFile, takeImport } from './importer'
+import { cleanupText, importFile, takeImport } from './importer'
 import type { AlertState } from './features/alerts'
 import type { JsonValue } from 'orca/worker'
 
@@ -286,8 +286,11 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   // Saved or removed by hand: an earlier import's outcome no longer applies.
   orca.panels.handle('config.save', async (input) => {
-    await saveConnection(input)
-    await orca.storage.set(IMPORT_STATUS_KEY, null).catch(() => undefined)
+    await withConfigLock(async () => {
+      configEpoch += 1
+      await saveConnection(input)
+      await orca.storage.set(IMPORT_STATUS_KEY, null).catch(() => undefined)
+    })
     return configAnswer()
   })
 
@@ -315,43 +318,93 @@ export default function activate(orca: OrcaWorkerApi): void {
   }
 
   /**
-   * Imports the import file if there is one (see importer.ts), then tests the connection, and
-   * records the outcome for the panel and in the plugin log (`orca plugin logs`), where an agent
-   * can read it. Never logs the file's content.
+   * Imports the import file if there is one (see importer.ts). The candidate is validated field by
+   * field (messages never contain a value) and tested against PDM over its pinned or verified TLS
+   * before anything is saved: a file with a wrong pin or an expired token leaves the working
+   * connection as it was. The outcome, with what became of the file, goes to the panel and the
+   * plugin log (`orca plugin logs`), where an agent can read it; never the file's content.
    */
   let importing: Promise<boolean> | undefined
   /** True when there was a file (imported or refused); a missing file changes no status. */
   function importConnection(trigger: string): Promise<boolean> {
-    importing ??= (async () => {
-      const result = await takeImport(importPath ?? importFile(), importPlatform)
-      if (result.state === 'none') return false
-      if (result.state === 'refused') {
-        await recordImport(false, result.reason)
+    importing ??= importOnce(trigger)
+      .catch(async (error: unknown) => {
+        // Never an unhandled rejection: whatever went wrong becomes a refusal.
+        await recordImport(false, `The import failed (${error instanceof Error ? error.name : 'error'}); nothing was changed.`)
         return true
-      }
-      const { secret, ...fields } = result.connection
-      if (!cleanSecret(secret)) {
-        await recordImport(false, 'The import file has no token secret; nothing was imported.')
-        return true
-      }
-      try {
-        const saved = await saveConnection({ ...fields, secret })
-        let check = ''
-        try {
-          const client = new ProxmoxClient({ connection: saved, secret: secret.trim(), transport, probe })
-          const access = await createSource(saved.kind, client).checkAccess()
-          check = ` Connection test: PDM ${access.version}, ${access.remotes} remotes visible.`
-        } catch (error) {
-          const info = toSourceError(error)
-          check = ` Connection test failed: ${info.kind}: ${info.message}${info.presentedFingerprint ? ` (the server presents ${info.presentedFingerprint})` : ''}`
-        }
-        await recordImport(true, `Imported the connection to ${saved.baseUrl} as ${saved.tokenId}${saved.fingerprint ? ', pinned' : ''} (${trigger}).${check}`)
-      } catch (error) {
-        await recordImport(false, `The import file was read but not saved: ${error instanceof Error ? error.message : String(error)}`)
-      }
-      return true
-    })().finally(() => (importing = undefined))
+      })
+      .finally(() => (importing = undefined))
     return importing
+  }
+
+  async function importOnce(trigger: string): Promise<boolean> {
+    const result = await takeImport(importPath ?? importFile(), { platform: importPlatform, uid: typeof process.getuid === 'function' ? process.getuid() : undefined })
+    if (result.state === 'none') return false
+    if (result.state === 'refused') {
+      await recordImport(false, `${result.reason}${result.cleanup === 'kept' ? ' The file was left in place.' : ''}`)
+      return true
+    }
+    const { secret, ...fields } = result.connection
+    // Known before anything can mention it, so every log and status line masks it exactly.
+    if (secret.trim()) knownSecrets.add(secret.trim())
+    const fileFate = cleanupText(result.cleanup)
+    const problem = importProblem(result.connection)
+    if (problem) {
+      await recordImport(false, `${problem} Nothing was changed. ${fileFate}`)
+      return true
+    }
+    const epoch = configEpoch
+    const candidate: ConnectionConfig = { ...validate({ ...fields, secret }, 'default') }
+    try {
+      const client = new ProxmoxClient({ connection: candidate, secret: secret.trim(), transport, probe })
+      const access = await createSource(candidate.kind, client).checkAccess()
+      const committed = await withConfigLock(async () => {
+        // A save or removal in Settings since the import began wins over it.
+        if (epoch !== configEpoch) return false
+        await saveConnection({ ...fields, secret })
+        return true
+      })
+      if (!committed) {
+        await recordImport(false, `The connection was changed in Settings while the file was imported; the import was dropped. ${fileFate}`)
+        return true
+      }
+      await recordImport(true, `Imported the connection to ${candidate.baseUrl} as ${candidate.tokenId}${candidate.fingerprint ? ', pinned' : ''} (${trigger}). Connection test: PDM ${access.version}, ${access.remotes} remotes visible. ${fileFate}`)
+    } catch (error) {
+      const info = toSourceError(error)
+      await recordImport(
+        false,
+        `The imported connection did not pass the connection test (${info.kind}: ${info.message})${info.presentedFingerprint ? `; the server presents ${info.presentedFingerprint}` : ''}. The current connection was kept. ${fileFate}`
+      )
+    }
+    return true
+  }
+
+  /** What is wrong with an imported connection, by field and without any value; else undefined. */
+  function importProblem(c: { baseUrl: string; tokenId: string; fingerprint: string; secret: string }): string | undefined {
+    const problems: string[] = []
+    try {
+      normalizeBaseUrl(c.baseUrl)
+    } catch {
+      problems.push('baseUrl is not an https:// URL of a server')
+    }
+    if (!TOKEN_ID.test(c.tokenId.trim())) problems.push('tokenId does not look like user@realm!tokenname')
+    if (c.fingerprint.trim() && !normalizeFingerprint(c.fingerprint)) problems.push('fingerprint is not a SHA-256 fingerprint')
+    const secret = c.secret.trim()
+    if (!secret) problems.push('secret is empty')
+    else if (/[\s\x00-\x1f]/.test(secret) || secret.length > 512) problems.push('secret has spaces, control characters or is too long')
+    return problems.length ? `The import file was not imported: ${problems.join('; ')}.` : undefined
+  }
+
+  /**
+   * Manual saves, removals and import commits run one at a time; manual ones advance the epoch,
+   * so an import that started before them does not undo them.
+   */
+  let configEpoch = 0
+  let configChain: Promise<unknown> = Promise.resolve()
+  function withConfigLock<T>(work: () => Promise<T>): Promise<T> {
+    const run = configChain.then(work, work)
+    configChain = run.catch(() => undefined)
+    return run
   }
 
   async function recordImport(ok: boolean, message: string): Promise<void> {
@@ -374,10 +427,13 @@ export default function activate(orca: OrcaWorkerApi): void {
   void importConnection('start')
 
   orca.panels.handle('config.clear', async () => {
-    const current = await loadConnection()
-    await orca.storage.set(CONNECTIONS_KEY, [])
-    await orca.storage.set(IMPORT_STATUS_KEY, null).catch(() => undefined)
-    await switched(current)
+    await withConfigLock(async () => {
+      configEpoch += 1
+      const current = await loadConnection()
+      await orca.storage.set(CONNECTIONS_KEY, [])
+      await orca.storage.set(IMPORT_STATUS_KEY, null).catch(() => undefined)
+      await switched(current)
+    })
     log('Removed the connection and its secret')
     return configAnswer()
   })
