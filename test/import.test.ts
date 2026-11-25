@@ -146,6 +146,43 @@ test('a save in Settings during an import wins over the import', async () => {
   assert.match(config.importStatus!.message, /changed in Settings while the file was imported/)
 })
 
+test('an import that fails after a save in Settings cannot bring back an old status', async () => {
+  const routes = pdmRoutes(NOW)
+  const base = mockTransport(routes)
+  let release: (() => void) | undefined
+  const held = new Promise<void>((r) => (release = r))
+  let reached: (() => void) | undefined
+  const inFlight = new Promise<void>((r) => (reached = r))
+  let first = true
+  const { path, env } = await privateFile(JSON.stringify(GOOD))
+  main.useTestDoubles({
+    transport: async (request) => {
+      if (first && request.url.pathname.endsWith('/version')) {
+        first = false
+        reached!()
+        await held
+        return { status: 401, contentType: 'application/json', body: '{}' } // the imported token fails
+      }
+      return base(request)
+    },
+    probe: async () => PIN,
+    now: () => NOW,
+    vault: memoryVault(),
+    importPath: path,
+    importPlatform: env.platform
+  })
+  worker = await mountWorker(main, { host: mockHost() })
+  const importing = worker.request('config.import')
+  await inFlight
+  const saved = await worker.request('config.save', { baseUrl: 'https://pdm.example.test:8443', tokenId: 'manual@pdm!orca', fingerprint: PIN, secret: OLD_SECRET })
+  assert.equal(saved.importStatus, null, 'the save cleared the status')
+  release!()
+  const config = await importing
+  assert.equal(config.connection?.tokenId, 'manual@pdm!orca')
+  // Not "did not pass the connection test": that verdict is about a superseded attempt.
+  assert.match(config.importStatus!.message, /^The connection was changed in Settings while the file was imported; the import was dropped\. The file was overwritten and deleted\.$/)
+})
+
 test('bad values are named by field, never shown; nothing is changed; the file is deleted', async () => {
   for (const [file, why] of [
     [{ ...GOOD, baseUrl: 'hunter2-not-a-url' }, /baseUrl is not an https:\/\/ URL/],
@@ -191,18 +228,40 @@ test('bad JSON and wrong fields are refused and deleted', async () => {
   }
 })
 
-test('a file or folder others can reach is refused and left in place under its name', async () => {
+test('a refused file is never put back: unsafe before the claim it stays, after it it is removed', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'pdm-import-'))
   const path = join(dir, 'connection-import.json')
   await writeFile(path, JSON.stringify(GOOD), { mode: 0o644 })
   await chmod(path, 0o644)
-  // Judged as on Linux: on Windows modes read as 0o666, so the folder is refused first.
+  // Judged as on Linux. On Windows modes read as 0o666, so the folder is refused before the claim
+  // and the file stays untouched; on a real POSIX folder the file is claimed, wiped and removed.
   const result = await takeImport(path, { platform: 'linux', uid: undefined })
   assert.equal(result.state, 'refused')
   if (result.state !== 'refused') return
   assert.match(result.reason, /other users/i)
-  assert.equal(result.cleanup, 'kept')
-  assert.equal(await readFile(path, 'utf8'), JSON.stringify(GOOD), 'kept under its published name, unread')
+  if (result.cleanup.untouched) {
+    assert.match(cleanupText(result.cleanup), /left as it is at /)
+    assert.equal(await readFile(path, 'utf8'), JSON.stringify(GOOD), 'never claimed, so untouched')
+  } else {
+    assert.deepEqual(result.cleanup, { overwritten: true, removed: true })
+    assert.match(result.reason, /The file was overwritten and deleted./)
+    assert.ok(!existsSync(path), 'not put back under its name')
+  }
+  assert.deepEqual((await readdir(dir)).filter((f) => f.endsWith('.claimed')), [], 'no claimed copy left')
+})
+
+test('a file with another hard link is unlinked, never written, and never put back', async () => {
+  const { path, env } = await privateFile(JSON.stringify(GOOD))
+  const elsewhere = join(await mkdtemp(join(tmpdir(), 'pdm-other-')), 'unrelated.json')
+  const { link } = await import('node:fs/promises')
+  await link(path, elsewhere)
+  const result = await takeImport(path, env)
+  assert.equal(result.state, 'refused')
+  if (result.state !== 'refused') return
+  assert.match(result.reason, /other hard links/)
+  assert.deepEqual(result.cleanup, { overwritten: false, removed: true })
+  assert.equal(await readFile(elsewhere, 'utf8'), JSON.stringify(GOOD), 'the other link is not overwritten')
+  assert.ok(!existsSync(path), 'and nothing is put back under the public name')
 })
 
 test('only one taker gets a file; links and folders are not followed', async () => {
@@ -213,12 +272,13 @@ test('only one taker gets a file; links and folders are not followed', async () 
   const { path: target } = await privateFile(JSON.stringify(GOOD))
   const dir = await mkdtemp(join(tmpdir(), 'pdm-import-'))
   await chmod(dir, 0o700)
-  const link = join(dir, 'connection-import.json')
+  const linkPath = join(dir, 'connection-import.json')
   let linked = true
-  await symlink(target, link).catch(() => (linked = false)) // Windows may not allow links
+  await symlink(target, linkPath).catch(() => (linked = false)) // Windows may not allow links
   if (linked) {
-    const result = await takeImport(link, env)
-    assert.equal(result.state === 'refused' && result.cleanup, 'kept')
+    const result = await takeImport(linkPath, env)
+    assert.equal(result.state, 'refused')
+    if (result.state === 'refused') assert.deepEqual(result.cleanup, { overwritten: false, removed: true })
     assert.equal(await readFile(target, 'utf8'), JSON.stringify(GOOD), 'the link target is untouched')
   }
   const folder = join(dir, 'sub')
@@ -228,29 +288,38 @@ test('only one taker gets a file; links and folders are not followed', async () 
   assert.ok(existsSync(target))
 })
 
-test('what the status says about the file', () => {
-  assert.equal(cleanupText('deleted'), 'The file was overwritten and deleted.')
-  assert.match(cleanupText('not-deleted', 'EBUSY'), /could NOT be deleted \(EBUSY\): delete it by hand, it holds the token secret/)
-  assert.equal(cleanupText('kept'), 'The file was left in place.')
+test('what the status says about the file comes from its final state', () => {
+  assert.equal(cleanupText({ overwritten: true, removed: true }), 'The file was overwritten and deleted.')
+  assert.equal(cleanupText({ overwritten: false, removed: true }), 'The file was deleted, but could not be overwritten first.')
+  assert.equal(
+    cleanupText({ overwritten: true, removed: false, remaining: '/x/.connection-import.json.abc.claimed', code: 'EBUSY' }),
+    'The file could NOT be deleted (EBUSY): it is still at /x/.connection-import.json.abc.claimed and holds the token secret; delete it by hand.'
+  )
+  assert.equal(cleanupText({ untouched: true, path: '/x/connection-import.json' }), 'The file was left as it is at /x/connection-import.json.')
 })
 
-test('the documented Windows PowerShell commands write a file the plugin imports', async () => {
+test('the documented Windows PowerShell steps write a file the plugin imports', async () => {
   if (!ON_WINDOWS) return
   const { execFile } = await import('node:child_process')
   const ps = (script: string) =>
-    new Promise<void>((resolve, reject) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], (e) => (e ? reject(e) : resolve())))
+    new Promise<void>((resolve, reject) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], (e, _o, err) => (e ? reject(new Error(String(err))) : resolve())))
+  // Exactly the guide's block, with its placeholders filled in.
+  const guide = await readFile(new URL('../docs/AGENT_SETUP.md', import.meta.url), 'utf8')
+  const block = /```powershell\n([\s\S]*?)```/.exec(guide)![1]
   for (const how of ['documented', 'set-content']) {
     const dir = await mkdtemp(join(tmpdir(), 'pdm-import-ps-'))
-    const target = join(dir, 'connection-import.json')
+    const target = join(dir, 'plugin', 'connection-import.json')
     const secretFile = join(dir, 'secret.txt')
     await writeFile(secretFile, SECRET)
-    const fields = `$PdmUrl = '${GOOD.baseUrl}'; $Fp = '${PIN}'; $secretFile = '${secretFile}'; $import = '${target}'`
+    const fields = `$PdmUrl = '${GOOD.baseUrl}'; $Fp = '${PIN}'; $secretFile = '${secretFile}'\n`
     const script =
       how === 'documented'
-        ? `${fields}; $secret = (Get-Content -Raw $secretFile).Trim(); $json = @{ baseUrl = $PdmUrl; tokenId = 'monitor@pdm!orca'; fingerprint = $Fp; secret = $secret } | ConvertTo-Json -Compress; [IO.File]::WriteAllText("$import.tmp", $json, (New-Object Text.UTF8Encoding $false)); Move-Item -Force "$import.tmp" $import`
+        ? fields + block.replace("'<path from the log>'", `'${target}'`)
         : // What people often write instead: Windows PowerShell 5.1 adds a byte-order mark here.
-          `${fields}; $secret = (Get-Content -Raw $secretFile).Trim(); @{ baseUrl = $PdmUrl; tokenId = 'monitor@pdm!orca'; fingerprint = $Fp; secret = $secret } | ConvertTo-Json | Set-Content -Encoding utf8 $import`
+          `${fields}; New-Item -ItemType Directory -Force (Split-Path '${target}') | Out-Null; $secret = (Get-Content -Raw $secretFile).Trim(); @{ baseUrl = $PdmUrl; tokenId = 'monitor@pdm!orca'; fingerprint = $Fp; secret = $secret } | ConvertTo-Json | Set-Content -Encoding utf8 '${target}'`
     await ps(script)
+    const left = await readdir(join(dir, 'plugin'))
+    assert.deepEqual(left, ['connection-import.json'], `${how}: only the published file, no temporary one`)
     const result = await takeImport(target, { platform: 'win32', uid: undefined })
     assert.equal(result.state, 'imported', how)
     if (result.state === 'imported') assert.deepEqual(result.connection, GOOD, how)

@@ -338,44 +338,55 @@ export default function activate(orca: OrcaWorkerApi): void {
   }
 
   async function importOnce(trigger: string): Promise<boolean> {
+    // The generation is taken before the file is even looked at: a save or removal in Settings at
+    // any point of the import (reading the file included) wins, and the import then changes
+    // neither the connection nor the status beyond saying it was dropped.
+    const epoch = configEpoch
+    /** Publishes the outcome under the config lock, unless Settings changed meanwhile. */
+    const finish = (ok: boolean, message: string, fileFate: string) =>
+      withConfigLock(async () => {
+        if (epoch !== configEpoch) await recordImport(false, `The connection was changed in Settings while the file was imported; the import was dropped. ${fileFate}`)
+        else await recordImport(ok, message)
+      })
     const result = await takeImport(importPath ?? importFile(), { platform: importPlatform, uid: typeof process.getuid === 'function' ? process.getuid() : undefined })
     if (result.state === 'none') return false
+    const fileFate = cleanupText(result.cleanup)
     if (result.state === 'refused') {
-      await recordImport(false, `${result.reason}${result.cleanup === 'kept' ? ' The file was left in place.' : ''}`)
+      // A refusal after the claim already says what became of the file; before it, say it here.
+      await finish(false, result.cleanup.untouched ? `${result.reason} ${fileFate}` : result.reason, fileFate)
       return true
     }
     const { secret, ...fields } = result.connection
     // Known before anything can mention it, so every log and status line masks it exactly.
     if (secret.trim()) knownSecrets.add(secret.trim())
-    const fileFate = cleanupText(result.cleanup)
     const problem = importProblem(result.connection)
     if (problem) {
-      await recordImport(false, `${problem} Nothing was changed. ${fileFate}`)
+      await finish(false, `${problem} Nothing was changed. ${fileFate}`, fileFate)
       return true
     }
-    const epoch = configEpoch
     const candidate: ConnectionConfig = { ...validate({ ...fields, secret }, 'default') }
+    let access: { version: string; remotes: number }
     try {
       const client = new ProxmoxClient({ connection: candidate, secret: secret.trim(), transport, probe })
-      const access = await createSource(candidate.kind, client).checkAccess()
-      const committed = await withConfigLock(async () => {
-        // A save or removal in Settings since the import began wins over it.
-        if (epoch !== configEpoch) return false
-        await saveConnection({ ...fields, secret })
-        return true
-      })
-      if (!committed) {
-        await recordImport(false, `The connection was changed in Settings while the file was imported; the import was dropped. ${fileFate}`)
-        return true
-      }
-      await recordImport(true, `Imported the connection to ${candidate.baseUrl} as ${candidate.tokenId}${candidate.fingerprint ? ', pinned' : ''} (${trigger}). Connection test: PDM ${access.version}, ${access.remotes} remotes visible. ${fileFate}`)
+      access = await createSource(candidate.kind, client).checkAccess()
     } catch (error) {
       const info = toSourceError(error)
-      await recordImport(
+      await finish(
         false,
-        `The imported connection did not pass the connection test (${info.kind}: ${info.message})${info.presentedFingerprint ? `; the server presents ${info.presentedFingerprint}` : ''}. The current connection was kept. ${fileFate}`
+        `The imported connection did not pass the connection test (${info.kind}: ${info.message})${info.presentedFingerprint ? `; the server presents ${info.presentedFingerprint}` : ''}. The current connection was kept. ${fileFate}`,
+        fileFate
       )
+      return true
     }
+    // Commit and status in one step under the lock, so neither can land after a newer manual change.
+    await withConfigLock(async () => {
+      if (epoch !== configEpoch) {
+        await recordImport(false, `The connection was changed in Settings while the file was imported; the import was dropped. ${fileFate}`)
+        return
+      }
+      await saveConnection({ ...fields, secret })
+      await recordImport(true, `Imported the connection to ${candidate.baseUrl} as ${candidate.tokenId}${candidate.fingerprint ? ', pinned' : ''} (${trigger}). Connection test: PDM ${access.version}, ${access.remotes} remotes visible. ${fileFate}`)
+    })
     return true
   }
 
