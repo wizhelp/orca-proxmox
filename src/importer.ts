@@ -1,19 +1,22 @@
 // A one-shot import file, so an agent (or a script) can hand the plugin its connection without the
 // panel: Orca's CLI has no way to call an installed plugin's worker or write its secrets. The
-// producer writes the file privately and publishes it with an atomic rename (docs/AGENT_SETUP.md);
-// the worker reads it when it starts (`orca plugin restart <key>` + opening the panel), on the
-// palette command and on the panel's button.
+// producer writes the file to a unique, exclusively created name in the same folder and publishes
+// it with a rename (docs/AGENT_SETUP.md); the worker reads it when it starts (`orca plugin restart
+// <key>` + opening the panel), on the palette command and on the panel's button.
 //
 // Consuming it, the worker works on one file only:
 //   1. checks the folder (POSIX: a real directory, owned by this user, not writable by others);
 //   2. claims the file by renaming it to a unique name in the same folder (atomic: of several
-//      workers only one gets it, and a later replacement of the published name is not touched);
+//      workers only one gets it, and a later publication under the public name is not touched);
 //   3. opens the claimed name once, without following links where the OS allows it, and checks
 //      that handle: a regular file with one link, owned by this user and private (POSIX), small;
 //   4. reads at most a bounded number of bytes from that handle;
-//   5. overwrites the file through the same handle and unlinks the claimed name only if it still
-//      is that same file (device and inode), and reports whether that worked.
-// Nothing of the file's content is ever part of a result or a log.
+//   5. removes the claimed file whatever the outcome (a claimed file is never put back): a file
+//      it may touch is first overwritten through the same handle, and the claimed name is
+//      unlinked only while it still is that file (device and inode).
+// What the status says about the file comes from its actual final state: overwritten or not,
+// and whether the claimed name still exists (then with that exact path). Nothing of the file's
+// content is ever part of a result or a log.
 import { constants } from 'node:fs'
 import { lstat, open, rename, unlink, type FileHandle } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
@@ -28,8 +31,14 @@ export function importFile(): string {
 /** What the file holds: the Settings form's fields. */
 export type ImportedConnection = { baseUrl: string; tokenId: string; fingerprint: string; secret: string }
 
-/** What became of the file: removed, left for the person to fix, or found impossible to remove. */
-export type Cleanup = 'deleted' | 'kept' | 'not-deleted'
+/**
+ * The file's final state. `untouched`: never claimed, still under the public name (`path`);
+ * else the claimed copy was `removed` or not (then still at `remaining`), after being
+ * `overwritten` first or not.
+ */
+export type Cleanup =
+  | { untouched: true; path: string }
+  | { untouched?: false; overwritten: boolean; removed: boolean; remaining?: string; code?: string }
 
 export type ImportResult =
   | { state: 'none' }
@@ -43,11 +52,11 @@ const FIELDS = new Set(['baseUrl', 'tokenId', 'fingerprint', 'secret'])
 type Env = { platform: NodeJS.Platform; uid: number | undefined }
 const here = (): Env => ({ platform: process.platform, uid: typeof process.getuid === 'function' ? process.getuid() : undefined })
 
-/** A sentence on what happened to the file, for the status; never its content. */
-export function cleanupText(cleanup: Cleanup, code?: string): string {
-  if (cleanup === 'deleted') return 'The file was overwritten and deleted.'
-  if (cleanup === 'kept') return 'The file was left in place.'
-  return `The file could NOT be deleted${code ? ` (${code})` : ''}: delete it by hand, it holds the token secret.`
+/** A sentence on what became of the file, from its final state; never its content. */
+export function cleanupText(c: Cleanup): string {
+  if (c.untouched) return `The file was left as it is at ${c.path}.`
+  if (c.removed) return c.overwritten ? 'The file was overwritten and deleted.' : 'The file was deleted, but could not be overwritten first.'
+  return `The file could NOT be deleted${c.code ? ` (${c.code})` : ''}: it is still at ${c.remaining} and holds the token secret; delete it by hand.`
 }
 
 /** The text of the file: UTF-8 (a byte-order mark, as Windows PowerShell 5.1 writes, is accepted) or UTF-16 with a byte-order mark. */
@@ -73,49 +82,59 @@ async function folderProblem(dir: string, env: Env): Promise<string | undefined>
   return undefined
 }
 
-/** Puts a refused file back under its published name when that name is free; else leaves it claimed. */
-async function giveBack(claimed: string, path: string): Promise<Cleanup> {
-  try {
-    await lstat(path)
-    return 'kept' // a new file was published meanwhile: leave both, the person sees ours under the claimed name
-  } catch {
-    await rename(claimed, path).catch(() => undefined)
-    return 'kept'
-  }
-}
-
-/** Overwrites through the open handle, then unlinks `claimed` only if it is still that file. */
-async function destroy(handle: FileHandle, claimed: string, dev: number, ino: number, size: number): Promise<{ cleanup: Cleanup; code?: string }> {
-  try {
-    if (size > 0) await handle.write(Buffer.alloc(size), 0, size, 0)
-    await handle.sync()
-  } catch {
-    // Unwritable: still try to remove it.
-  }
-  await handle.close().catch(() => undefined)
-  try {
-    const now = await lstat(claimed)
-    if (now.dev !== dev || now.ino !== ino) return { cleanup: 'not-deleted', code: 'replaced' }
-    await unlink(claimed)
-    return { cleanup: 'deleted' }
-  } catch (error) {
-    return { cleanup: 'not-deleted', code: (error as NodeJS.ErrnoException).code ?? 'error' }
-  }
+/** The claimed name's final state: gone, or still there (with its path). */
+async function finalState(claimed: string, overwritten: boolean, code?: string): Promise<Cleanup> {
+  const gone = await lstat(claimed).then(
+    () => false,
+    (error: NodeJS.ErrnoException) => error.code === 'ENOENT'
+  )
+  return gone ? { overwritten, removed: true } : { overwritten, removed: false, remaining: claimed, ...(code ? { code } : {}) }
 }
 
 /**
- * Takes the import file, if there is one (see the steps at the top). A file whose type, owner,
- * permissions, links or size are wrong is refused and left in place; one that was read is always
- * overwritten and deleted, whether its content is usable or not.
+ * Removes the claimed file. With `handle` and `wipe`, overwrites it through that handle first and
+ * checks every byte was written and synced. Unlinks the claimed name only while it is still the
+ * file that was checked (`dev`/`ino`); a link or a foreign file is unlinked, never written.
+ */
+async function removeClaimed(claimed: string, id: { dev: number; ino: number } | undefined, handle?: FileHandle, wipe = 0): Promise<Cleanup> {
+  let overwritten = false
+  if (handle) {
+    if (wipe > 0) {
+      try {
+        const { bytesWritten } = await handle.write(Buffer.alloc(wipe), 0, wipe, 0)
+        await handle.sync()
+        overwritten = bytesWritten === wipe
+      } catch {
+        overwritten = false
+      }
+    }
+    await handle.close().catch(() => undefined)
+  }
+  let code: string | undefined
+  try {
+    const now = await lstat(claimed)
+    if (id && (now.dev !== id.dev || now.ino !== id.ino)) code = 'replaced'
+    else await unlink(claimed)
+  } catch (error) {
+    code = (error as NodeJS.ErrnoException).code ?? 'error'
+  }
+  return finalState(claimed, overwritten, code)
+}
+
+/**
+ * Takes the import file, if there is one (see the steps at the top). Before the claim, a problem
+ * leaves the file untouched under its public name; after it, the claimed file is always removed
+ * (overwritten first when it is a plain private file of ours), whether it is used or refused.
  */
 export async function takeImport(path = importFile(), env: Env = here()): Promise<ImportResult> {
+  const untouched: Cleanup = { untouched: true, path }
   const folder = await folderProblem(dirname(path), env)
-  if (folder) return { state: 'refused', reason: folder, cleanup: 'kept' }
+  if (folder) return { state: 'refused', reason: folder, cleanup: untouched }
   try {
     await lstat(path)
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
-    return code === 'ENOENT' || code === 'ENOTDIR' ? { state: 'none' } : { state: 'refused', reason: `The import file cannot be checked (${code ?? 'error'}).`, cleanup: 'kept' }
+    return code === 'ENOENT' || code === 'ENOTDIR' ? { state: 'none' } : { state: 'refused', reason: `The import file cannot be checked (${code ?? 'error'}).`, cleanup: untouched }
   }
   // 2. Claim it: one atomic rename; whoever loses finds nothing.
   const claimed = join(dirname(path), `.${basename(path)}.${randomBytes(6).toString('hex')}.claimed`)
@@ -125,53 +144,60 @@ export async function takeImport(path = importFile(), env: Env = here()): Promis
     const code = (error as NodeJS.ErrnoException).code
     // Another taker got it first (Windows may say EPERM rather than ENOENT while it moves).
     if (code === 'ENOENT' || !(await lstat(path).then(() => true, () => false))) return { state: 'none' }
-    return { state: 'refused', reason: `The import file cannot be taken (${code ?? 'error'}); it may be open in another program.`, cleanup: 'kept' }
+    return { state: 'refused', reason: `The import file cannot be taken (${code ?? 'error'}); it may be open in another program.`, cleanup: untouched }
   }
+  // From here on the claimed file is ours to remove, whatever happens.
+  let before
+  try {
+    before = await lstat(claimed)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { state: 'none' } // a concurrent taker (Windows)
+    throw error
+  }
+  const refuse = async (reason: string, cleanup: Cleanup): Promise<ImportResult> => ({ state: 'refused', reason: `${reason} ${cleanupText(cleanup)}`, cleanup })
+  if (before.isSymbolicLink()) return refuse('The import file is a link; it was not read.', await removeClaimed(claimed, before))
   // 3. One open, without following a link where the OS can refuse it.
   const nofollow = env.platform === 'win32' ? 0 : (constants.O_NOFOLLOW ?? 0)
   let handle: FileHandle
   try {
-    if (env.platform === 'win32' && (await lstat(claimed)).isSymbolicLink()) {
-      return { state: 'refused', reason: 'The import file is a link; it was not read.', cleanup: await giveBack(claimed, path) }
-    }
     handle = await open(claimed, constants.O_RDWR | nofollow)
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
-    // Gone under our claimed name: a concurrent taker got it (Windows can report both renames as done).
     if (code === 'ENOENT') return { state: 'none' }
     const reason = code === 'ELOOP' || code === 'EMLINK' ? 'The import file is a link; it was not read.' : `The import file cannot be opened (${code ?? 'error'}).`
-    return { state: 'refused', reason, cleanup: await giveBack(claimed, path) }
+    return refuse(reason, await removeClaimed(claimed, before))
   }
   const info = await handle.stat()
-  const refuse = async (reason: string): Promise<ImportResult> => {
-    await handle.close().catch(() => undefined)
-    return { state: 'refused', reason, cleanup: await giveBack(claimed, path) }
+  const id = { dev: info.dev, ino: info.ino }
+  // Not a plain file of ours: unlinked, never written (writing could reach another file).
+  const foreign = async (reason: string) => refuse(reason, await removeClaimed(claimed, id, handle))
+  if (!info.isFile()) return foreign('The import file is not a regular file; it was not read.')
+  if (info.nlink !== 1) return foreign('The import file has other hard links; it was not read.')
+  if (env.platform !== 'win32' && env.uid !== undefined && info.uid !== env.uid) return foreign('The import file belongs to another user; it was not read.')
+  // Ours but unsafe or too large: overwritten and removed, as it may hold a secret others could read.
+  const wipeSize = Math.min(info.size, MAX_BYTES * 4)
+  if (env.platform !== 'win32' && (info.mode & 0o077) !== 0) {
+    return refuse('The import file could be read by other users; it was not used. Write it private (chmod 600) and import again.', await removeClaimed(claimed, id, handle, wipeSize))
   }
-  if (!info.isFile()) return refuse('The import file is not a regular file; it was not read.')
-  if (info.nlink !== 1) return refuse('The import file has other hard links; it was not read.')
-  if (env.platform !== 'win32') {
-    if (env.uid !== undefined && info.uid !== env.uid) return refuse('The import file belongs to another user; it was not read.')
-    if ((info.mode & 0o077) !== 0) return refuse('The import file can be read by other users; it was not read. Make it private (chmod 600) and import again.')
-  }
-  if (info.size > MAX_BYTES) return refuse('The import file is too large to be a connection; it was not read.')
+  if (info.size > MAX_BYTES) return refuse('The import file is too large to be a connection; it was not read.', await removeClaimed(claimed, id, handle, wipeSize))
   // 4. A bounded read from the handle that was checked.
   const buffer = Buffer.alloc(MAX_BYTES + 1)
   let length = 0
   try {
     length = (await handle.read(buffer, 0, buffer.length, 0)).bytesRead
   } catch (error) {
-    const done = await destroy(handle, claimed, info.dev, info.ino, info.size)
-    return { state: 'refused', reason: `The import file cannot be read (${(error as NodeJS.ErrnoException).code ?? 'error'}). ${cleanupText(done.cleanup, done.code)}`, cleanup: done.cleanup }
+    return refuse(`The import file cannot be read (${(error as NodeJS.ErrnoException).code ?? 'error'}).`, await removeClaimed(claimed, id, handle, info.size))
   }
-  const done = await destroy(handle, claimed, info.dev, info.ino, Math.max(info.size, length))
+  // 5. Gone before its content is even parsed.
+  const cleanup = await removeClaimed(claimed, id, handle, Math.max(info.size, length))
   const bytes = buffer.subarray(0, length)
   buffer.fill(0, length)
-  if (length > MAX_BYTES) return { state: 'refused', reason: `The import file is too large to be a connection. ${cleanupText(done.cleanup, done.code)}`, cleanup: done.cleanup }
+  if (length > MAX_BYTES) return refuse('The import file is too large to be a connection.', cleanup)
   let raw: unknown
   try {
     raw = JSON.parse(decodeImport(bytes))
   } catch {
-    return { state: 'refused', reason: `The import file is not valid JSON (write it completely to a temporary name, then rename it). ${cleanupText(done.cleanup, done.code)}`, cleanup: done.cleanup }
+    return refuse('The import file is not valid JSON (write it completely to a temporary name, then rename it).', cleanup)
   } finally {
     bytes.fill(0)
   }
@@ -182,9 +208,7 @@ export async function takeImport(path = importFile(), env: Env = here()): Promis
     Object.keys(raw).every((k) => FIELDS.has(k)) &&
     ['baseUrl', 'tokenId', 'secret'].every((k) => typeof (raw as Record<string, unknown>)[k] === 'string') &&
     ['undefined', 'string'].includes(typeof (raw as Record<string, unknown>).fingerprint)
-  if (!ok) {
-    return { state: 'refused', reason: `The import file must be a JSON object with baseUrl, tokenId, secret and optionally fingerprint, all strings. ${cleanupText(done.cleanup, done.code)}`, cleanup: done.cleanup }
-  }
+  if (!ok) return refuse('The import file must be a JSON object with baseUrl, tokenId, secret and optionally fingerprint, all strings.', cleanup)
   const r = raw as Record<string, string>
-  return { state: 'imported', connection: { baseUrl: r.baseUrl, tokenId: r.tokenId, fingerprint: r.fingerprint ?? '', secret: r.secret }, cleanup: done.cleanup }
+  return { state: 'imported', connection: { baseUrl: r.baseUrl, tokenId: r.tokenId, fingerprint: r.fingerprint ?? '', secret: r.secret }, cleanup }
 }
