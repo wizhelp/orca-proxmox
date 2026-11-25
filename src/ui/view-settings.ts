@@ -126,7 +126,8 @@ export function settingsView(): HTMLElement {
       : test
         ? errorCallout(test.error, { pin: pinFingerprint, openSettings: () => actions.setTab('settings') })
         : null,
-    cfg?.importStatus
+    // The last import's outcome, for a day.
+    cfg?.importStatus && Date.now() - cfg.importStatus.at < 86_400_000
       ? callout(cfg.importStatus.ok ? 'ok' : 'bad', cfg.importStatus.ok ? 'Imported from a file' : 'The import file was not imported', `${cfg.importStatus.message} (${new Date(cfg.importStatus.at).toLocaleString()})`)
       : null,
     h(

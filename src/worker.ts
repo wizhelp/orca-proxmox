@@ -284,7 +284,12 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   orca.panels.handle('config.get', () => configAnswer())
 
-  orca.panels.handle('config.save', (input) => saveConnection(input).then(() => configAnswer()))
+  // Saved or removed by hand: an earlier import's outcome no longer applies.
+  orca.panels.handle('config.save', async (input) => {
+    await saveConnection(input)
+    await orca.storage.set(IMPORT_STATUS_KEY, null).catch(() => undefined)
+    return configAnswer()
+  })
 
   /** Saves a connection as the Settings form does: new revision, sealed and bound secret, switch. */
   async function saveConnection(input: ConnectionInput): Promise<ConnectionConfig> {
@@ -371,6 +376,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('config.clear', async () => {
     const current = await loadConnection()
     await orca.storage.set(CONNECTIONS_KEY, [])
+    await orca.storage.set(IMPORT_STATUS_KEY, null).catch(() => undefined)
     await switched(current)
     log('Removed the connection and its secret')
     return configAnswer()
