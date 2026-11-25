@@ -240,7 +240,7 @@ mkdir -p "$DIR" && chmod 700 "$DIR"
 [ -e "$IMPORT" ] && { echo "An earlier import file is still waiting: import it first."; exit 1; }
 TMP=$(mktemp "$DIR/.connection-import.XXXXXXXX")        # new, unique, 0600, created exclusively
 trap 'rm -rf "$WORK" "$LOCAL"; rm -f "$TMP"' EXIT INT TERM HUP
-PDM_URL="$PDM_URL" FP="AB:CD:…" python3 - "$WORK/secret" "$TMP" "$IMPORT" <<'PY'
+PDM_URL="$PDM_URL" FP="AB:CD:…" python3 - "$WORK/secret" "$TMP" "$IMPORT" <<'PY' || { echo "Publishing failed: the secret is kept in $WORK/secret, nothing was removed."; exit 1; }
 import json, os, sys
 secret_file, tmp, target = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(tmp, "w", encoding="utf-8") as f:   # the file mktemp just created, private to you
@@ -252,31 +252,54 @@ PY
 rm -f "$WORK/secret"
 ```
 
-Windows (Windows PowerShell 5.1 or PowerShell 7). The folder is made private to you (and
-SYSTEM) first, the file is created exclusively under a new unique name, written as UTF-8 without a
-byte-order mark (the plugin also accepts one), and only then renamed, without replacing anything:
+Windows (Windows PowerShell 5.1 or PowerShell 7). First the folder's access list is **replaced**
+by exactly two entries, you and SYSTEM (nothing inherited, no other explicit entry kept), and
+checked; then the file is created exclusively under a new unique name, its own access list checked
+the same way, written as UTF-8 without a byte-order mark (the plugin also accepts one), and only
+then renamed, without replacing anything. The secret file is removed only once the rename worked:
 
 ```powershell
+$ErrorActionPreference = 'Stop'
 $import = '<path from the log>'; $dir = Split-Path $import
 New-Item -ItemType Directory -Force $dir | Out-Null
 $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-icacls $dir /inheritance:r /grant:r "*$($me):(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Could not make the import folder private.' }
+$allowed = @($me, 'S-1-5-18')   # you and SYSTEM
+# Replace the folder's access list: protected (nothing inherited), every existing entry removed,
+# then full control for exactly the allowed accounts, inherited by what is created inside.
+$acl = Get-Acl -LiteralPath $dir
+$acl.SetAccessRuleProtection($true, $false)
+foreach ($rule in @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) { $acl.PurgeAccessRules($rule.IdentityReference) }
+foreach ($sid in $allowed) {
+  $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule (
+    (New-Object Security.Principal.SecurityIdentifier $sid), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+}
+Set-Acl -LiteralPath $dir -AclObject $acl
+function Assert-Private($path) {   # protected, and no entry for anyone else
+  $check = Get-Acl -LiteralPath $path
+  $rules = $check.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+  $others = @($rules | Where-Object { $allowed -notcontains $_.IdentityReference.Value })
+  if (-not $check.AreAccessRulesProtected -and $path -eq $dir) { throw "$path still inherits access: stop." }
+  if ($others.Count -gt 0) { throw "$path is not private (others have access): stop." }
+}
+Assert-Private $dir
 if (Test-Path -LiteralPath $import) { throw 'An earlier import file is still waiting: import it first.' }
 $tmp = Join-Path $dir ('.connection-import.' + [guid]::NewGuid().ToString('N') + '.tmp')
 $stream = [IO.File]::Open($tmp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
 try {
+  $stream.Dispose(); Assert-Private $tmp   # checked before any secret goes in
+  $stream = [IO.File]::Open($tmp, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
   $secret = (Get-Content -Raw $secretFile).Trim()
   $json = @{ baseUrl = $PdmUrl; tokenId = 'monitor@pdm!orca'; fingerprint = $Fp; secret = $secret } | ConvertTo-Json -Compress
   $bytes = (New-Object Text.UTF8Encoding $false).GetBytes($json)
-  $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true)
-} catch { $stream.Dispose(); Remove-Item -LiteralPath $tmp -Force; throw } finally { $stream.Dispose() }
-Move-Item -LiteralPath $tmp -Destination $import
+  $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true); $stream.Dispose()
+  Move-Item -LiteralPath $tmp -Destination $import
+} catch { $stream.Dispose(); Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; throw }
 Remove-Variable secret, json, bytes; Remove-Item -LiteralPath $secretFile
 ```
 
-On Windows the plugin itself does not inspect file permissions (ACLs); the step above makes the
-folder private, and the file inherits that. Do not use a shared or redirected folder.
+On Windows the plugin itself does not inspect file permissions (ACLs): the step above is what
+makes and checks the folder and the file private, and it stops if either has an entry for anyone
+but you and SYSTEM. Do not use a shared or redirected folder.
 
 The file holds exactly `baseUrl`, `tokenId`, `secret` and optionally `fingerprint`, all strings.
 The plugin refuses a file in a folder it cannot trust (a link, another owner, others can write

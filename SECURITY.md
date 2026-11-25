@@ -38,17 +38,21 @@ token. Without a pin, Node's certificate and hostname checks apply.
   old entry is deleted once reads of it have finished.
 - It is never returned to the panel and never logged.
 - **The import file** (for agents and scripts, see [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md))
-  sits next to the worker's key file. The producer makes the folder private, writes the file to a
-  new, unique name created exclusively in it (`mktemp`; `FileMode.CreateNew` on Windows) and then
-  renames it into place. The worker claims it with an atomic rename to a unique name (so of several
+  sits next to the worker's key file. The producer makes the folder private (on Windows: its
+  access list replaced by exactly you and SYSTEM, nothing inherited, and checked, as is the new
+  file's), writes the file to a new, unique name created exclusively in it (`mktemp`;
+  `FileMode.CreateNew` on Windows) and then renames it into place, removing its own copy of the
+  secret only once that worked. The worker claims it with an atomic rename to a unique name (so of several
   workers one gets it, and a file published later is not touched), opens it once without
   following links where the OS allows, and checks that handle: a regular file with a single
   link, within a size bound, and on Linux and macOS owned by the user, not readable by others,
   in a folder owned by the user that others cannot write to. A claimed file is **never put back**:
   it is read from that handle (when it can be trusted) and then removed in every case, wiped
   through the same handle first when it is a plain file of the user's, and unlinked only while the
-  claimed name is still that file. The status is built from the file's final state: overwritten or
-  not, removed or still present (then with its exact path). The connection is validated field by
+  claimed name is still that file; any error after the claim goes through the same cleanup. The
+  status says what became of the file in a part of its own, never shortened, built from the file's
+  final state: "wiped" only when every byte was overwritten through the checked handle and synced
+  (else "in part" or "not wiped"), and removed or still present, then always with its exact path. The connection is validated field by
   field (messages never contain values) and **tested against PDM before it replaces the current
   one**; on failure the current connection stays. A save or removal in Settings at any time during
   an import, reading the file included, wins: the import then changes neither the connection nor
@@ -98,9 +102,10 @@ text before it is copied.
   SSDs drop the old blocks; anyone running as your user can read the file while it exists. If the
   status says it could not be deleted (for example another program holds it open), delete it by
   hand.
-- **On Windows the import file's permissions are not checked**: the plugin does not read ACLs,
-  relies on the folder under your profile being private (do not redirect it to a shared place),
-  and Windows cannot open a file "without following links", so a link is detected by a check just
+- **On Windows the import file's permissions are not checked by the plugin**: it does not read
+  ACLs; the documented producer step sets and verifies them (only you and SYSTEM), so a file
+  written another way relies on the folder being private (do not redirect it to a shared place).
+  Windows cannot open a file "without following links", so a link is detected by a check just
   before opening, which leaves a short race for a process already running as you.
 - **Anyone running as your user account** can read the key file and, through Orca, the sealed
   value; the scheme separates the panel from the worker, not your account from itself.
