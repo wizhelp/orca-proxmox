@@ -1,0 +1,151 @@
+{
+  "manifestVersion": 2,
+  "id": "proxmox-visualizer",
+  "name": "Proxmox",
+  "version": "0.1.0",
+  "description": "A Proxmox estate in Orca through Proxmox Datacenter Manager: hosts and guests with live charts, tasks, backups and where Orca runs; alerts and a status-bar summary; read-only.",
+  "author": {
+    "name": "Yanko"
+  },
+  "repository": "https://github.com/wizhelp/orca-proxmox",
+  "homepage": "https://github.com/wizhelp/orca-proxmox",
+  "license": "MIT",
+  "icon": "docs/listing/icon.png",
+  "cover": {
+    "path": "docs/listing/cover.png",
+    "alt": "Proxmox for Orca: the panel with host cards in the light theme and the estate tree in the dark theme, from an example estate"
+  },
+  "screenshots": [
+    {
+      "path": "docs/listing/screenshot-1.png",
+      "alt": "Host cards with CPU, memory and network charts; the estate tree in the dark theme; the guests table with one guest opened",
+      "caption": "Hosts, the estate tree and guests"
+    },
+    {
+      "path": "docs/listing/screenshot-2.png",
+      "alt": "Tasks of every remote with two failed backups; where a new VM fits, best node first; Orca hosts placed on their Proxmox nodes",
+      "caption": "Tasks, the placement planner and where Orca runs"
+    },
+    {
+      "path": "docs/listing/screenshot-3.png",
+      "alt": "The Copy for AI preview without addresses; backups by age; the settings form with a read-only token and a pinned fingerprint",
+      "caption": "Copy for AI, backups and a read-only setup"
+    }
+  ],
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "proxmox",
+        "title": "Proxmox",
+        "icon": "database",
+        "entry": "src/ui/index.html"
+      }
+    ],
+    "settings": [
+      {
+        "key": "refreshSeconds",
+        "title": "Refresh interval (seconds)",
+        "description": "How often the open panel reloads the estate.",
+        "type": "integer",
+        "default": 30,
+        "minimum": 10,
+        "maximum": 3600
+      },
+      {
+        "key": "backupStaleHours",
+        "title": "Backup age warning (hours)",
+        "description": "A guest whose newest PBS snapshot is older than this is flagged.",
+        "type": "integer",
+        "default": 26,
+        "minimum": 1,
+        "maximum": 2160
+      },
+      {
+        "key": "backupRefreshMinutes",
+        "title": "Backup scan interval (minutes)",
+        "description": "How often PBS snapshot lists are read; they are the slowest part of a refresh.",
+        "type": "integer",
+        "default": 5,
+        "minimum": 1,
+        "maximum": 1440
+      },
+      {
+        "key": "orcaAwareness",
+        "title": "Show where Orca runs",
+        "description": "Mark the hosts and guests that run Orca, with their bots and workspaces. Read with the orca CLI that comes with Orca, since the plugin API does not list hosts or bots yet; also reads node networks and guest configs for addresses.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "statusBar",
+        "title": "Status bar item",
+        "description": "Show remotes up and the main issue (stale backups, failed tasks, filling disks) in the status bar; pressing it opens the panel.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "alertRemoteOffline",
+        "title": "Alert: remote unreachable",
+        "description": "Notify when a remote stays unreachable for two refreshes.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "alertGuestStopped",
+        "title": "Alert: guest stopped",
+        "description": "Notify when a guest that was running is no longer running (two refreshes in a row).",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "alertBackupFailed",
+        "title": "Alert: backup failed",
+        "description": "Notify when a backup task (vzdump or PBS backup) fails.",
+        "type": "boolean",
+        "default": true
+      },
+      {
+        "key": "alertBackupStale",
+        "title": "Alert: backup stale",
+        "description": "Notify when a guest's newest backup becomes older than the backup age warning.",
+        "type": "boolean",
+        "default": true
+      }
+    ],
+    "commands": [
+      {
+        "id": "proxmox.openPanel",
+        "title": "Proxmox: Show the estate panel"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "estate",
+        "text": "Proxmox",
+        "icon": "database",
+        "tooltip": "Proxmox: not loaded yet",
+        "command": "proxmox.openPanel"
+      }
+    ]
+  },
+  "capabilities": [
+    {
+      "kind": "storage:own"
+    },
+    {
+      "kind": "secrets:own"
+    },
+    {
+      "kind": "settings:own"
+    },
+    {
+      "kind": "notifications:show"
+    }
+  ]
+}

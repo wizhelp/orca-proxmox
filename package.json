@@ -1,0 +1,25 @@
+{
+  "name": "proxmox-visualizer",
+  "private": true,
+  "description": "Development tooling only: Orca loads the plugin from its sources with no build step.",
+  "author": "Yanko",
+  "license": "MIT",
+  "homepage": "https://github.com/wizhelp/orca-proxmox",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wizhelp/orca-proxmox.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wizhelp/orca-proxmox/issues"
+  },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "orca plugin test . --json",
+    "validate": "orca plugin validate . --json",
+    "harness": "node dev/harness/build.mjs && node dev/harness/out/serve.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

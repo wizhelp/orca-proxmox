@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Proxmox listing images</title>
+    <!--
+      Marketplace images from the example estate: ?shot=1..3 places three panels side by side
+      (1280×800), ?shot=cover the cover (1600×1000), ?shot=icon the icon (256×256). Each panel is
+      the harness page in a same-origin frame, driven into a scene. Served by `npm run harness`.
+    -->
+    <style>
+      html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+      body { background: linear-gradient(135deg, #e8eef9 0%, #f6f3ee 100%); display: flex; flex-direction: column; }
+      body.dark { background: linear-gradient(135deg, #111827 0%, #1f2937 100%); color: #f4f4f5; }
+      .row { display: flex; gap: 22px; justify-content: center; align-items: flex-start; padding: 20px 26px 0; }
+      .frame { position: relative; border-radius: 12px; overflow: hidden; box-shadow: 0 14px 40px rgba(15, 23, 42, 0.22); background: #fff; }
+      .frame iframe { display: block; border: 0; width: 100%; height: 100%; }
+      .label { font-size: 15px; font-weight: 600; color: #334155; text-align: center; margin: 0 0 8px; letter-spacing: -0.01em; }
+      body.dark .label { color: #cbd5e1; }
+      .head { padding: 34px 48px 0; }
+      .head h1 { margin: 0; font-size: 44px; letter-spacing: -0.03em; color: #0f172a; display: flex; align-items: center; gap: 16px; }
+      .head p { margin: 10px 0 0; font-size: 20px; color: #475569; max-width: 1100px; }
+      .icon { width: 256px; height: 256px; display: grid; place-items: center; background: transparent; }
+      .icon-tile { width: 256px; height: 256px; border-radius: 0; display: grid; place-items: center; background: linear-gradient(145deg, #e8572a 0%, #c2410c 100%); box-shadow: inset 0 -6px 0 rgba(0, 0, 0, 0.12); }
+    </style>
+  </head>
+  <body>
+    <script type="module">
+      const params = new URLSearchParams(location.search)
+      const shot = params.get('shot') ?? '1'
+      const SHOTS = {
+        1: [['cards', 'light', 'Hosts with live charts'], ['tree', 'dark', 'The estate as a tree, dark theme'], ['guests', 'light', 'Every guest, with its actions']],
+        2: [['tasks', 'dark', 'Tasks of every remote'], ['planner', 'light', 'Where a new VM fits'], ['orca', 'light', 'Where Orca runs']],
+        3: [['ai', 'light', 'Copy for AI, previewed'], ['backups', 'light', 'Backups by age'], ['settings', 'dark', 'A read-only token, pinned TLS']],
+        cover: [['cards', 'light', ''], ['tree', 'dark', '']]
+      }
+      const GLYPH =
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" width="SIZE" height="SIZE"><path d="M3 5c0 1.66 4 3 9 3s9-1.34 9-3-4-3-9-3-9 1.34-9 3z"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>'
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+
+      if (shot === 'icon') {
+        document.body.style.background = 'transparent'
+        document.body.innerHTML = `<div class="icon"><div class="icon-tile">${GLYPH.replace(/SIZE/g, '150')}</div></div>`
+        window.__ready = true
+      } else {
+        const cover = shot === 'cover'
+        if (cover) {
+          const head = document.createElement('div')
+          head.className = 'head'
+          head.innerHTML = `<h1><span class="icon-tile" style="width:56px;height:56px;border-radius:14px">${GLYPH.replace(/SIZE/g, '36')}</span>Proxmox for Orca</h1><p>Your Proxmox estate in Orca's sidebar through Proxmox Datacenter Manager: hosts and guests with live charts, backups, tasks, alerts and where Orca runs. Read-only.</p>`
+          document.body.appendChild(head)
+        }
+        const row = document.createElement('div')
+        row.className = 'row'
+        document.body.appendChild(row)
+        const frames = []
+        for (const [scene, theme, label] of SHOTS[shot]) {
+          const col = document.createElement('div')
+          if (label) col.innerHTML = `<p class="label">${label}</p>`
+          const box = document.createElement('div')
+          box.className = 'frame'
+          box.style.width = cover ? '560px' : '392px'
+          box.style.height = cover ? '760px' : '730px'
+          const iframe = document.createElement('iframe')
+          iframe.src = theme === 'dark' ? './dark.html' : './index.html'
+          box.appendChild(iframe)
+          col.appendChild(box)
+          row.appendChild(col)
+          frames.push({ iframe, scene })
+        }
+        await Promise.all(frames.map((f) => new Promise((r) => f.iframe.addEventListener('load', r, { once: true }))))
+        await wait(900)
+        for (const { iframe, scene } of frames) await setUp(iframe.contentWindow, iframe.contentDocument, scene)
+        window.__ready = true
+      }
+
+      async function setUp(win, doc, scene) {
+        const tab = (name) => [...doc.querySelectorAll('[role=tab]')].find((t) => [t.textContent, t.getAttribute('aria-label'), t.title].some((s) => (s || '').includes(name)))?.click()
+        const btn = (re) => [...doc.querySelectorAll('button')].find((b) => re.test(b.textContent || ''))?.click()
+        if (scene === 'cards') { tab('Hosts'); await wait(150); btn(/^\s*Cards/) }
+        if (scene === 'tree') { tab('Hosts'); await wait(150); btn(/^\s*Tree/) }
+        if (scene === 'planner') {
+          tab('Hosts'); await wait(150)
+          const d = [...doc.querySelectorAll('details')].find((x) => /new VM go/.test(x.textContent || ''))
+          d?.querySelector('summary')?.click()
+          await wait(150)
+          if (d && !d.open) d.open = true
+        }
+        if (scene === 'guests') {
+          tab('Guests'); await wait(250)
+          ;[...doc.querySelectorAll('tr, .row, [role=row]')].find((e) => /vm-pve-a-320/.test(e.textContent || ''))?.click()
+        }
+        if (scene === 'tasks') tab('Tasks')
+        if (scene === 'orca') tab('Orca')
+        if (scene === 'backups') tab('Backups')
+        if (scene === 'settings') tab('Settings')
+        if (scene === 'ai') {
+          const menu = doc.querySelector('details.menu')
+          if (menu) menu.open = true
+          await wait(100)
+          btn(/Without addresses/)
+        }
+        await wait(300)
+        win.scrollTo(0, 0)
+      }
+    </script>
+  </body>
+</html>
