@@ -158,7 +158,10 @@ const GiB = 1024 ** 3
 /** Memory kept free for the host itself. */
 const MEM_RESERVE = 0.1
 
-/** Every node, best place for the VM first; nodes where it does not fit last. */
+/**
+ * Every node, best place for the VM first: fits with verified disk space, then fits for memory and
+ * CPU (disk only likely), each by score; nodes where it does not fit last.
+ */
 export function placeVm(snap: EstateSnapshot, req: VmRequest): Placement[] {
   return capacities(snap)
     .map((c) => {
@@ -191,5 +194,5 @@ export function placeVm(snap: EstateSnapshot, req: VmRequest): Placement[] {
       const score = fits ? Math.min(1, memAfter / c.memTotal) * 0.5 + (c.diskCheck === 'unknown' ? 0 : Math.min(1, diskAfter / Math.max(disk, GiB) / 10) * 0.3) + Math.max(0, coresAfter / Math.max(1, c.cores)) * 0.2 - (overCommitted ? 0.2 : 0) : -1
       return { ...c, fits, notes, score, confirmed: fits && c.diskCheck === 'verified' }
     })
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => Number(b.confirmed) - Number(a.confirmed) || b.score - a.score)
 }

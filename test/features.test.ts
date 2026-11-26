@@ -61,7 +61,7 @@ test('free capacity per node and where a new VM fits best', async () => {
   assert.equal(a.diskStorage, 'local', 'the PBS mount is not a place for guest disks')
   const ranked = placeVm(snap, { cores: 4, memGiB: 16, diskGiB: 100 })
   assert.ok(ranked[0].fits)
-  assert.ok(ranked.every((p, i) => i === 0 || ranked[i - 1].score >= p.score))
+  assert.ok(ranked.every((p, i) => i === 0 || Number(ranked[i - 1].confirmed) > Number(p.confirmed) || (ranked[i - 1].confirmed === p.confirmed && ranked[i - 1].score >= p.score)))
   const huge = placeVm(snap, { cores: 64, memGiB: 512, diskGiB: 4096 })
   assert.ok(huge.every((p) => !p.fits))
   assert.ok(huge[0].notes.includes('not enough free memory'))
@@ -233,4 +233,14 @@ test('the planner on PDM-shaped nodes (no content types): every core, short stor
   // Fits nowhere: every node says why.
   const huge = placeVm(snap, { cores: 64, memGiB: 512, diskGiB: 5000 })
   assert.ok(huge.every((p) => !p.fits && p.notes.includes('not enough free memory') && p.notes.some((n) => n.startsWith('only '))))
+})
+
+test('a fit with verified disk space ranks before one whose storage is only likely', async () => {
+  const snap = clone(await renamedEstate())
+  // One node's storages report their content types; the others are known by name only.
+  const typed = snap.hosts.find((h) => h.node === 'pve-b')!
+  typed.storages = (typed.storages ?? []).map((s) => ({ ...s, content: s.name.startsWith('pbs') ? ['backup'] : ['images', 'rootdir'] }))
+  const ranked = placeVm(snap, { cores: 1, memGiB: 1, diskGiB: 1 })
+  assert.equal(ranked[0].host.node, 'pve-b')
+  assert.ok(ranked[0].confirmed && ranked.slice(1).every((p) => !p.confirmed))
 })
