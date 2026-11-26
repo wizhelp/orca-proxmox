@@ -42,8 +42,9 @@ panel's **Settings → Connect via Orca**:
    Nothing changes.
 2. **Connect…** Choose Proxmox VE or Backup Server, the address this machine reaches it at
    (suggested from what the host reported: check it) and the name in the estate. **Show the
-   script** shows the exact script that will run, generated from the plugin's fixed template
-   (nothing is downloaded), and what it does.
+   script** first checks that this machine reaches the API at that address (else nothing goes
+   further: use the guided SSH tunnel steps), then shows the exact script that will run,
+   generated from the plugin's fixed template (nothing is downloaded), and what it does.
 3. **Run.** Only this click runs it, once, within 10 minutes, in the background (the panel follows
    it). The plugin first records the run (sealed, so the panel cannot alter it). On the host the
    script takes a lock (one Orca step at a time per host), records every change before and after
@@ -480,6 +481,12 @@ through PDM, on the backup scan's cadence; the Auditor role covers both.
   at most, 24 per refresh and two at a time, and no new read starts after 20 seconds in one
   refresh; a remote whose API has no agent call is not asked again for 6 hours, nor is a VM that
   the token may not ask.
+- **Connect via Orca** needs the API (8006, 8007) reachable from this machine: the connection is
+  tested from here. It checks that first (a TCP connection and a TLS handshake, nothing sent), when
+  the script is shown and again right before it runs, and creates nothing on the host when the API
+  cannot be reached; an API closed to the network is set up with the guided
+  [SSH tunnel](#through-an-ssh-tunnel-enrich-only) steps instead. It also needs Orca's shell on the
+  host to be root or to use `sudo` without a password, and does not set up PDM's own token.
 - **SSH tunnels** need the system's OpenSSH client and a key without a passphrase; the first
   request after a tunnel dropped waits for it to come up again (up to 20 s), and a tunnel that keeps
   failing is retried after a pause that grows to a minute.

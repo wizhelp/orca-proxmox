@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "proxmox-visualizer",
   "name": "Proxmox",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "A Proxmox estate in Orca, through Proxmox Datacenter Manager or PVE and PBS directly (optionally over SSH): hosts and guests with live charts and disk use, tasks, backups and where Orca runs; alerts and a status-bar summary; read-only.",
   "author": {
     "name": "Yanko"

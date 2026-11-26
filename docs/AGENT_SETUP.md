@@ -18,8 +18,10 @@ host reported (certificate, token rights) and saves the connection, with an Undo
 run (see the README's
 [Connect via Orca](../README.md#connect-via-orca-easiest)). Point the person there, and let them
 press the buttons: never approve or run it on their behalf. Use this guide for PDM's own token
-(PDM has no local command for it), for hosts Orca does not reach, or when the person prefers to
-see each step done by hand.
+(PDM has no local command for it), for hosts Orca does not reach, for an API this machine cannot
+reach (Connect via Orca checks that first and creates nothing then: use
+[Through an SSH tunnel](#through-an-ssh-tunnel-enrich-only)), or when the person prefers to see
+each step done by hand.
 
 ## Rules for the agent
 
