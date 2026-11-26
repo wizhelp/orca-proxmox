@@ -625,6 +625,14 @@ export class SetupService {
       else if (c) note = ' The connection was changed since; it was kept, remove it in Settings if you want.'
     }
     if (record.keyRef) await this.deps.dropKey(record.keyRef).catch((error: unknown) => this.deps.log(`Could not delete the tunnel key ${record.keyRef}: ${String(error)}`))
+    // Something this run started but did not record as done is never removed: the record (and
+    // the host's journal) stay, and the person checks it.
+    const unsure = valueOf(result, 'unconfirmed')
+    if (unsure) {
+      record.message = `Not confirmed as made by this run, so kept: ${unsure.trim()}.`
+      await this.putRecord(record)
+      return { ok: false, stage: 'undone', outcome: 'stopped', message: `Undone what this run recorded as done. Not recorded as done, so kept for you to check on the host: ${unsure.trim()} (${tokenIdOf(record.product)}).${note}${closeNote}`, steps, undo: true }
+    }
     await this.putRecord(null, { hostKey: record.hostKey, runId: record.runId })
     const kept = [valueOf(result, 'kept_user'), valueOf(result, 'kept_token')].filter(Boolean)
     this.deps.log(`Undo on ${record.hostKey} of ${record.runId}: done`)

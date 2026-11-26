@@ -92,7 +92,7 @@ const PRODUCTS = {
     tokenAclDel: 'proxmox-backup-manager acl update / Audit --auth-id "$U!$T" --delete true',
     // Every subcommand and option this script uses, as the installed version documents them;
     // missing ones stop it before anything is changed.
-    preflight: `for C in 'user list:--output-format' 'user list-tokens:--output-format' 'user generate-token:--comment' 'user create:--comment' 'acl list:--output-format' 'acl update:--delete'; do
+    preflight: `for C in 'user list:--output-format' 'user list-tokens:--output-format' 'user generate-token:--comment' 'user create:--comment' 'acl list:--output-format' 'acl update:--delete' 'acl update:--auth-id' 'user delete-token:delete-token' 'user remove:remove'; do
   H=$(proxmox-backup-manager help \${C%%:*} --verbose 2>&1 || proxmox-backup-manager help \${C%%:*} --verbose true 2>&1) || stop "this proxmox-backup-manager has no '\${C%%:*}'; nothing was changed"
   printf '%s' "$H" | grep -q -- "\${C#*:}" || stop "this proxmox-backup-manager's '\${C%%:*}' has no \${C#*:}; nothing was changed"
 done
@@ -105,6 +105,18 @@ export const TUNNEL_USER = 'orca-tunnel'
 export const KEY_COMMENT = 'orca-proxmox-tunnel'
 const USER_COMMENT = 'Read-only, Orca plugin'
 const STATE_DIR = '/var/lib/orca-proxmox-setup'
+
+/**
+ * The state folder, checked (a real folder of root's, not a link), and one lock on it for every
+ * script that changes or undoes anything: held until the script ends, so setup, finalize and
+ * Undo never run at once on a host, whatever the plugin remembers after a restart.
+ */
+const LOCK = `command -v flock >/dev/null 2>&1 || stop "flock not found; nothing was changed"
+D=${STATE_DIR}
+[ -d "$D" ] && [ ! -L "$D" ] && [ "$(stat -c %u "$D")" = 0 ] || stop "${STATE_DIR} is not root's own folder; nothing was changed"
+exec 9>>"$D/.lock" || stop "no lock file"
+flock -n 9 || stop "another Orca setup step is running on this host; try again when it has ended"
+`
 
 export function tokenIdOf(product: SetupProduct): string {
   return `${PRODUCTS[product].user}!${TOKEN_NAME}`
@@ -271,9 +283,8 @@ ORCA_KEY
 U='${p.user}'; T='${TOKEN_NAME}'; UC="${USER_COMMENT} $R"; TC="Orca plugin $R"
 ${JSON_HELPERS}# This run's record on the host: intent before each change, done after it (Undo reads it).
 install -d -m 700 ${STATE_DIR} || stop "no state folder"
-STATE=${STATE_DIR}/$R
-[ -e "$STATE" ] && stop "this run was started before; nothing was changed"
-: > "$STATE" || stop "no state file"
+${LOCK}STATE=${STATE_DIR}/$R
+( set -C; : > "$STATE" ) 2>/dev/null || stop "this run was started before; nothing was changed"
 mark() { printf '%s\\n' "$*" >> "$STATE" || stop "the state file could not be written"; }
 `)
   if (t) {
@@ -290,6 +301,7 @@ ${contextCheck(t, p.port)}BEFORE=$(root_policy)
 UL=$(${p.userList}) || stop "the user list could not be read"
 if has "$UL" "\\"userid\\":\\"$U\\""; then
   has "$UL" "\\"userid\\":\\"$U\\"" "\\"comment\\":\\"${USER_COMMENT}" || stop "the user $U exists and was not made for Orca; nothing was changed"
+  mark existing user
   say reused_user 1
 else
   mark intent user
@@ -324,8 +336,12 @@ if ! has "$AL" "\\"ugid\\":\\"$U\\"" '"roleid":"${p.role}"' '"path":"/"'; then
   ${p.userAcl} || stop "the user's permission could not be set"
   mark done user_acl
   say added_user_acl 1
+else
+  mark existing user_acl
 fi
+mark intent token_acl
 ${p.tokenAcl} || stop "the token's permission could not be set"
+mark done token_acl
 `)
   if (t) {
     lines.push(`# The tunnel account, with no password and no key yet.
@@ -392,7 +408,7 @@ export function finalizeScript(product: SetupProduct, setupRunId: string, runId:
   const port = PRODUCTS[product].port
   return `${prelude(runId, `make the tunnel key of setup run ${setupRunId} permanent`)}
 [ "$(id -u)" = 0 ] || stop "not root"
-STATE=${STATE_DIR}/${setupRunId}
+${LOCK}STATE=${STATE_DIR}/${setupRunId}
 K=/home/${TUNNEL_USER}/.ssh/authorized_keys
 grep -qx 'done keyfile ${expiry} ${t.client}' "$STATE" 2>/dev/null || stop "the host has no record of that key"
 [ "$(cat "$K" 2>/dev/null)" = '${probeLine(t.keyLine, port, t.client, expiry)}' ] || stop "$K does not hold exactly the key that run installed; nothing was changed"
@@ -418,9 +434,15 @@ export function undoScript(product: SetupProduct, setupRunId: string, runId: str
   const lines: string[] = [prelude(runId, `undo what the setup run ${setupRunId} created`)]
   lines.push(`[ "$(id -u)" = 0 ] || stop "not root"
 S=${setupRunId}
-STATE=${STATE_DIR}/$S
-[ -f "$STATE" ] || { say nothing 1; finish ok; exit 0; }
+[ -e ${STATE_DIR} ] || { say nothing 1; finish ok; exit 0; }
+${LOCK}STATE=${STATE_DIR}/$S
+[ -f "$STATE" ] && [ ! -L "$STATE" ] || { say nothing 1; finish ok; exit 0; }
 did() { grep -q "^intent $1\\( \\|$\\)" "$STATE"; }
+# Ownership of the user, its permission and the token: only what this run recorded as done;
+# never what it found there (existing), never what it only meant to do (intent).
+made() { grep -q "^done $1\\( \\|$\\)" "$STATE" && ! grep -qx "existing $1" "$STATE"; }
+UNSURE=
+for I in user user_acl token; do did "$I" && ! made "$I" && UNSURE="$UNSURE $I"; done
 undone() { grep -qx "undone $1" "$STATE"; }
 mark() { printf '%s\\n' "$*" >> "$STATE" || stop "the state file could not be written"; }
 U='${p.user}'; T='${TOKEN_NAME}'
@@ -488,7 +510,7 @@ UEX=
 has "$UL" "\\"userid\\":\\"$U\\"" && UEX=1
 TL='[]'
 if [ -n "$UEX" ]; then TL=$(${p.tokenList}) || stop "the user's tokens could not be read"; fi
-if did token && ! undone token; then
+if made token && ! undone token; then
   if has "$TL" '${p.tokenMatch}' "\\"comment\\":\\"Orca plugin $S\\""; then
     ${p.tokenAclDel} || stop "the token's permission could not be removed"
     ${p.tokenDel} || stop "the token could not be removed"
@@ -501,7 +523,7 @@ if did token && ! undone token; then
 fi
 # 6. The user (or its permission) only when this run made it and it has no token left at all.
 LEFT=$(printf '%s' "$TL" | tr '{' '\\n' | grep -c '"tokenid"')
-if [ -n "$UEX" ] && did user && ! undone user; then
+if [ -n "$UEX" ] && made user && ! undone user; then
   if ! has "$UL" "\\"userid\\":\\"$U\\"" "\\"comment\\":\\"Read-only, Orca plugin $S\\""; then
     say kept_user "it is not this run's any more"
   elif [ "$LEFT" = 0 ]; then
@@ -511,8 +533,11 @@ if [ -n "$UEX" ] && did user && ! undone user; then
     say kept_user "$LEFT other token(s)"
   fi
   mark undone user
-elif [ -n "$UEX" ] && did user_acl && ! undone user_acl; then
-  if [ "$LEFT" = 0 ]; then
+elif [ -n "$UEX" ] && made user_acl && ! undone user_acl; then
+  AL=$(${p.aclList}) || stop "the permissions could not be read"
+  if ! has "$AL" "\\"ugid\\":\\"$U\\"" '"roleid":"${p.role}"' '"path":"/"'; then
+    say kept_user "its permission was already removed"
+  elif [ "$LEFT" = 0 ]; then
     ${p.userAclDel} || stop "the user's permission could not be removed"
     say removed_user_acl 1
   else
@@ -520,7 +545,12 @@ elif [ -n "$UEX" ] && did user_acl && ! undone user_acl; then
   fi
   mark undone user_acl
 fi
-rm -f "$STATE"
+if [ -n "$UNSURE" ]; then
+  # Started but not recorded as done: perhaps made, perhaps not; never removed from here.
+  say unconfirmed "$UNSURE"
+else
+  rm -f "$STATE"
+fi
 finish ok
 `)
   return lines.join('\n')
@@ -530,7 +560,7 @@ finish ok
 const KEYS = new Set([
   'root', 'pve', 'pbs', 'pdm', 'sshd', 'hostname', 'fqdn', 'via',
   'reused_user', 'created_user', 'replaced_token', 'created_token', 'added_user_acl', 'created_account', 'added_policy', 'created_keyfile', 'key_expiry', 'ssh_hostkey', 'api_fp', 'secret',
-  'finalized_key', 'nothing', 'removed_keyfile', 'removed_policy', 'removed_account', 'removed_token', 'kept_token', 'removed_user', 'removed_user_acl', 'kept_user', 'stop'
+  'finalized_key', 'nothing', 'unconfirmed', 'removed_keyfile', 'removed_policy', 'removed_account', 'removed_token', 'kept_token', 'removed_user', 'removed_user_acl', 'kept_user', 'stop'
 ])
 const REPEATED = new Set(['secret'])
 
