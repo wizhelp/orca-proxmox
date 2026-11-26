@@ -15,8 +15,8 @@
 // through one cleanup; a tunnel that exits is started again on the next request, after a growing
 // pause.
 import { createHash } from 'node:crypto'
-import { existsSync } from 'node:fs'
-import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { constants, existsSync } from 'node:fs'
+import { access, chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import * as net from 'node:net'
 import { join } from 'node:path'
 import type { SshTunnel } from '../model'
@@ -43,6 +43,10 @@ export type TunnelDeps = {
   now: () => number
   /** How long a new tunnel may take to come up; 20 s by default. */
   readyMs?: number
+  /** Opens and closes a connection to 127.0.0.1:port (readiness check); real TCP by default. */
+  touch?: (port: number) => Promise<void>
+  /** Whether the identity file can be read; the real file system by default. */
+  identityReadable?: (path: string) => Promise<boolean>
 }
 
 const READY_MS = 20_000
@@ -94,12 +98,6 @@ export function sshConfigPath(path: string): string {
   return `"${path.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`
 }
 
-/** An identity file for `-i`, which ssh does not split but does expand `%` tokens in. */
-export function sshIdentityPath(path: string): string {
-  if (path.includes('${')) throw new ApiError({ kind: 'invalid-config', message: `The identity file ${path} cannot be given to ssh (it contains "\${")` })
-  return path.replace(/%/g, '%%')
-}
-
 /** The ssh arguments: no config file, no prompts, only this key, only this forward. */
 export function sshArgs(t: SshTunnel, localPort: number, knownHostsFile: string, learn: boolean): string[] {
   const o = (option: string) => ['-o', option]
@@ -109,7 +107,11 @@ export function sshArgs(t: SshTunnel, localPort: number, knownHostsFile: string,
     // Debug level 1, only to learn from ssh itself when its forward listens (see waitReady).
     '-v',
     ...o('BatchMode=yes'),
+    // Only this key, from the configuration: -i is checked before its % tokens are expanded, and a
+    // missing one would fall back to the default keys; no agent's keys either.
     ...o('IdentitiesOnly=yes'),
+    ...o(`IdentityFile=${sshConfigPath(t.identityFile)}`),
+    ...o('IdentityAgent=none'),
     ...o('PasswordAuthentication=no'),
     ...o('KbdInteractiveAuthentication=no'),
     ...o('ExitOnForwardFailure=yes'),
@@ -123,7 +125,6 @@ export function sshArgs(t: SshTunnel, localPort: number, knownHostsFile: string,
     ...o('HashKnownHosts=no'),
     ...o('UpdateHostKeys=no'),
     ...o('ClearAllForwardings=no'),
-    '-i', sshIdentityPath(t.identityFile),
     '-p', String(t.port),
     '-l', t.user,
     '-L', `127.0.0.1:${localPort}:${t.target}`,
@@ -139,7 +140,12 @@ export function portTaken(stderr: string, port: number): boolean {
   return new RegExp(`bind \\[?127\\.0\\.0\\.1\\]?:${port}: |cannot listen to port: ${port}\\b`, 'i').test(said(stderr))
 }
 
-/** ssh says its forward listens, on exactly this port. */
+/** How many connections this ssh says it took on its forward's port. */
+export function acceptedCount(stderr: string, port: number): number {
+  return stderr.match(new RegExp(`Connection to port ${port} forwarding to `, 'g'))?.length ?? 0
+}
+
+/** ssh says it is about to listen on exactly this port (it binds right after). */
 export function forwardListening(stderr: string, port: number): boolean {
   return new RegExp(`Local forwarding listening on 127\\.0\\.0\\.1 port ${port}\\b`).test(stderr)
 }
@@ -299,7 +305,7 @@ export class TunnelManager {
         // Already gone.
       }
     }
-    void rm(run.file, { force: true }).catch(() => undefined)
+    if (run.file) void rm(run.file, { force: true }).catch(() => undefined)
   }
 
   /** The private folder for known_hosts files. */
@@ -311,8 +317,10 @@ export class TunnelManager {
   }
 
   /**
-   * Starts ssh and waits until it says its forward listens. `track` registers the process the
-   * moment it is spawned (false: not wanted any more, it is ended at once).
+   * Starts ssh and waits until this ssh has accepted a connection on its forward. The run is
+   * registered with `track` before anything is awaited (false: not wanted, nothing is started),
+   * and a stop meanwhile is checked again right before ssh is spawned, so no process can be
+   * started after stop() or stopAll().
    */
   private async launch(t: SshTunnel, learn: boolean, track: (run: Run) => boolean): Promise<{ run: Run; hostKey: string }> {
     const ssh = this.deps.sshPath()
@@ -322,31 +330,36 @@ export class TunnelManager {
     if (!learn && !hostKeyFingerprint(t.hostKey)) {
       throw new ApiError({ kind: 'invalid-config', message: `No SSH host key is pinned for ${t.host}`, hint: 'Test the connection in Settings, compare the SSH host key it shows, and save.' })
     }
-    const dir = await this.folder()
+    const changed = () => new ApiError({ kind: 'unreachable', message: 'The connection changed while its SSH tunnel started' })
     for (let attempt = 1; ; attempt += 1) {
-      const port = await this.deps.freePort()
-      const file = join(dir, `${createHash('sha256').update(`${t.host}|${t.port}|${this.deps.now()}|${Math.random()}`).digest('hex').slice(0, 16)}.known_hosts`)
-      await writeFile(file, learn ? '' : `${knownHostsName(t)} ${t.hostKey.trim()}\n`, { mode: 0o600 })
-      await chmod(file, 0o600).catch(() => undefined)
-      const run: Run = { port, file, stderr: '', ready: false, done: false }
-      const args = sshArgs(t, port, file, learn)
+      const run: Run = { port: 0, file: '', stderr: '', ready: false, done: false }
+      if (this.closed || !track(run)) throw changed()
+      // Only the configured key: ssh would otherwise fall back to the default ones.
+      if (!(await (this.deps.identityReadable ?? identityReadable)(t.identityFile))) {
+        this.end(run)
+        throw new ApiError({ kind: 'invalid-config', message: `The identity file ${t.identityFile} cannot be read`, hint: 'Give the path of the tunnel’s private key on this machine (readable by you only).' })
+      }
+      const dir = await this.folder()
+      run.port = await this.deps.freePort()
+      run.file = join(dir, `${createHash('sha256').update(`${t.host}|${t.port}|${this.deps.now()}|${Math.random()}`).digest('hex').slice(0, 16)}.known_hosts`)
+      await writeFile(run.file, learn ? '' : `${knownHostsName(t)} ${t.hostKey.trim()}\n`, { mode: 0o600 })
+      await chmod(run.file, 0o600).catch(() => undefined)
+      // The last moment before a process exists: stopped meanwhile, nothing is spawned.
+      if (run.done || this.closed) {
+        this.end(run)
+        throw changed()
+      }
       let child: TunnelChild
       try {
-        child = this.deps.spawn(ssh, args)
+        child = this.deps.spawn(ssh, sshArgs(t, run.port, run.file, learn))
       } catch (error) {
         this.end(run)
         throw new ApiError({ kind: 'invalid-config', message: `ssh could not be started: ${error instanceof Error ? error.message : String(error)}` })
       }
       run.child = child
-      const outcome = this.waitReady(run, child, t)
-      if (!track(run)) {
-        this.end(run)
-        await outcome.catch(() => undefined)
-        throw new ApiError({ kind: 'unreachable', message: 'The connection changed while its SSH tunnel started' })
-      }
-      const result = await outcome
+      const result = await this.waitReady(run, child, t)
       if (result === 'ready') {
-        const hostKey = learn ? (firstHostKey(await readFile(file, 'utf8').catch(() => '')) ?? '') : t.hostKey
+        const hostKey = learn ? (firstHostKey(await readFile(run.file, 'utf8').catch(() => '')) ?? '') : t.hostKey
         if (run.done) throw sshFailure(t, run.stderr || 'ssh exited')
         return { run, hostKey }
       }
@@ -356,29 +369,51 @@ export class TunnelManager {
     }
   }
 
-  /** Resolves when this ssh says its forward listens, or why it will not. */
+  /**
+   * Resolves when this very ssh has accepted a connection on its forward, or why it will not. Its
+   * "listening" line comes before it binds, so it only starts the check: a connection is made to
+   * the port, and only this ssh saying it took it ("Connection to port N forwarding to …") counts.
+   * Something else listening there never says that; this ssh then fails to bind and exits.
+   */
   private waitReady(run: Run, child: TunnelChild, t: SshTunnel): Promise<'ready' | 'port-taken' | ApiError> {
     return new Promise((resolve) => {
       let settled = false
+      let checking = false
       const settle = (value: 'ready' | 'port-taken' | ApiError) => {
         if (settled) return
         settled = true
         clearTimeout(timer)
         resolve(value)
       }
-      const timer = setTimeout(() => settle(new ApiError({ kind: 'timeout', message: `The SSH tunnel to ${t.host} did not come up within ${(this.deps.readyMs ?? READY_MS) / 1000} s` })), this.deps.readyMs ?? READY_MS)
+      const readyMs = this.deps.readyMs ?? READY_MS
+      const timer = setTimeout(() => settle(new ApiError({ kind: 'timeout', message: `The SSH tunnel to ${t.host} did not come up within ${readyMs / 1000} s` })), readyMs)
+      const touch = this.deps.touch ?? touchLocalPort
+      const confirm = async () => {
+        while (!settled && !run.done) {
+          const before = acceptedCount(run.stderr, run.port)
+          await touch(run.port)
+          for (let i = 0; i < 20 && !settled && !run.done; i += 1) {
+            if (acceptedCount(run.stderr, run.port) > before) {
+              run.ready = true
+              settle('ready')
+              return
+            }
+            await new Promise((r) => setTimeout(r, 25))
+          }
+        }
+      }
       child.stderr?.on('data', (chunk) => {
         run.stderr = (run.stderr + String(chunk)).slice(-16_000)
-        if (!run.ready && !run.done && forwardListening(run.stderr, run.port)) {
-          run.ready = true
-          settle('ready')
+        if (!checking && !run.done && forwardListening(run.stderr, run.port)) {
+          checking = true
+          void confirm()
         }
       })
       child.on('error', (error) => {
         const wasDone = run.done
         run.done = true
         this.probes.delete(run)
-        void rm(run.file, { force: true }).catch(() => undefined)
+        if (run.file) void rm(run.file, { force: true }).catch(() => undefined)
         settle(new ApiError({ kind: 'invalid-config', message: `ssh could not be run: ${error.message}` }))
         if (run.ready && !wasDone) run.onLost?.()
       })
@@ -386,7 +421,7 @@ export class TunnelManager {
         const wasDone = run.done
         run.done = true
         this.probes.delete(run)
-        void rm(run.file, { force: true }).catch(() => undefined)
+        if (run.file) void rm(run.file, { force: true }).catch(() => undefined)
         if (!run.ready) settle(portTaken(run.stderr, run.port) ? 'port-taken' : sshFailure(t, run.stderr || 'ssh exited'))
         else if (!wasDone) run.onLost?.()
       })
@@ -397,6 +432,29 @@ export class TunnelManager {
     entry.failures += 1
     entry.lastError = error
     entry.retryAt = this.deps.now() + Math.min(MAX_BACKOFF_MS, 1000 * 2 ** (entry.failures - 1))
+  }
+}
+
+/** Connects to 127.0.0.1:port and closes again shortly after (time for ssh to take it). */
+export function touchLocalPort(port: number): Promise<void> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port })
+    const done = () => {
+      socket.destroy()
+      resolve()
+    }
+    socket.once('connect', () => setTimeout(done, 150))
+    socket.once('error', done)
+    socket.setTimeout(2000, done)
+  })
+}
+
+async function identityReadable(path: string): Promise<boolean> {
+  try {
+    await access(path, constants.R_OK)
+    return true
+  } catch {
+    return false
   }
 }
 

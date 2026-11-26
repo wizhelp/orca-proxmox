@@ -11,7 +11,7 @@ import { after } from 'node:test'
 import { assert, test } from 'orca/testing'
 import type { SshTunnel } from '../src/model'
 import { ApiError } from '../src/proxmox/client'
-import { findSsh, hostKeyFingerprint, sshArgs, sshConfigPath, sshFailure, sshIdentityPath, TunnelManager, type TunnelChild } from '../src/proxmox/tunnel'
+import { findSsh, hostKeyFingerprint, sshArgs, sshConfigPath, sshFailure, TunnelManager, type TunnelChild } from '../src/proxmox/tunnel'
 
 /** An example host key (32 bytes 1..32), and its fingerprint as ssh-keygen -l prints it. */
 const HOST_KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g'
@@ -23,6 +23,8 @@ after(() => rmSync(dir, { recursive: true, force: true }))
 
 class FakeChild implements TunnelChild {
   killed = false
+  /** Its forward is bound: a connection to its port is taken (and said, as ssh -v does). */
+  accepting = false
   private listeners = { exit: [] as ((code: number | null, signal: string | null) => void)[], error: [] as ((error: Error) => void)[] }
   private errListeners: ((chunk: string) => void)[] = []
   readonly stderr = { on: (_e: 'data', l: (chunk: string) => void) => this.errListeners.push(l) }
@@ -51,10 +53,13 @@ const option = (args: string[], name: string) => args.find((a, i) => args[i - 1]
 const knownHosts = (args: string[]) => option(args, 'UserKnownHostsFile')!.slice(1, -1).replace(/%%/g, '%').replace(/\\(["\\])/g, '$1')
 const forwardPort = (args: string[]) => Number(args[args.indexOf('-L') + 1].split(':')[1])
 /** What ssh -v says once its forward listens. */
-const listen = (args: string[], child: FakeChild) => child.say(`debug1: Authenticated to pve-x1.example.test ([203.0.113.9]:2222) using "publickey".\r\ndebug1: Local connections to 127.0.0.1:${forwardPort(args)} forwarded to remote address 127.0.0.1:8006\r\ndebug1: Local forwarding listening on 127.0.0.1 port ${forwardPort(args)}.\r\n`)
+const listen = (args: string[], child: FakeChild) => {
+  child.say(`debug1: Authenticated to pve-x1.example.test ([203.0.113.9]:2222) using "publickey".\r\ndebug1: Local connections to 127.0.0.1:${forwardPort(args)} forwarded to remote address 127.0.0.1:8006\r\ndebug1: Local forwarding listening on 127.0.0.1 port ${forwardPort(args)}.\r\n`)
+  child.accepting = true
+}
 
 /** A fake ssh: records each start; `behave` decides what this start does (by default: listen). */
-function manager(behave: (args: string[], child: FakeChild, n: number) => void = listen, clock = { now: 1_000 }, opts: { ssh?: string | null; readyMs?: number; spawnThrows?: boolean } = {}) {
+function manager(behave: (args: string[], child: FakeChild, n: number) => void = listen, clock = { now: 1_000 }, opts: { ssh?: string | null; readyMs?: number; spawnThrows?: boolean; freePort?: () => Promise<number> } = {}) {
   const starts: { args: string[]; child: FakeChild }[] = []
   let nextPort = 40000
   const m = new TunnelManager({
@@ -69,9 +74,15 @@ function manager(behave: (args: string[], child: FakeChild, n: number) => void =
     },
     sshPath: () => (opts.ssh === undefined ? '/usr/bin/ssh' : opts.ssh),
     dir,
-    freePort: async () => nextPort++,
+    freePort: opts.freePort ?? (async () => nextPort++),
     now: () => clock.now,
-    readyMs: opts.readyMs ?? 2000
+    readyMs: opts.readyMs ?? 2000,
+    // A connection to the port: the fake ssh that has bound it takes it and says so.
+    touch: async (port) => {
+      const owner = starts.find((x) => forwardPort(x.args) === port && x.child.accepting && !x.child.killed)
+      owner?.child.say(`debug1: Connection to port ${port} forwarding to 127.0.0.1 port 8006 requested.\r\n`)
+    },
+    identityReadable: async () => true
   })
   return { m, starts, clock }
 }
@@ -86,7 +97,10 @@ test('ssh runs without the person’s config, without prompts, with this key and
     assert.equal(option(args, name), value, name)
   }
   assert.ok(option(args, 'ServerAliveInterval'))
-  assert.deepEqual(args.slice(-10), ['-i', TUNNEL.identityFile, '-p', '2222', '-l', 'orca-tunnel', '-L', '127.0.0.1:40000:127.0.0.1:8006', '--', 'pve-x1.example.test'])
+  assert.deepEqual(args.slice(-8), ['-p', '2222', '-l', 'orca-tunnel', '-L', '127.0.0.1:40000:127.0.0.1:8006', '--', 'pve-x1.example.test'])
+  assert.ok(!args.includes('-i'))
+  assert.equal(option(args, 'IdentityFile'), '"/home/example/.ssh/orca-proxmox"')
+  assert.equal(option(args, 'IdentityAgent'), 'none')
   // The known_hosts file (in a folder whose name has spaces and a %) holds exactly the pinned key.
   assert.equal(readFileSync(knownHosts(args), 'utf8'), `[pve-x1.example.test]:2222 ${HOST_KEY}\n`)
   // Running: the same tunnel again, nothing new started.
@@ -100,7 +114,6 @@ test('ssh runs without the person’s config, without prompts, with this key and
 test('paths reach ssh as one file each: spaces, quotes, backslashes and % stay literal', () => {
   assert.equal(sshConfigPath(String.raw`C:\Users\A B\k%dh`), String.raw`"C:\\Users\\A B\\k%%dh"`)
   assert.equal(sshConfigPath('/Users/x/Library/Application Support/a"b'), '"/Users/x/Library/Application Support/a\\"b"')
-  assert.equal(sshIdentityPath('/home/x/key%h'), '/home/x/key%%h')
   assert.throws(() => sshConfigPath('/tmp/${HOME}/kh'), /cannot be given to ssh/)
   // The real OpenSSH client, where there is one, reads them back exactly (parsing only, no connection).
   const ssh = findSsh(process.platform, process.env)
@@ -134,31 +147,92 @@ test('without a pinned host key a tunnel is refused; a test learns the key and s
   ;(await strict.m.probe(TUNNEL)).stop()
 })
 
-test('ready only when this ssh says its forward listens: another listener on the port never counts', async () => {
-  // Someone else listens on the port the tunnel was given; this ssh never says it listens.
-  const squatter = net.createServer((s) => s.destroy())
+test('ready only when this ssh took a connection on its forward: another listener on the port never counts', async () => {
+  // Another program holds the port picked for the tunnel and accepts connections on it.
+  let squatterConnections = 0
+  const squatter = net.createServer((s) => {
+    squatterConnections += 1
+    s.destroy()
+  })
   await new Promise<void>((r) => squatter.listen(0, '127.0.0.1', r))
-  const port = (squatter.address() as net.AddressInfo).port
+  const taken = (squatter.address() as net.AddressInfo).port
+  const starts: { args: string[]; child: FakeChild }[] = []
+  const ports = [taken, 40100]
   const m = new TunnelManager({
-    spawn: () => new FakeChild(),
+    spawn: (_cmd, args) => {
+      const child = new FakeChild()
+      starts.push({ args, child })
+      const n = starts.length
+      setImmediate(() => {
+        // Like OpenSSH: "listening" is said before the bind.
+        child.say(`debug1: Local forwarding listening on 127.0.0.1 port ${forwardPort(args)}.\r\n`)
+        if (n === 1) {
+          // The bind fails (the port is taken); it says so a little later and exits.
+          setTimeout(() => {
+            child.say(`bind [127.0.0.1]:${forwardPort(args)}: Address already in use\r\nchannel_setup_fwd_listener_tcpip: cannot listen to port: ${forwardPort(args)}\r\nCould not request local forwarding.\r\n`)
+            child.exit(255)
+          }, 300)
+        } else child.accepting = true
+      })
+      return child
+    },
     sshPath: () => '/usr/bin/ssh',
     dir,
-    freePort: async () => port,
+    freePort: async () => ports.shift()!,
     now: () => 0,
-    readyMs: 300
+    readyMs: 3000,
+    identityReadable: async () => true,
+    // A real connection; a fake ssh that has bound the port also says it took it.
+    touch: async (port) => {
+      await new Promise<void>((resolve) => {
+        const socket = net.connect({ host: '127.0.0.1', port }, () => (socket.destroy(), resolve()))
+        socket.once('error', () => resolve())
+      })
+      const owner = starts.find((x) => forwardPort(x.args) === port && x.child.accepting && !x.child.killed)
+      owner?.child.say(`debug1: Connection to port ${port} forwarding to 127.0.0.1 port 8006 requested.\r\n`)
+    }
   })
-  await assert.rejects(m.ensure('c-1@r1', TUNNEL), /did not come up within/)
-  squatter.close()
-  // A port taken before ssh bound it: ssh says so and exits; the next port is tried.
-  const { m: m2, starts } = manager((args, child, n) => {
-    if (n === 1) {
-      child.say(`bind [127.0.0.1]:${forwardPort(args)}: Address already in use\r\nchannel_setup_fwd_listener_tcpip: cannot listen to port: ${forwardPort(args)}\r\nCould not request local forwarding.\r\n`)
-      child.exit(255)
-    } else listen(args, child)
-  })
-  assert.deepEqual(await m2.ensure('c-1@r1', TUNNEL), { host: '127.0.0.1', port: 40001 })
+  // The other program answered the check, yet the tunnel was not ready until the second ssh took a connection.
+  assert.deepEqual(await m.ensure('c-1@r1', TUNNEL), { host: '127.0.0.1', port: 40100 })
+  assert.ok(squatterConnections > 0, 'the check reached the other listener')
   assert.equal(starts.length, 2)
-  m2.stopAll()
+  m.stopAll()
+  squatter.close()
+  // An ssh that never takes a connection is never ready.
+  const silent = new TunnelManager({ spawn: () => new FakeChild(), sshPath: () => '/usr/bin/ssh', dir, freePort: async () => 40200, now: () => 0, readyMs: 300, identityReadable: async () => true, touch: async () => undefined })
+  await assert.rejects(silent.ensure('c-1@r1', TUNNEL), /did not come up within/)
+})
+
+test('a stop while a tunnel is being set up means no ssh is spawned at all', async () => {
+  let release: () => void = () => undefined
+  const gate = new Promise<void>((r) => (release = r))
+  const { m, starts } = manager(listen, { now: 0 }, { freePort: async () => (await gate, 40300) })
+  const probing = m.probe(TUNNEL).then(() => 'started', (e: Error) => e.message)
+  const starting = m.ensure('c-9@r1', TUNNEL).then(() => 'started', (e: Error) => e.message)
+  await new Promise((r) => setTimeout(r, 20))
+  m.stopAll()
+  release()
+  assert.match(await probing, /changed|stopping/)
+  assert.match(await starting, /changed|stopping/)
+  await new Promise((r) => setTimeout(r, 20))
+  assert.equal(starts.length, 0)
+})
+
+test('the identity file: only that key, and a missing one stops before ssh runs', async () => {
+  const missing = new TunnelManager({ spawn: () => assert.fail('no ssh may run'), sshPath: () => '/usr/bin/ssh', dir, freePort: async () => 40400, now: () => 0, identityReadable: async () => false })
+  await assert.rejects(missing.ensure('c-1@r1', TUNNEL), /The identity file \/home\/example\/\.ssh\/orca-proxmox cannot be read/)
+  // The real client, where there is one (parsing only): exactly this identity, no default keys, no agent.
+  const ssh = findSsh(process.platform, process.env)
+  if (!ssh) return
+  for (const path of [join(dir, 'key %h with space'), join(dir, 'not there')]) {
+    const args = sshArgs({ ...TUNNEL, identityFile: path }, 40500, join(dir, 'kh'), false)
+    const options = args.flatMap((a, i) => (args[i - 1] === '-o' ? ['-o', a] : []))
+    const r: SpawnSyncReturns<string> = spawnSync(ssh, ['-G', '-F', 'none', ...options, 'example.test'], { encoding: 'utf8' })
+    const lines: string[] = (r.stdout ?? '').split(/\r?\n/)
+    assert.deepEqual(lines.filter((l: string) => l.startsWith('identityfile ')), [`identityfile ${path.replace(/%/g, '%%')}`], r.stderr)
+    assert.ok(lines.includes('identityagent none'))
+    assert.ok(lines.includes('identitiesonly yes'))
+  }
 })
 
 test('a tunnel that fails says why, waits a growing pause, then starts again', async () => {

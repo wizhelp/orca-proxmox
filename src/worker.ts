@@ -761,7 +761,8 @@ export default function activate(orca: OrcaWorkerApi): void {
     const parts: Part[] = []
     const failed: FailedPart[] = []
     // Only the current configuration's tunnels run: a changed or removed connection's is stopped.
-    if (tunnelManager || list.some((c) => c.tunnel)) tunnels().retain(new Set(list.filter((c) => c.tunnel).map(connectionScope)))
+    // Only a refresh of the current configuration decides; an older one changes nothing (switched() retains).
+    if (started === generation && (tunnelManager || list.some((c) => c.tunnel))) tunnels().retain(new Set(list.filter((c) => c.tunnel).map(connectionScope)))
     for (const c of list) {
       const secret = await readSecret(c)
       if (secret) parts.push({ connection: c, source: createSource(c.kind, clientFor(c, secret), c) })

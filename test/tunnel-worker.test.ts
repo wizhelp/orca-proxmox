@@ -17,10 +17,14 @@ import { mockTransport } from './fixtures/pdm'
 const NOW = Date.UTC(2026, 10, 25, 12, 0, 0)
 const PIN = 'EC:7A:EF:38:FF:F7:59:92:C1:E3:B0:4C:1D:22:FF:C9:67:C6:91:C8:74:48:53:13:12:1A:C0:42:D1:5B:37:05'
 const HOST_KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g'
-const TUNNEL = { host: 'pve-x1.example.test', port: 22, user: 'orca-tunnel', identityFile: process.platform === 'win32' ? 'C:\\Users\\example\\.ssh\\orca-proxmox' : '/home/example/.ssh/orca-proxmox', target: '127.0.0.1:8006', hostKey: '' }
-const PVE = { id: 'new', kind: 'pve' as const, name: 'lab', baseUrl: 'https://pve.example.test:8006', tokenId: 'monitor@pve!orca', fingerprint: PIN, secret: '22222222-2222-4222-8222-222222222222', tunnel: TUNNEL }
+const PVE_BASE = { id: 'new', kind: 'pve' as const, name: 'lab', baseUrl: 'https://pve.example.test:8006', tokenId: 'monitor@pve!orca', fingerprint: PIN, secret: '22222222-2222-4222-8222-222222222222' }
 
 const dir = mkdtempSync(join(tmpdir(), 'orca-tunnel-worker-'))
+// A synthetic private key file: the plugin only checks that it can be read before ssh runs.
+const KEY = join(dir, 'orca-proxmox-tunnel')
+writeFileSync(KEY, 'not a real key\n', { mode: 0o600 })
+const TUNNEL = { host: 'pve-x1.example.test', port: 22, user: 'orca-tunnel', identityFile: KEY, target: '127.0.0.1:8006', hostKey: '' }
+const PVE = { ...PVE_BASE, tunnel: TUNNEL }
 after(() => rmSync(dir, { recursive: true, force: true }))
 
 let worker: TestWorker | undefined
@@ -40,7 +44,11 @@ function fakeSsh() {
     const opt = (name: string) => args.find((a, i) => args[i - 1] === '-o' && a.startsWith(`${name}=`))?.slice(name.length + 1)
     const knownHosts = () => opt('UserKnownHostsFile')!.slice(1, -1).replace(/%%/g, '%').replace(/\\(["\\])/g, '$1')
     const port = Number(args[args.indexOf('-L') + 1].split(':')[1])
-    const server = net.createServer((s) => s.destroy())
+    // Like ssh -v: each connection it takes on its forward is said.
+    const server = net.createServer((s) => {
+      for (const l of say) l(`debug1: Connection to port ${port} forwarding to 127.0.0.1 port 8006 requested.\r\n`)
+      s.destroy()
+    })
     setImmediate(() => {
       if (opt('StrictHostKeyChecking') === 'accept-new') writeFileSync(knownHosts(), `pve-x1.example.test ${HOST_KEY}
 `)
