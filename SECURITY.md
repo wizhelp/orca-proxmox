@@ -106,7 +106,9 @@ hours.
 **SSH tunnels** (optional, per direct connection). The worker runs the system's OpenSSH client
 by its absolute path, without a shell, as `ssh -F none -N -T -L 127.0.0.1:<port>:<target>` with
 every option explicit: `BatchMode=yes` (no prompt can appear), `IdentitiesOnly=yes` with the
-configured key, password and keyboard-interactive authentication off, `ExitOnForwardFailure=yes`,
+configured key as `-o IdentityFile` and `IdentityAgent=none` (no default or agent keys, also when
+the file is missing; the worker checks it can read the file before ssh runs), password and
+keyboard-interactive authentication off, `ExitOnForwardFailure=yes`,
 and `StrictHostKeyChecking=yes` against a known_hosts file of its own (in the worker's folder,
 owner-only) that holds only the pinned host key. The person's `~/.ssh/config` and known_hosts are
 not read. A host key is learnt only by an explicit **Test** in Settings (`accept-new` into a fresh,
@@ -118,9 +120,11 @@ are part of what the sealed secret is bound to. Through the tunnel the HTTP clie
 PVE/PBS certificate pin (or CA and hostname) before sending the token. Tunnels stop when their
 connection changes or is removed, and when Orca stops the worker; every ssh process (a test's
 too) is tracked from the moment it is spawned, so none is left behind, and a failure to run ssh
-is an error, not a crash. A tunnel counts as ready only when that ssh process itself reports its
-forward listening (`-v`), never because something answers on the port; a port taken before ssh
-bound it makes ssh exit (`ExitOnForwardFailure`) and another is tried. File names reach ssh as
+is an error, not a crash; a stop while a tunnel is being set up is checked right before ssh is
+spawned, so none starts after it. A tunnel counts as ready only when that ssh process itself
+reports taking a connection on its forward (`-v`: "Connection to port N forwarding to …", after a
+test connection the worker makes), never because something answers on the port; a port taken
+before ssh bound it makes ssh exit (`ExitOnForwardFailure`) and another is tried. File names reach ssh as
 one quoted, escaped value each (spaces, quotes, `%` tokens), as the real client's parser reads
 them back.
 
@@ -130,12 +134,18 @@ password) whose key carries `restrict,port-forwarding,permitopen="127.0.0.1:8006
 `PermitListen none`, `PermitOpen 127.0.0.1:8006`, `PermitTTY no`, X11 and agent forwarding off
 and `ForceCommand /bin/false`. The key options alone would leave reverse (`-R`) and Unix-socket
 forwards possible; the `Match` block makes the account's effective policy local TCP forwarding to
-the API only. docs/AGENT_SETUP.md checks this with `sshd -T` and by trying a shell, a command,
-`-R` and another `-L` target, which must all be refused.
+the API only. docs/AGENT_SETUP.md checks the effective policy with `sshd -T -C user=orca-tunnel,…`
+(and looks for earlier `Match` blocks, which would win) before reloading sshd, checks a fresh admin
+login, installs the key only then, and finally tries a shell, a command, `-R`, a socket forward
+and another `-L` target with time limits, an isolated client configuration and the pinned host
+key, which must all be refused. Every session that handles a secret creates its own private
+temporary folder first.
 
-**Enrich only** connections add data only to guests and nodes that PDM shows, matched one to one;
-a cluster reached directly is never enriched, competing claims are left alone, and a VM's disk
-use is shown only while the connection that measured it still answers for it.
+**Enrich only** connections add data only to guests and nodes that PDM shows, matched one to one
+within the one PDM cluster each belongs to (named by a `remote/node` mapping, or learnt while
+every PDM cluster is visible and kept), so an outage never moves one to another cluster; a cluster
+reached directly is never enriched, competing claims are left alone, and a VM's disk use is shown
+only while the connection that measured it still answers for it.
 
 ## Residual risks
 

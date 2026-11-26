@@ -20,6 +20,9 @@ per PVE cluster (or standalone host) and per PBS: see
   inside a private work folder (`umask 077`), are passed to `curl` as `@file` arguments or header
   files, never as command-line values (which other processes can see), and the folder is removed
   on exit, also when interrupted. Turn shell tracing off (`set +x`).
+- **Every session that handles a secret, on Orca's machine or on a host, creates its own private
+  folder first** (`umask 077; WORK=$(mktemp -d)`, removed on exit) and stops if it cannot; a
+  secret is never written to a path whose folder was not created that way in the same session.
 - **Check every answer**: an HTTP status other than 200, a missing session cookie or an empty
   token secret stops the procedure; do not continue on a guess.
 - **Two-factor login**: if PDM asks for a second factor, stop and let the person create the token
@@ -380,9 +383,14 @@ dashboard's **Show Fingerprint** (PBS), or you read it on the host over SSH
 
 ### PVE: a read-only user and token
 
-Over SSH on a PVE node (one node per cluster is enough, the access control is cluster-wide):
+Over SSH on a PVE node (one node per cluster is enough, the access control is cluster-wide), in a
+session that first creates a private folder for the secret (removed when it ends):
 
 ```sh
+set +x; umask 077
+WORK=$(mktemp -d) || { echo "no private temporary folder: stop"; exit 1; }
+trap 'rm -rf "$WORK"' EXIT INT TERM HUP
+[ -d "$WORK" ] && [ -O "$WORK" ] || { echo "temporary folder not private: stop"; exit 1; }
 pveum user add monitor@pve --comment 'Read-only, Orca plugin'
 # The token, with privilege separation: it gets only what is granted to it, capped by its user.
 pveum user token add monitor@pve orca --privsep 1 --output-format json > "$WORK/token.json"
@@ -461,9 +469,14 @@ rm -f "$WORK/list.json"
 
 ### PBS: a read-only user and token
 
-Over SSH on the PBS host:
+Over SSH on the PBS host, in a session that first creates a private folder for the secret
+(removed when it ends):
 
 ```sh
+set +x; umask 077
+WORK=$(mktemp -d) || { echo "no private temporary folder: stop"; exit 1; }
+trap 'rm -rf "$WORK"' EXIT INT TERM HUP
+[ -d "$WORK" ] && [ -O "$WORK" ] || { echo "temporary folder not private: stop"; exit 1; }
 proxmox-backup-manager user create monitor@pbs --comment 'Read-only, Orca plugin'
 proxmox-backup-manager user generate-token monitor@pbs orca --output-format json > "$WORK/token.json"
 python3 - "$WORK" <<'PY' || exit 1
@@ -526,14 +539,16 @@ beside PDM, as **enrich only**: the connection adds VM disk use (guest agent), s
 types and pending updates to the guests and nodes PDM already shows, and nothing else.
 
 Same rules as above, and for every change on a host: **show the person the exact commands first
-and wait for their approval**; keep their current root session open until the new setup is
-verified, so a mistake in sshd's configuration can always be undone. Examples use
-`pve-a.example.com` (SSH and API host) and `192.0.2.10` (Orca's machine as the host sees it).
+and wait for their approval**. Keep the current root session open from start to end, and open a
+second one only to check that admin logins still work: if anything goes wrong, the open session
+restores the backup. Examples use `pve-a.example.com` (SSH and API host, `192.0.2.20`) and
+`192.0.2.10` (Orca's machine as the host sees it).
 
 **Ask the person for**, per host: the SSH host and port as Orca's machine reaches them; how you
 may make changes there (an SSH login as root over a host key that is already trusted, or that they
-confirm on the console); the node's name in PDM if it differs from `hostname`; and whether the
-plugin may read VMs' guest agents (on PVE 9 the read-only role allows it).
+confirm on the console); the node's name in PDM, and its PDM cluster (remote) if more than one
+PDM cluster could have a node of that name; and whether the plugin may read VMs' guest agents (on
+PVE 9 the read-only role allows it).
 
 ### T1. On Orca's machine: a key only for the tunnel
 
@@ -548,24 +563,46 @@ chmod 600 ~/.ssh/orca-proxmox-tunnel
 On Windows PowerShell: `ssh-keygen -t ed25519 -N '""' -C orca-proxmox-tunnel -f
 $HOME\.ssh\orca-proxmox-tunnel`, then `icacls $HOME\.ssh\orca-proxmox-tunnel /inheritance:r
 /grant:r "$($env:USERNAME):F"` (OpenSSH refuses a key others can read). The public half
-(`.pub`) goes to the hosts. On the hosts this key can only open the one forward set up below;
-it opens no shell and runs no command, and the API behind the forward still needs its own token.
+(`.pub`) goes to the hosts in T2f. On the hosts this key can only open the one forward set up
+below; it opens no shell and runs no command, and the API behind the forward still needs its own
+token.
 
-### T2. On each host: the tunnel account (root, with the person's approval)
+### T2. On each host: the tunnel account, verified before it can be used
 
-A dedicated account with no shell and no usable password, the key allowed to forward to the API
-and nothing else, and an sshd rule that enforces the same whatever the key says:
+Everything in T2 runs in the open root session, one block at a time, each after the person's
+approval. The key is installed last (T2f), only once the account's effective policy is verified.
+
+**T2a. Backup and account** (no key yet, so nobody can log in as it):
 
 ```sh
-useradd --system --create-home --shell /usr/sbin/nologin orca-tunnel
+set -u; umask 077
+BACKUP=/etc/ssh/sshd_config.orca-backup.$(date +%Y%m%d-%H%M%S)
+cp -a /etc/ssh/sshd_config "$BACKUP" && echo "backup: $BACKUP"
+if id orca-tunnel >/dev/null 2>&1; then
+  echo "orca-tunnel already exists: show the person 'id orca-tunnel' and its ~/.ssh before going on"
+else
+  useradd --system --create-home --shell /usr/sbin/nologin orca-tunnel
+fi
 usermod -p '*' orca-tunnel                        # no password; key login only
 install -d -m 700 -o orca-tunnel -g orca-tunnel /home/orca-tunnel/.ssh
-printf '%s\n' 'restrict,port-forwarding,permitopen="127.0.0.1:8006" <contents of orca-proxmox-tunnel.pub>' \
-  > /home/orca-tunnel/.ssh/authorized_keys
-chown orca-tunnel:orca-tunnel /home/orca-tunnel/.ssh/authorized_keys
-chmod 600 /home/orca-tunnel/.ssh/authorized_keys
+```
 
-cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.orca-backup   # the way back
+**T2b. Earlier Match blocks.** sshd uses the **first** value it finds for each keyword, so a
+`Match` block that comes earlier and also matches this account (by `Group`, `Address`, `Host`,
+`LocalAddress`, `LocalPort` or `All`), in `sshd_config` or in a file it includes before the end,
+can override the rules below. List them and show them to the person:
+
+```sh
+grep -nE '^[[:space:]]*(Match|Include)[[:space:]]' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null
+```
+
+If one could match this account (for example `Match Group users` or `Match Address 192.0.2.0/24`),
+stop and agree with the person how to change it; T2d shows the outcome either way.
+
+**T2c. The account's rules**, appended at the end of `sshd_config` (once):
+
+```sh
+grep -q '^Match User orca-tunnel$' /etc/ssh/sshd_config && { echo "already present: review it"; exit 1; }
 cat >> /etc/ssh/sshd_config <<'EOF'
 
 # Orca plugin: an account that may only forward to the local Proxmox API.
@@ -579,88 +616,54 @@ Match User orca-tunnel
     AllowAgentForwarding no
     ForceCommand /bin/false
 EOF
-sshd -t && systemctl reload ssh
 ```
 
-For PBS use `127.0.0.1:8007` in both places (a host running both: `permitopen="127.0.0.1:8006",
-permitopen="127.0.0.1:8007"` and `PermitOpen 127.0.0.1:8006 127.0.0.1:8007`). The `Match` block
-goes at the end of `sshd_config` (it applies to everything after it). `restrict` turns off every
-forwarding, PTY and agent feature for the key and `port-forwarding` allows forwards again,
-limited by `permitopen`; the `Match` block makes the account's policy local TCP forwarding to the
-API only, whatever key is used: no reverse forwards (`PermitListen none`), no Unix-socket
-forwards, no terminal, no command. If `sshd -t` reports an error, do not reload: restore with
-`cp -a /etc/ssh/sshd_config.orca-backup /etc/ssh/sshd_config`.
+For PBS use `127.0.0.1:8007` (a host running both: `PermitOpen 127.0.0.1:8006 127.0.0.1:8007`).
 
-Check the effective policy (the values sshd will apply to this account):
+**T2d. Verify the effective policy before reloading.** `sshd -T` reads the configuration on disk,
+not the running daemon, so this checks exactly what a reload would apply, for a connection from
+Orca's machine to this host:
 
 ```sh
-sshd -T -C user=orca-tunnel,host=orca-client,addr=192.0.2.10 |
+sshd -t || { cp -a "$BACKUP" /etc/ssh/sshd_config; echo "syntax error: restored"; exit 1; }
+sshd -T -C user=orca-tunnel,host=orca-client,addr=192.0.2.10,laddr=192.0.2.20,lport=22 |
   grep -Ei '^(allowtcpforwarding|allowstreamlocalforwarding|permitlisten|permitopen|permittty|x11forwarding|allowagentforwarding|forcecommand) '
-# allowtcpforwarding local, allowstreamlocalforwarding no, permitlisten none,
-# permitopen 127.0.0.1:8006, permittty no, x11forwarding no, allowagentforwarding no,
-# forcecommand /bin/false
 ```
 
-### T3. Verify the scope before using it (from Orca's machine)
+Expected, every line: `allowtcpforwarding local`, `allowstreamlocalforwarding no`,
+`permitlisten none`, `permitopen 127.0.0.1:8006`, `permittty no`, `x11forwarding no`,
+`allowagentforwarding no`, `forcecommand /bin/false`. Any other value means an earlier rule wins
+(T2b): restore with `cp -a "$BACKUP" /etc/ssh/sshd_config` and stop.
 
-Each command uses only the tunnel key, with the host key already trusted (T5) or confirmed. The
-forward must work, and everything else must be refused:
+**T2e. Reload, then check a fresh admin login** (keep this session open):
 
 ```sh
-K=~/.ssh/orca-proxmox-tunnel; H=pve-a.example.com
-O="-i $K -o IdentitiesOnly=yes -o BatchMode=yes -o ExitOnForwardFailure=yes"
-
-# 1. The forward works: the API's certificate comes back through it (compare with T5's pin).
-ssh $O -N -L 127.0.0.1:18006:127.0.0.1:8006 orca-tunnel@$H & T=$!; sleep 3
-openssl s_client -connect 127.0.0.1:18006 </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256
-kill $T
-
-# 2. No shell: exits at once with status 1 ("PTY allocation request failed" may be printed).
-ssh $O orca-tunnel@$H; echo "exit $?"
-
-# 3. No command: no output, status 1.
-ssh $O orca-tunnel@$H id; echo "exit $?"
-
-# 4. No reverse forward: "Error: remote port forwarding failed for listen port 18080", status 255.
-ssh $O -N -R 127.0.0.1:18080:127.0.0.1:22 orca-tunnel@$H; echo "exit $?"
-
-# 5. No Unix-socket forward: "remote port forwarding failed for listen path …", status 255.
-ssh $O -N -R /tmp/orca-test.sock:127.0.0.1:22 orca-tunnel@$H; echo "exit $?"
-
-# 6. No other destination: the forward starts, but opening it is refused
-#    ("channel …: open failed: administratively prohibited: open failed").
-ssh $O -N -L 127.0.0.1:18022:127.0.0.1:22 orca-tunnel@$H & T=$!; sleep 3
-(exec 3<>/dev/tcp/127.0.0.1/18022) 2>/dev/null; sleep 1; kill $T
+systemctl reload ssh || systemctl reload sshd
 ```
 
-If any of 2–6 succeeds, stop and fix T2 before going on.
+Then, from Orca's machine in a **new** terminal, log in as the admin again (`ssh root@pve-a.example.com
+true`). If the reload failed or that login fails, restore from the open session:
+`cp -a "$BACKUP" /etc/ssh/sshd_config && systemctl reload ssh`, and stop.
 
-### T4. On each host: a read-only API token
-
-As in [PVE: a read-only user and token](#pve-a-read-only-user-and-token), with its own user for
-the plugin: `orca-monitor@pve`, a token `orca` with **privilege separation**, and `PVEAuditor` on
-`/` (or narrower paths such as `/vms`, `/nodes`, `/storage`) for **both** the user and the token.
-Never `Administrator` or any role that can change something.
+**T2f. Only now, the key.** Never overwrite an existing `authorized_keys`:
 
 ```sh
-pveum user add orca-monitor@pve --comment 'Read-only, Orca plugin'
-pveum user token add orca-monitor@pve orca --privsep 1 --output-format json > "$WORK/token.json"   # secret: read as in the PVE section
-pveum acl modify / --users orca-monitor@pve --roles PVEAuditor
-pveum acl modify / --tokens 'orca-monitor@pve!orca' --roles PVEAuditor
-pveum role list --output-format json | python3 -c 'import json,sys; r=[x for x in json.load(sys.stdin) if x["roleid"]=="PVEAuditor"][0]; print("VM.GuestAgent.Audit" in r["privs"])'
+F=/home/orca-tunnel/.ssh/authorized_keys
+[ -e "$F" ] && { echo "$F exists: show it to the person, do not overwrite"; exit 1; }
+install -m 600 -o orca-tunnel -g orca-tunnel /dev/null "$F"
+printf '%s\n' 'restrict,port-forwarding,permitopen="127.0.0.1:8006" <contents of orca-proxmox-tunnel.pub>' >> "$F"
 ```
 
-The last line prints `True` on PVE 9: the role allows the guest agent's informational calls,
-which is what VM disk use needs. `False` (PVE 8): VM disk use stays unknown, and the plugin must
-not be given `VM.Monitor` instead (it allows running commands in guests). If the person does not
-want the agent read, use the `OrcaAuditor` role from the PVE section and turn off *Disk use
-inside VMs*. On a cluster the user, token and ACL exist once for all nodes. PBS:
-`orca-monitor@pbs`, `Audit` on `/` (or `DatastoreAudit` on `/datastore`), for the user and the
-token, as in [PBS: a read-only user and token](#pbs-a-read-only-user-and-token).
+`restrict` turns off every forwarding, PTY and agent feature for the key, `port-forwarding` allows
+forwards again and `permitopen` limits local forwards to the API; the `Match` block makes the
+account's effective policy local TCP forwarding to the API only, whatever key is used.
 
-### T5. Pin both keys
+**The way back** at any point: `cp -a "$BACKUP" /etc/ssh/sshd_config && systemctl reload ssh`,
+then `pkill -u orca-tunnel; userdel -r orca-tunnel` if the account should go too.
 
-Read both on the host (over the trusted session or its console), not over the network:
+### T3. Pin both keys
+
+Read both on the host (in the open root session, or on its console), not over the network:
 
 ```sh
 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub                             # show the person
@@ -670,8 +673,83 @@ openssl x509 -in /etc/pve/local/pve-ssl.pem -noout -fingerprint -sha256      # t
 
 (`pveproxy-ssl.pem` next to `pve-ssl.pem` when a custom certificate is installed; PBS:
 `/etc/proxmox-backup/proxy.pem`.) The person confirms the SSH host key fingerprint against what
-`ssh-keyscan -t ed25519 -p 22 pve-a.example.com | ssh-keygen -lf -` shows from Orca's machine, and
-the API fingerprint against T3's first check.
+`ssh-keyscan -t ed25519 -p 22 pve-a.example.com | ssh-keygen -lf -` shows from Orca's machine.
+
+### T4. Verify the scope before using it (from Orca's machine)
+
+Every check uses only the tunnel key, no SSH config, no agent, and the host key from T3 pinned in
+a private file, with a time limit, so that a key or host-key problem can never pass for a refused
+forward, and nothing allowed by mistake keeps running. The first check must succeed (it proves the
+key and the host key work); every other must be refused with its own message:
+
+```sh
+set -u; umask 077
+CHK=$(mktemp -d) || exit 1; trap 'rm -rf "$CHK"' EXIT INT TERM HUP
+H=pve-a.example.com; K=$HOME/.ssh/orca-proxmox-tunnel
+printf '%s %s\n' "$H" 'ssh-ed25519 AAAA…' > "$CHK/known_hosts"           # the hostKey from T3
+S() { timeout 20 ssh -F none -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityAgent=none \
+  -o "IdentityFile=$K" -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$CHK/known_hosts" \
+  -o GlobalKnownHostsFile=none -o ConnectTimeout=10 -o ExitOnForwardFailure=yes "$@" "orca-tunnel@$H"; }
+refused() {  # refused <expected message or ''> <ssh options…>: the attempt must fail, with that message
+  local want=$1; shift
+  S "$@" </dev/null >"$CHK/out" 2>&1; local code=$?
+  if grep -qiE 'permission denied|host key verification failed' "$CHK/out"; then echo "KEY OR HOST KEY PROBLEM, not a policy answer: stop"; return 1; fi
+  if [ "$code" = 124 ]; then echo "ALLOWED (ran until the time limit): stop and use the way back"; return 1; fi
+  if [ "$code" = 0 ]; then echo "ALLOWED (exit 0): stop and use the way back"; return 1; fi
+  if [ -n "$want" ] && ! grep -qi "$want" "$CHK/out"; then echo "UNEXPECTED: $(tail -2 "$CHK/out")"; return 1; fi
+  echo "refused as expected (exit $code)"
+}
+
+# 1. The forward works: the API's certificate comes back through it (compare with T3's pin).
+S -N -L 127.0.0.1:18006:127.0.0.1:8006 & T=$!; sleep 4
+openssl s_client -connect 127.0.0.1:18006 </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256
+kill $T; wait $T 2>/dev/null
+
+refused ''                                         # 2. no shell: exits at once (status 1)
+refused '' id                                      # 3. no command: no output (status 1)
+grep -q 'uid=' "$CHK/out" && echo "A COMMAND RAN: stop and use the way back"
+refused 'remote port forwarding failed' -N -R 127.0.0.1:18080:127.0.0.1:22        # 4. no reverse forward
+refused 'remote port forwarding failed' -N -R /tmp/orca-test.sock:127.0.0.1:22    # 5. no socket forward
+
+# 6. No other destination: the forward starts, but opening it is refused.
+S -N -L 127.0.0.1:18022:127.0.0.1:22 >"$CHK/out" 2>&1 & T=$!; sleep 4
+(exec 3<>/dev/tcp/127.0.0.1/18022) 2>/dev/null; sleep 2; kill $T; wait $T 2>/dev/null
+grep -q 'administratively prohibited' "$CHK/out" && echo "refused as expected" || echo "UNEXPECTED: stop"
+```
+
+If check 1 fails, or any of 2–6 is not refused as expected, stop and use the way back (T2).
+`timeout` is GNU coreutils (on macOS: `brew install coreutils` and `gtimeout`); without it, run
+each check in the background and `kill` it after 20 s.
+
+### T5. On each host: a read-only API token
+
+In a root session on the host that starts by creating a private folder for the secret, removed
+when the session ends; stop if it cannot be created:
+
+```sh
+set +x; umask 077
+WORK=$(mktemp -d) || { echo "no private temporary folder: stop"; exit 1; }
+trap 'rm -rf "$WORK"' EXIT INT TERM HUP
+[ -d "$WORK" ] && [ -O "$WORK" ] || { echo "temporary folder not private: stop"; exit 1; }
+pveum user add orca-monitor@pve --comment 'Read-only, Orca plugin'
+pveum user token add orca-monitor@pve orca --privsep 1 --output-format json > "$WORK/token.json"
+# Read the secret into "$WORK/secret" without printing it, as in "PVE: a read-only user and token".
+pveum acl modify / --users orca-monitor@pve --roles PVEAuditor
+pveum acl modify / --tokens 'orca-monitor@pve!orca' --roles PVEAuditor
+pveum role list --output-format json | python3 -c 'import json,sys; r=[x for x in json.load(sys.stdin) if x["roleid"]=="PVEAuditor"][0]; print("VM.GuestAgent.Audit" in r["privs"])'
+```
+
+The token has **privilege separation**, and `PVEAuditor` on `/` (or narrower paths such as `/vms`,
+`/nodes`, `/storage`) goes to **both** the user and the token. Never `Administrator` or any role
+that can change something. The last line prints `True` on PVE 9: the role allows the guest
+agent's informational calls, which is what VM disk use needs. `False` (PVE 8): VM disk use stays
+unknown, and the plugin must not be given `VM.Monitor` instead (it allows running commands in
+guests). If the person does not want the agent read, use the `OrcaAuditor` role from the PVE
+section and turn off *Disk use inside VMs*. On a cluster the user, token and ACL exist once for
+all nodes. Bring the secret to Orca's machine as in [step 4](#4-hand-the-connection-to-the-plugin)
+(over SSH, into a private folder there, removed from the host). PBS: `orca-monitor@pbs`, `Audit`
+on `/` (or `DatastoreAudit` on `/datastore`), for the user and the token, as in
+[PBS: a read-only user and token](#pbs-a-read-only-user-and-token), in the same kind of session.
 
 ### T6. Hand each host to the plugin
 
@@ -686,7 +764,7 @@ Step 4's import file, once per host, waiting for each import's log lines before 
   "fingerprint": "AB:CD:…",
   "secret": "…",
   "enrichOnly": true,
-  "nodeMap": { "pve-a": "pve-a" },
+  "nodeMap": { "pve-a": "cluster-a/pve-a" },
   "tunnel": {
     "host": "pve-a.example.com",
     "port": 22,
@@ -698,9 +776,11 @@ Step 4's import file, once per host, waiting for each import's log lines before 
 }
 ```
 
-`identityFile` is the absolute path on Orca's machine; `nodeMap` is needed only when PDM names the
-node differently (`node` or `remote/node`). An import without `hostKey` is refused (it cannot
-show anyone a new key). Then restart the plugin and read both log lines, as in step 4:
+`identityFile` is the absolute path on Orca's machine. `nodeMap` names the node in PDM as
+`remote/node`: the plugin then knows which PDM cluster this server belongs to. Without it, the
+plugin learns the cluster only while every PDM cluster is visible and exactly one has these node
+names; otherwise it waits and says so. An import without `hostKey` is refused (it cannot show
+anyone a new key). Then restart the plugin and read both log lines, as in step 4:
 
 ```sh
 orca plugin restart "$KEY"; orca plugin open "$KEY" --panel=proxmox
@@ -708,11 +788,11 @@ sleep 10; orca plugin logs "$KEY" | grep -E 'Import( file)?:' | tail -2
 # Import: Imported the PVE connection to https://pve-a.example.com:8006 as orca-monitor@pve!orca, pinned (start). Connection test: PVE 9.x, 1 nodes visible.
 ```
 
-A failure names the cause: the key refused (T1/T2), the SSH host key not matching (T5), the
-forward not allowed (T2), or the API's certificate (T5). Finally ask the person to open the
-**Guests** tab: within a few minutes, running VMs whose guest agent runs show their disk use as a
-percentage instead of the allocated size with `?`; the panel's warnings name an enrich-only
-connection that matched no guest (fix with `nodeMap`).
+A failure names the cause: the key refused or unreadable (T1/T2f), the SSH host key not matching
+(T3), the forward not allowed (T2), or the API's certificate (T3). Finally ask the person to open
+the **Guests** tab: within a few minutes, running VMs whose guest agent runs show their disk use as
+a percentage instead of the allocated size with `?`; the panel's warnings name an enrich-only
+connection that matched no guest or whose cluster is not known yet (fix with `nodeMap`).
 
 Alternatively the person adds the connection in **Settings** with *Reach via SSH tunnel* and
 *Enrich only*, presses **Test**, compares the SSH host key shown and pins it.
@@ -726,7 +806,7 @@ Each level gets the least it needs, and each credential can be withdrawn on its 
 | PDM token (`Auditor`) | PDM | Read every remote PDM manages | Change anything; open consoles; read backup contents | Delete the token in PDM (Configuration → Access Control → API Token) |
 | PVE token (`PVEAuditor`, privilege separation) | Each PVE cluster | Read nodes, guests, configs, storages, tasks; on PVE 9 the guest agent's informational calls | Change anything; consoles; run commands or read files in guests | `pveum user token remove orca-monitor@pve orca` (or `pveum user delete orca-monitor@pve`) |
 | PBS token (`Audit` or `DatastoreAudit`) | Each PBS | List datastores, snapshots, tasks | Read or restore backup contents; change anything | `proxmox-backup-manager user delete-token orca-monitor@pbs orca` |
-| Tunnel key and `orca-tunnel` account | Orca's machine and each host | Open a TCP forward to the local API port | Shell, commands, PTY, reverse or Unix-socket forwards, other destinations | Remove its line from `/home/orca-tunnel/.ssh/authorized_keys`, or `userdel -r orca-tunnel` and remove the `Match User orca-tunnel` block, then `sshd -t && systemctl reload ssh` |
+| Tunnel key and `orca-tunnel` account | Orca's machine and each host | Open a TCP forward to the local API port | Shell, commands, PTY, reverse or Unix-socket forwards, other destinations | Remove its line from `/home/orca-tunnel/.ssh/authorized_keys` (no new logins), end running ones with `pkill -u orca-tunnel`; or remove the account (`userdel -r orca-tunnel`) and the `Match User orca-tunnel` block, then `sshd -t && systemctl reload ssh` |
 | Orca's own SSH targets | Orca | What that SSH login may do (Orca's feature, not the plugin's) | — | Remove the target in Orca (`orca host rm ssh:<id>`) |
 
 The plugin itself only sends `GET` requests and keeps every token sealed (see
