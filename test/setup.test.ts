@@ -275,10 +275,14 @@ afterEach(async () => {
 
 const READ_ONLY = { '/': { 'Sys.Audit': 1, 'VM.Audit': 1, 'Datastore.Audit': 1, 'VM.GuestAgent.Audit': 1 } }
 
+/** Whether the API answers this machine's TLS handshake (the reachability check and error pins). */
+let reachable = true
+
 async function mounted(srv: Server, opts: { failRead?: boolean; shrink?: boolean; privileges?: unknown; storage?: Record<string, never> } = {}) {
   const orca = fakeOrca(srv, opts)
   const routes = { ...pveRoutes(NOW), '/access/permissions': opts.privileges ?? READ_ONLY }
-  main.useTestDoubles({ transport: mockTransport(routes as never), probe: async () => PIN, now: () => NOW, vault: memoryVault(), orcaCli: orca.cli })
+  reachable = true
+  main.useTestDoubles({ transport: mockTransport(routes as never), probe: async () => (reachable ? PIN : null), now: () => NOW, vault: memoryVault(), orcaCli: orca.cli })
   const host = mockHost(opts.storage ? { storage: opts.storage } : undefined)
   worker = await mountWorker(main, { host })
   return { orca, host }
@@ -462,4 +466,23 @@ test('Undo that finds the run’s permission changed since keeps it and the reco
   const kept = (await worker!.request('setup.hosts')).hosts[0].records
   assert.equal(kept.length, 1)
   assert.match(kept[0].message ?? '', /changed since the run/)
+})
+
+test('an API this machine cannot reach stops one-click before anything runs on the host', async () => {
+  const { orca, host } = await mounted(server())
+  await worker!.request('setup.detect', { hostKey: X1 })
+  // At the preview: refused, with the guided path to use instead; no script, no terminal.
+  reachable = false
+  await assert.rejects(plan(), /This machine can’t reach pve-x1\.example\.test:8006; one-click needs the API reachable from here\. Use the guided SSH-tunnel path instead: https:\/\/github\.com\/wizhelp\/orca-proxmox\/blob\/main\/docs\/AGENT_SETUP\.md#through-an-ssh-tunnel-enrich-only/)
+  assert.equal(orca.typed.length, 1, 'only the check ran')
+  // Reachable when shown, not any more at Run: still nothing runs, nothing is recorded.
+  reachable = true
+  const shown = await plan()
+  reachable = false
+  const answer = await runJob(shown.planId)
+  assert.deepEqual([answer.ok, answer.stage, answer.undo], [false, 'reach', false])
+  assert.match(answer.message, /can’t reach pve-x1\.example\.test:8006.*Nothing was run on the host\./)
+  assert.equal(orca.typed.length, 1, 'no setup terminal')
+  assert.equal(host.data().storage['setup.records'], undefined)
+  assert.deepEqual((await worker!.request('setup.hosts')).hosts[0].records, [])
 })

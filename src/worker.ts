@@ -22,7 +22,7 @@ import {
 import { CompositeSource, type EnrichBindings, type FailedPart, type Part } from './proxmox/composite'
 import type { ConfigAnswer, ConnectionInput, ImportStatus, SecretsProtection, SshHostKey, TestAnswer } from './protocol'
 import { ApiError, normalizeBaseUrl, ProxmoxClient } from './proxmox/client'
-import { nodeTransport, type ConnectTo, type Transport } from './proxmox/http'
+import { nodeTransport, probeFingerprint, type ConnectTo, type Transport } from './proxmox/http'
 import { findSsh, freeLocalPort, hostKeyFingerprint, sshEnvironment, TunnelManager, type SpawnSsh } from './proxmox/tunnel'
 import { safeTarget } from './features/targets'
 import { spawn } from 'node:child_process'
@@ -902,6 +902,7 @@ export default function activate(orca: OrcaWorkerApi): void {
         return saveConnection(input)
       }),
     remove: (c) => removeConnection(c.id, c.revision),
+    reach: (baseUrl) => (probe ?? ((url: URL) => probeFingerprint(url, 5000)))(new URL(baseUrl)),
     pdmCovers: async (node) => {
       const list = await loadConnections()
       if (!list.some((c) => c.kind === 'pdm')) return false

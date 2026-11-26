@@ -105,7 +105,7 @@ export type SetupPlanInput = { hostKey: string; product: 'pve' | 'pbs'; replace:
 export type SetupRunAnswer = {
   ok: boolean
   /** How far it got. */
-  stage: 'script' | 'secret' | 'test' | 'rights' | 'scope' | 'save' | 'saved' | 'undone'
+  stage: 'reach' | 'script' | 'secret' | 'test' | 'rights' | 'scope' | 'save' | 'saved' | 'undone'
   /** What is known of the result: `unknown` when the host's answer was not seen complete. */
   outcome: 'saved' | 'undone' | 'stopped' | 'failed' | 'unknown'
   message: string

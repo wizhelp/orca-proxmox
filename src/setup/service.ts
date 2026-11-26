@@ -59,6 +59,11 @@ export type SetupDeps = {
   remove(connection: { id: string; revision: string }): Promise<void>
   /** Whether a PDM connection already shows a node of this name. */
   pdmCovers(node: string): Promise<boolean>
+  /**
+   * Whether this machine reaches the API at `baseUrl`: a TCP connection and a TLS handshake,
+   * nothing sent; the certificate's fingerprint, or null when it cannot be reached.
+   */
+  reach(baseUrl: string): Promise<string | null>
   /** A secret now known: every log and answer masks it from here on. */
   secretSeen(secret: string): void
   log(text: string): void
@@ -69,6 +74,9 @@ export type SetupDeps = {
 export class SetupInputError extends Error {
   readonly code = 'invalid_params'
 }
+
+/** The guided path for an API that only the host itself reaches. */
+export const TUNNEL_GUIDE = 'https://github.com/wizhelp/orca-proxmox/blob/main/docs/AGENT_SETUP.md#through-an-ssh-tunnel-enrich-only'
 
 const DETECTED_KEY = 'setup.detected'
 const RECORDS_KEY = 'setup.records'
@@ -330,6 +338,7 @@ export class SetupService {
     const { shell, name: hostName } = await this.shellOf(input.hostKey)
     const port = apiPortOf(product)
     const baseUrl = `https://${urlHost(address)}:${port}`
+    await this.reachable(baseUrl)
     const existing = await this.deps.connections()
     if (existing.some((c) => c.baseUrl === baseUrl)) throw new SetupInputError(`A connection to ${baseUrl} exists already.`)
     if (existing.some((c) => c.name === name && c.kind !== 'pdm')) throw new SetupInputError(`A connection named ${name} exists already; choose another name.`)
@@ -381,6 +390,17 @@ export class SetupService {
         enrichOnly
       }
     }
+  }
+
+  /**
+   * One-click needs the API reachable from this machine (the connection is tested from here): when
+   * it is not, nothing is run on the host, so nothing is created there that cannot be used.
+   */
+  private async reachable(baseUrl: string): Promise<void> {
+    const fingerprint = await this.deps.reach(baseUrl).catch(() => null)
+    if (fingerprint) return
+    const { host } = new URL(baseUrl)
+    throw new SetupInputError(`This machine can’t reach ${host}; one-click needs the API reachable from here. Use the guided SSH-tunnel path instead: ${TUNNEL_GUIDE}`)
   }
 
   /** The Undo script for one recorded run on a host. */
@@ -453,6 +473,12 @@ export class SetupService {
   private async runSetup(plan: Plan): Promise<SetupRunAnswer> {
     const request = plan.request!
     const input = plan.input!
+    // Checked again right before anything runs: the network may have changed since the preview.
+    try {
+      await this.reachable(`https://${urlHost(input.address)}:${apiPortOf(input.product)}`)
+    } catch (error) {
+      return { ok: false, stage: 'reach', outcome: 'stopped', message: `${error instanceof Error ? error.message : String(error)} Nothing was run on the host.`, steps: [], undo: false }
+    }
     const record: StoredRecord = {
       hostKey: plan.hostKey,
       runId: plan.id,

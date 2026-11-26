@@ -168,6 +168,13 @@ function planView(plan: SetupPlan): HTMLElement {
   )
 }
 
+/** An error, with the guide's link made clickable when it names it. */
+function messageLine(text: string): HTMLElement {
+  const at = text.indexOf(TUNNEL_GUIDE)
+  if (at < 0) return h('div', { class: 'bad-text small', role: 'status' }, text)
+  return h('div', { class: 'bad-text small', role: 'status' }, text.slice(0, at), h('a', { href: TUNNEL_GUIDE, onClick: (e: Event) => (e.preventDefault(), void openLink(TUNNEL_GUIDE)) }, 'the guide’s SSH tunnel section'), text.slice(at + TUNNEL_GUIDE.length))
+}
+
 function resultView(answer: SetupRunAnswer): HTMLElement {
   return callout(answer.ok ? 'ok' : 'bad', answer.ok ? (answer.stage === 'undone' ? 'Undone' : 'Connected') : 'Not done', h('div', null, answer.message), answer.steps.length ? h('div', { class: 'muted small' }, `Reported: ${answer.steps.join(', ').replace(/_/g, ' ')}`) : null)
 }
@@ -216,7 +223,7 @@ function hostRow(host: SetupHost): HTMLElement {
     open && d ? connectForm(host) : null,
     state.plan && state.plan.hostKey === host.key ? planView(state.plan) : null,
     state.result?.hostKey === host.key ? resultView(state.result.answer) : null,
-    state.message?.hostKey === host.key ? h('div', { class: 'bad-text small', role: 'status' }, state.message.text) : null
+    state.message?.hostKey === host.key ? messageLine(state.message.text) : null
   )
 }
 
