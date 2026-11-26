@@ -27,7 +27,7 @@ export function worktreeSelector(worktreeId: string): string {
 }
 
 /** A plain workspace first (the server's own folder, say), a bot's home last; then the newest. */
-function pick(workspaces: OrcaWorkspace[]): OrcaWorkspace | undefined {
+export function pick(workspaces: OrcaWorkspace[]): OrcaWorkspace | undefined {
   return [...workspaces]
     .filter((w) => w.worktreeId)
     .sort((a, b) => Number(!!a.bot) - Number(!!b.bot) || (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0))[0]

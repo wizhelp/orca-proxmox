@@ -25,8 +25,8 @@ import { ApiError, normalizeBaseUrl, ProxmoxClient } from './proxmox/client'
 import { nodeTransport, type ConnectTo, type Transport } from './proxmox/http'
 import { findSsh, freeLocalPort, hostKeyFingerprint, sshEnvironment, TunnelManager, type SpawnSsh } from './proxmox/tunnel'
 import { safeTarget } from './features/targets'
-import { spawn } from 'node:child_process'
-import { tmpdir } from 'node:os'
+import { execFile, spawn } from 'node:child_process'
+import { tmpdir, userInfo } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { createSource, type AccessCheck } from './proxmox/source'
 import { cliEnvironment, nodeCliRunner } from './orca/cli'
@@ -38,6 +38,7 @@ import { Background } from './background'
 import { outboundSnapshot, redactDeep, scrubLine } from './scrub'
 import { fileVault, keyFile, memoryVault, type Binding, type Vault } from './vault'
 import { cleanupText, importFile, takeImport, type ImportedConnection } from './importer'
+import { SetupService } from './setup/service'
 import type { AlertState } from './features/alerts'
 import type { JsonValue } from 'orca/worker'
 
@@ -61,7 +62,7 @@ const sameEndpoint = (a: ConnectionConfig, b: ConnectionConfig) =>
 /** How a connection is reached when not directly: its SSH tunnel, every field that decides where. */
 const routeOf = (c: ConnectionConfig): string | undefined => {
   const t = c.tunnel
-  return t ? JSON.stringify(['ssh', t.host, t.port, t.user, t.identityFile, t.target, t.hostKey]) : undefined
+  return t ? JSON.stringify(['ssh', t.host, t.port, t.user, t.identityFile, t.target, t.hostKey, ...(t.keyRef ? [t.keyRef] : [])]) : undefined
 }
 /** What a sealed secret is bound to: everything that decides where it is sent. */
 const binding = (c: ConnectionConfig): Binding => {
@@ -80,9 +81,19 @@ let tunnelManager: TunnelManager | undefined
 /** The tunnel manager; none is created once the worker is stopping (a read still in flight then fails). */
 const tunnels = () => {
   if (stopped) throw new ApiError({ kind: 'unreachable', message: 'The plugin is stopping; no SSH tunnel is started' })
-  return (tunnelManager ??= new TunnelManager({ spawn: spawnSsh, sshPath: () => sshPath(), dir: tunnelDir(), freePort: freeLocalPort, now: () => clock() }))
+  return (tunnelManager ??= new TunnelManager({ spawn: spawnSsh, sshPath: () => sshPath(), dir: tunnelDir(), freePort: freeLocalPort, now: () => clock(), identityKey: (ref) => openTunnelKey(ref), protectKeyFile: (path) => protectKeyFile(path) }))
 }
+/** The plugin's own tunnel keys (Connect via Orca), opened from its sealed secrets; set at activation. */
+let openTunnelKey: (ref: string) => Promise<string | null> = async () => null
+/** On Windows, OpenSSH refuses a key others may read: the file's ACL becomes this user's alone. */
+let protectKeyFile: (path: string) => Promise<void> = (path) =>
+  process.platform !== 'win32'
+    ? Promise.resolve()
+    : new Promise((resolve, reject) =>
+        execFile('icacls', [path, '/inheritance:r', '/grant:r', `${userInfo().username}:(F)`], { windowsHide: true, timeout: 10000 }, (error) => (error ? reject(new ApiError({ kind: 'invalid-config', message: 'The tunnel key file could not be closed to other users' })) : resolve()))
+      )
 let clock: () => number = Date.now
+let sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms))
 let cliRunner: (() => CliRunner) | undefined
 let vault: Vault | undefined
 /** The import file; tests point it at a temporary folder (or nowhere). */
@@ -109,7 +120,10 @@ export function useTestDoubles(doubles: {
   vault?: Vault
   importPath?: string
   importPlatform?: NodeJS.Platform
+  sleep?: (ms: number) => Promise<void>
 }): void {
+  sleep = doubles.sleep ?? ((ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))))
+  protectKeyFile = async () => undefined
   background = doubles.background ?? false
   // Never the real import file in tests: a path that does not exist unless a test makes it.
   importPath = doubles.importPath ?? '\0no-import-file-in-tests'
@@ -199,6 +213,7 @@ function validate(input: ConnectionInput, id: string): ConnectionConfig {
 }
 
 const SSH_USER = /^[A-Za-z_][A-Za-z0-9._-]{0,31}$/
+const KEY_REF = /^k-[0-9a-f]{16}$/
 const NODE_NAME = /^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$/
 
 /** An SSH tunnel's fields, checked one by one; they become ssh arguments (never through a shell). */
@@ -210,14 +225,17 @@ function validTunnel(raw: Partial<Record<keyof SshTunnel, unknown>>, kind: Sourc
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new InputError('The SSH port must be a number from 1 to 65535.')
   const user = text(raw.user)
   if (!SSH_USER.test(user)) throw new InputError('The SSH user must be a plain user name.')
+  const keyRef = text(raw.keyRef)
   const identityFile = text(raw.identityFile)
-  if (!isAbsolute(identityFile) || identityFile.startsWith('-') || /[\0\r\n]/.test(identityFile)) throw new InputError('The identity file must be the absolute path of a private key on this machine, e.g. C:\\Users\\you\\.ssh\\key or C:/Users/you/.ssh/key. On Windows, backslashes lost on the way (in a shell) make a path relative: write it from PowerShell or use forward slashes.')
+  if (keyRef) {
+    if (!KEY_REF.test(keyRef) || identityFile) throw new InputError('The tunnel uses either the plugin’s own key or an identity file, not both.')
+  } else if (!isAbsolute(identityFile) || identityFile.startsWith('-') || /[\0\r\n]/.test(identityFile)) throw new InputError('The identity file must be the absolute path of a private key on this machine, e.g. C:\\Users\\you\\.ssh\\key or C:/Users/you/.ssh/key. On Windows, backslashes lost on the way (in a shell) make a path relative: write it from PowerShell or use forward slashes.')
   const target = text(raw.target) || (kind === 'pbs' ? '127.0.0.1:8007' : '127.0.0.1:8006')
   const t = /^([^:\s]+):(\d{1,5})$/.exec(target)
   if (!t || safeTarget(t[1]) !== t[1] || Number(t[2]) < 1 || Number(t[2]) > 65535) throw new InputError('The tunnel target must be host:port as the SSH server reaches the API, e.g. 127.0.0.1:8006.')
   const hostKey = text(raw.hostKey).split(/\s+/).slice(0, 2).join(' ')
   if (hostKey && !hostKeyFingerprint(hostKey)) throw new InputError('The SSH host key must be one public key, like "ssh-ed25519 AAAA…".')
-  return { host, port, user, identityFile, target, hostKey }
+  return { host, port, user, identityFile, target, hostKey, ...(keyRef ? { keyRef } : {}) }
 }
 
 /** Node names here -> PDM node names (or remote/node), for enrich only. */
@@ -645,6 +663,12 @@ export default function activate(orca: OrcaWorkerApi): void {
     const revision = typeof raw?.revision === 'string' ? raw.revision : undefined
     // Always one named connection, as it was when the removal was confirmed; never "all".
     if (!id) throw new InputError('Name the connection to remove; nothing was removed.')
+    await removeConnection(id, revision)
+    return configAnswer()
+  })
+
+  /** Removes one connection, as it was when the removal was confirmed (its revision). */
+  async function removeConnection(id: string, revision: string | undefined): Promise<void> {
     await withConfigLock(async () => {
       const list = await loadConnections()
       const target = list.find((c) => c.id === id)
@@ -656,10 +680,12 @@ export default function activate(orca: OrcaWorkerApi): void {
       await switched([target])
     })
     log('Removed a connection and its secret')
-    return configAnswer()
-  })
+  }
 
-  orca.panels.handle('connection.test', async (input, { signal }): Promise<TestAnswer> => {
+  orca.panels.handle('connection.test', (input, { signal }) => testConnection(input, signal))
+
+  /** Tries a connection that is not saved (yet): Settings' test, and Connect via Orca's before it saves. */
+  async function testConnection(input: ConnectionInput, signal?: AbortSignal): Promise<TestAnswer> {
     const list = await loadConnections()
     const current = input.id && input.id !== 'new' ? (list.find((c) => c.id === input.id) ?? null) : input.id === 'new' ? null : (list[0] ?? null)
     let next: ConnectionConfig
@@ -684,7 +710,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       log(`Connection test to ${next.baseUrl} failed: ${info.kind}: ${info.message}`)
       return toJson<TestAnswer>({ ok: false, error: info, ...(seen.sshHostKey ? { sshHostKey: seen.sshHostKey } : {}) })
     }
-  })
+  }
 
   const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
   /** Placements only make sense on the estate they were made on: kept per PDM base URL. */
@@ -840,6 +866,62 @@ export default function activate(orca: OrcaWorkerApi): void {
     log(`Opened a terminal (${plan.how}) for ${hostKey}, ${navigated ? 'shown' : 'not shown'}`)
     return { how: plan.how, navigated, where: plan.where }
   })
+
+  // Connect via Orca (setup/service.ts): the tunnel keys it makes are sealed like token secrets.
+  const tunnelKeyName = (ref: string) => `tunnel-key:${ref}`
+  const keyBinding = (ref: string): Binding => ({ id: ref, kind: 'ssh-key', baseUrl: '', tokenId: '', fingerprint: '' })
+  openTunnelKey = async (ref) => {
+    const stored = await orca.secrets.get(tunnelKeyName(ref))
+    return stored ? sealer().open(stored, keyBinding(ref)) : null
+  }
+  const setup = new SetupService({
+    cli: () => (cliRunner ?? nodeCliRunner)(),
+    storage: { get: (key) => orca.storage.get(key), set: (key, value) => orca.storage.set(key, value as JsonValue) },
+    sealKey: async (ref, pem) => {
+      if ((await secretsProtection()) === 'unavailable') throw new InputError('Orca cannot encrypt secrets on this machine (no OS keyring); the tunnel key is not stored.')
+      await orca.secrets.set(tunnelKeyName(ref), await sealer().seal(pem, keyBinding(ref)))
+    },
+    dropKey: (ref) => orca.secrets.delete(tunnelKeyName(ref)),
+    connections: loadConnections,
+    test: (input) => testConnection(input),
+    save: (input) =>
+      withConfigLock(async () => {
+        configEpoch += 1
+        return saveConnection(input)
+      }),
+    remove: (c) => removeConnection(c.id, c.revision),
+    pdmCovers: async (node) => {
+      const list = await loadConnections()
+      if (!list.some((c) => c.kind === 'pdm')) return false
+      if (!latest) await loadEstate(false).catch(() => undefined)
+      const direct = new Set(list.filter((c) => c.kind !== 'pdm').map((c) => c.name))
+      return !!latest?.hosts.some((h) => h.remoteType === 'pve' && h.node === node && !direct.has(h.remote))
+    },
+    secretSeen: (secret) => knownSecrets.add(secret),
+    log,
+    now: () => clock(),
+    sleep: (ms) => sleep(ms)
+  })
+  /** Setup answers leave like every other: known secrets masked, server text scrubbed. */
+  const outbound = <T extends object>(answer: T): T => {
+    const out = redactDeep(answer, [...knownSecrets]) as T & { message?: unknown }
+    if (typeof out.message === 'string') out.message = scrubLine(out.message, knownSecrets, 600)
+    return toJson(out)
+  }
+  const setupError = (error: unknown): never => {
+    if (error instanceof Error && 'code' in error && error.code === 'invalid_params') throw new InputError(scrubLine(error.message, knownSecrets, 400))
+    throw new Error(scrubLine(error instanceof Error ? error.message : String(error), knownSecrets, 400))
+  }
+  const hostKeyOf = (input: unknown) => {
+    const key = isRecord(input) && typeof input.hostKey === 'string' ? input.hostKey : ''
+    if (!/^(ssh|env):[A-Za-z0-9._:-]{1,120}$/.test(key)) throw new InputError('hostKey must name an Orca SSH target or paired server')
+    return key
+  }
+  orca.panels.handle('setup.hosts', () => setup.hosts().then(outbound, setupError))
+  orca.panels.handle('setup.detect', (input) => setup.detect(hostKeyOf(input)).then(outbound, setupError))
+  orca.panels.handle('setup.plan', (input) => setup.plan({ ...input, hostKey: hostKeyOf(input) }).then(outbound, setupError))
+  orca.panels.handle('setup.undoPlan', (input) => setup.undoPlan(hostKeyOf(input), input.product === 'pbs' ? 'pbs' : 'pve').then(outbound, setupError))
+  orca.panels.handle('setup.run', (input) => setup.run(typeof input.planId === 'string' ? input.planId : '', hostKeyOf(input)).then(outbound, setupError))
 
   // The status-bar item runs this: show the panel (Orca's plugin API cannot, its CLI can).
   orca.commands.register('proxmox.openPanel', async () => {

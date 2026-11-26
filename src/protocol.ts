@@ -49,6 +49,68 @@ export type TestAnswer =
   | { ok: true; version: string; remotes: number; unit?: 'nodes' | 'datastores'; sshHostKey?: SshHostKey }
   | { ok: false; error: SourceError; sshHostKey?: SshHostKey }
 
+/** What the read-only check found on an Orca host (values as the host said them, cleaned). */
+export type SetupDetection = {
+  at: number
+  /** The shell's user is root, may use `sudo -n`, or neither (then nothing can be set up). */
+  root: 'yes' | 'sudo' | 'no'
+  /** Installed product versions. */
+  products: { pve?: string; pbs?: string; pdm?: string }
+  sshd: boolean
+  hostname: string
+  fqdn?: string
+  /** From the shell's SSH_CONNECTION: the address it was reached at, and where from. */
+  via?: { client: string; server: string; port: number }
+}
+
+/** A setup the plugin made on a host, as far as Undo needs to know (no secret). */
+export type SetupRecord = { product: 'pve' | 'pbs'; runId: string; at: number; tunnel: boolean; replacedToken: boolean; connectionId?: string; complete: boolean }
+
+/** An Orca host for "Connect via Orca". */
+export type SetupHost = {
+  key: string
+  name: string
+  kind: 'ssh' | 'environment'
+  connected?: boolean
+  /** Where its scripts run (a workspace of it), or why they cannot. */
+  where?: string
+  unavailable?: string
+  detection?: SetupDetection
+  records: SetupRecord[]
+}
+
+export type SetupHostsAnswer = { hosts: SetupHost[]; error?: string; busy: boolean }
+
+/** What Connect or Undo will run, shown in full before anything runs; `planId` runs it once. */
+export type SetupPlan = {
+  planId: string
+  action: 'setup' | 'undo'
+  hostKey: string
+  hostName: string
+  where: string
+  /** The exact script, as it will run on the host. */
+  script: string
+  /** What it does, in a few lines. */
+  summary: string[]
+  expiresAt: number
+  /** The connection that will be saved (setup only). */
+  connection?: { kind: 'pve' | 'pbs'; name: string; baseUrl: string; tokenId: string; enrichOnly: boolean; tunnel?: string }
+}
+
+export type SetupPlanInput = { hostKey: string; product: 'pve' | 'pbs'; tunnel: boolean; replace: boolean; address: string; name: string }
+
+export type SetupRunAnswer = {
+  ok: boolean
+  /** How far it got. */
+  stage: 'script' | 'secret' | 'test' | 'saved' | 'undone'
+  message: string
+  test?: TestAnswer
+  /** What the host reported it did, step by step (no values). */
+  steps: string[]
+  /** An Undo is available for what was created. */
+  undo: boolean
+}
+
 declare module 'orca' {
   interface PluginRequests {
     /** The saved connection (without its secret), secret storage status and settings. */
@@ -78,6 +140,16 @@ declare module 'orca' {
      */
     /** Opens a terminal where an Orca host runs; `navigated` when Orca switched to it, else `where` it is. */
     'orca.terminal': { input: { hostKey: string; title?: string; scope: string }; output: { how: 'workspace' | 'ssh'; navigated: boolean; where: string } }
+    /** Orca's servers, for "Connect via Orca", with what a check found and what was set up. */
+    'setup.hosts': { output: SetupHostsAnswer }
+    /** Runs the read-only check on one host (in a terminal of it, closed again). */
+    'setup.detect': { input: { hostKey: string }; output: SetupHostsAnswer }
+    /** The exact setup script for a host, to show before it runs. */
+    'setup.plan': { input: SetupPlanInput; output: SetupPlan }
+    /** The exact Undo script for what a setup created on a host. */
+    'setup.undoPlan': { input: { hostKey: string; product: 'pve' | 'pbs' }; output: SetupPlan }
+    /** Runs a shown plan, once, before it expires. */
+    'setup.run': { input: { planId: string; hostKey: string }; output: SetupRunAnswer }
     /** The estate, refreshed when older than the refresh interval or when `force` is set. */
     'estate.get': { input: { force?: boolean }; output: EstateResponse }
   }

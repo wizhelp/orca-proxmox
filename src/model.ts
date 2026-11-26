@@ -42,8 +42,10 @@ export type SshTunnel = {
   host: string
   port: number
   user: string
-  /** The private key on this machine (absolute path). */
+  /** The private key on this machine (absolute path); empty with `keyRef`. */
   identityFile: string
+  /** The plugin's own key, made by "Connect via Orca" and kept sealed in its secrets (`k-` + 16 hex). */
+  keyRef?: string
   /** The API as the SSH server reaches it, `host:port` (usually 127.0.0.1:8006 or :8007). */
   target: string
   /** The SSH server's pinned host key, `ssh-ed25519 AAAA…`; empty until a test in Settings showed it. */
