@@ -5,7 +5,9 @@ up for a person. They are what a person would do by hand in PDM's web interface 
 Settings tab, done through PDM's API and a one-shot import file instead.
 
 The plugin is read-only towards Proxmox. Everything below creates **one read-only API token**
-in Proxmox Datacenter Manager (PDM) and hands it to the plugin.
+in Proxmox Datacenter Manager (PDM) and hands it to the plugin. Without PDM, the same is done once
+per PVE cluster (or standalone host) and per PBS: see
+[Without PDM: PVE and PBS directly](#without-pdm-pve-and-pbs-directly).
 
 ## Rules for the agent
 
@@ -44,7 +46,8 @@ in Proxmox Datacenter Manager (PDM) and hands it to the plugin.
    If not: `orca plugin install wizhelp/orca-proxmox`, then the person approves it with the
    command Orca prints (an agent must not approve a plugin's access on the person's behalf).
 
-No PDM yet? See [the appendix](#appendix-no-pdm-yet).
+No PDM? Connect the PVE hosts and PBS servers directly
+([below](#without-pdm-pve-and-pbs-directly)), or set up a PDM ([the appendix](#appendix-no-pdm-yet)).
 
 ## 0. Trust PDM's certificate first
 
@@ -301,7 +304,10 @@ On Windows the plugin itself does not inspect file permissions (ACLs): the step 
 makes and checks the folder and the file private, and it stops if either has an entry for anyone
 but you and SYSTEM. Do not use a shared or redirected folder.
 
-The file holds exactly `baseUrl`, `tokenId`, `secret` and optionally `fingerprint`, all strings.
+The file holds exactly `baseUrl`, `tokenId`, `secret` and optionally `fingerprint`, `kind`
+(`pdm`, the default, `pve` or `pbs`) and, for `pve` and `pbs`, `name` (how the connection is
+shown in the panel), all strings. A file for a URL the plugin already has replaces that
+connection; any other is added beside the existing ones.
 The plugin refuses a file in a folder it cannot trust (a link, another owner, others can write
 to it) and leaves it as it is. A file it has taken is never put back: one it cannot trust (a link,
 other hard links, another owner, readable by others) or cannot use is removed, wiped first when it
@@ -318,8 +324,9 @@ sleep 5; orca plugin logs "$KEY" | grep 'Import:' | tail -1
 ```
 
 The plugin tests the connection **before** it replaces anything. The log line says either
-`Import: Imported the connection to … Connection test: PDM x.y.z, N remotes visible. The file was
-overwritten and deleted.` or why not, with the current connection kept. If it says the file could
+`Import: Imported the PDM connection to … Connection test: PDM x.y.z, N remotes visible. The file
+was overwritten and deleted.` (for PVE: `N nodes visible`, for PBS: `N datastores visible`) or
+why not, with the current connections kept. If it says the file could
 **not** be deleted, delete it by hand: it holds the secret. The log (and the panel) show the PDM
 URL, the token ID and the file's path, never the secret.
 
@@ -327,6 +334,134 @@ URL, the token ID and the file's path, never the secret.
 
 Ask the person to look at the **Proxmox** panel: the header shows `N/N remotes up`, and the
 Hosts tab their nodes. If it says the token sees no remotes, re-check the two ACL entries (step 2).
+
+## Without PDM: PVE and PBS directly
+
+Each **PVE cluster** is one connection: any one of its nodes shows the whole cluster. A
+**standalone PVE host** cannot see other hosts' guests, so each standalone host is its own
+connection. Each **PBS** is its own connection. Do the steps below once per server, with the same
+rules as above (trust the certificate first, secrets only in files, show each change first).
+
+**Ask the person for** each server's URL as Orca's machine reaches it (`https://pve.example.com:8006`,
+`https://pbs.example.com:8007`), how you may make changes there (an admin login such as `root@pam`
+typed into a prompt, or SSH to the host and `pveum`/`proxmox-backup-manager` there), an optional
+short name for each connection (letters, digits, `.`, `_`, `-`), and, for PVE 9, whether VMs'
+disk use may be read through the guest agent (below).
+
+### Certificate
+
+Step 0 as written, with the server's port (8006 for PVE, 8007 for PBS). Confirm the fingerprint
+independently: the person compares it with the node's **System → Certificates** (PVE) or the
+dashboard's **Show Fingerprint** (PBS), or you read it on the host over SSH
+(`openssl x509 -noout -fingerprint -sha256 -in /etc/pve/local/pve-ssl.pem` on PVE, or the
+`pveproxy-ssl.pem` next to it when a custom certificate is installed;
+`/etc/proxmox-backup/proxy.pem` on PBS).
+
+### PVE: a read-only user and token
+
+Over SSH on a PVE node (one node per cluster is enough, the access control is cluster-wide):
+
+```sh
+pveum user add monitor@pve --comment 'Read-only, Orca plugin'
+# The token, with privilege separation: it gets only what is granted to it, capped by its user.
+pveum user token add monitor@pve orca --privsep 1 --output-format json > "$WORK/token.json"
+python3 - "$WORK" <<'PY' || exit 1
+import json, os, sys
+work = sys.argv[1]
+value = json.load(open(os.path.join(work, "token.json"))).get("value", "")
+os.remove(os.path.join(work, "token.json"))
+if not value.strip():
+    sys.exit("No secret came back: delete the token and create it again.")
+open(os.path.join(work, "secret"), "w").write(value.strip())
+PY
+# PVEAuditor on / for BOTH the user and the token.
+pveum acl modify / --users monitor@pve --roles PVEAuditor
+pveum acl modify / --tokens 'monitor@pve!orca' --roles PVEAuditor
+```
+
+Through the API with an admin login instead, step 1's login works against PVE's
+`/api2/json/access/ticket` (the cookie is `PVEAuthCookie`), then `POST /access/users` with
+`userid=monitor@pve`, `POST /access/users/monitor@pve/token/orca` with `privsep=1` (the secret is
+in `data.value`), and `PUT /access/acl` with `path=/`, `roles=PVEAuditor` and `users=monitor@pve`,
+then again with `tokens=monitor@pve!orca`.
+
+**VM disk use (optional).** `PVEAuditor` does not include the QEMU guest agent, so a VM's disk use
+stays *unknown* and the plugin shows its allocated size. On **PVE 9**, the privilege
+`VM.GuestAgent.Audit` allows only the agent's informational calls (the plugin uses
+`get-fsinfo`); if the person agrees, grant it on `/vms` to the user and the token:
+
+```sh
+pveum role add OrcaGuestAgent --privs VM.GuestAgent.Audit
+pveum acl modify /vms --users monitor@pve --roles OrcaGuestAgent
+pveum acl modify /vms --tokens 'monitor@pve!orca' --roles OrcaGuestAgent
+```
+
+On **PVE 8** the only privilege for it is `VM.Monitor`, which also lets the token run commands
+inside guests through the agent: do not grant it for this plugin. Either way the agent must be
+enabled in the VM's options and running in the guest.
+
+Verify with the token itself from Orca's machine, with `PVE_URL` the address Orca uses and
+`curl.cfg` pinned to that server's certificate as in step 0 (the PVE header has `=` between
+token ID and secret); print only a count:
+
+```sh
+python3 - "$WORK" <<'PY'
+import os, sys
+work = sys.argv[1]
+secret = open(os.path.join(work, "secret")).read().strip()
+open(os.path.join(work, "auth.hdr"), "w").write("Authorization: PVEAPIToken=monitor@pve!orca=" + secret + "\n")
+PY
+code=$(curl -K "$WORK/curl.cfg" -H @"$WORK/auth.hdr" -o "$WORK/list.json" -w '%{http_code}' \
+  "$PVE_URL/api2/json/cluster/resources?type=node")
+rm -f "$WORK/auth.hdr"
+[ "$code" = 200 ] || { echo "The token cannot read the cluster (HTTP $code): stop."; exit 1; }
+python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["data"]), "nodes visible")' "$WORK/list.json"
+rm -f "$WORK/list.json"
+```
+
+`0 nodes visible` means the ACL is missing on the user or the token.
+
+### PBS: a read-only user and token
+
+Over SSH on the PBS host:
+
+```sh
+proxmox-backup-manager user create monitor@pbs --comment 'Read-only, Orca plugin'
+proxmox-backup-manager user generate-token monitor@pbs orca --output-format json > "$WORK/token.json"
+python3 - "$WORK" <<'PY' || exit 1
+import json, os, sys
+work = sys.argv[1]
+answer = json.load(open(os.path.join(work, "token.json")))
+os.remove(os.path.join(work, "token.json"))
+value = (answer.get("data") or answer).get("value", "")
+if not value.strip():
+    sys.exit("No secret came back: delete the token and create it again.")
+open(os.path.join(work, "secret"), "w").write(value.strip())
+PY
+proxmox-backup-manager acl update / Audit --auth-id monitor@pbs
+proxmox-backup-manager acl update / Audit --auth-id 'monitor@pbs!orca'
+```
+
+`Audit` on `/` reads the server's status, datastores, snapshots and tasks and changes nothing.
+`DatastoreAudit` on `/datastore` is enough for datastores and backups only. Through the API:
+`POST /access/users`, `POST /access/users/monitor@pbs/token/orca` and `PUT /access/acl` with
+`path=/`, `role=Audit` and `auth-id`, once for the user and once for the token. Verify with the
+header `Authorization: PBSAPIToken=monitor@pbs!orca:<secret>` against
+`/api2/json/admin/datastore` (`N datastores visible`).
+
+### Hand each connection to the plugin
+
+Step 4, once per server, with `kind` and optionally `name` in the file; wait for each import's log
+line before writing the next file:
+
+```json
+{ "kind": "pve", "name": "lab", "baseUrl": "https://pve.example.com:8006", "tokenId": "monitor@pve!orca", "fingerprint": "AB:CD:…", "secret": "…" }
+```
+
+In the Python of step 4, add `"kind": "pve"` (or `"pbs"`) and `"name"` to the dumped object and use
+the server's URL and token ID; in the PowerShell, add `kind = 'pve'; name = 'lab'` to the hashtable.
+The plugin tests each one before saving it; a PDM connection, if there is one, is kept. In the
+panel, **Settings** lists every connection; the header counts the remotes of all of them.
 
 ## Appendix: No PDM yet?
 
