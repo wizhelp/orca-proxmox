@@ -44,7 +44,7 @@ Rendered from the bundled example estate (no real servers):
   <img src="docs/screenshots/tasks.png" alt="The tasks of all remotes, with two failed backups in red" width="240">
   <img src="docs/screenshots/planner.png" alt="Where a new VM fits: free memory, disk and CPU per node, best fit first" width="240">
   <img src="docs/screenshots/orca.png" alt="The Orca tab: one Orca server per Proxmox node, with its bot and workspaces" width="240">
-  <img src="docs/screenshots/settings.png" alt="Settings: a PDM connection, a PVE cluster and a PBS reached directly, each with its token and pinned certificate" width="240">
+  <img src="docs/screenshots/settings.png" alt="Settings: a PDM, a PVE and a PBS connection listed compactly, one opened for editing with its token and pinned certificate, and folded sections for the import file, help and plugin options" width="240">
   <img src="docs/screenshots/copy-for-ai.png" alt="The Copy for AI preview in the mode without addresses, with the text to copy" width="240">
 </p>
 
