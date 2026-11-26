@@ -1,47 +1,8 @@
-// The keys of a one-click setup, made in the worker with Node's crypto:
-// - the tunnel's own SSH key (Ed25519), written by hand in OpenSSH's private key format so ssh
-//   reads it on every platform; only its public half goes into the server-side script;
-// - a one-time RSA key pair per run: its public half is in the script, which encrypts the new
-//   token secret to it on the server (RSA-OAEP, SHA-256), so a terminal only ever shows
-//   ciphertext; the private half lives in this process only, and is wiped once used.
-import { createPrivateKey, createPublicKey, generateKeyPairSync, privateDecrypt, constants, randomBytes } from 'node:crypto'
-
-const string = (b: Buffer) => {
-  const len = Buffer.alloc(4)
-  len.writeUInt32BE(b.length)
-  return Buffer.concat([len, b])
-}
-const u32 = (n: number) => {
-  const b = Buffer.alloc(4)
-  b.writeUInt32BE(n)
-  return b
-}
-
-export type TunnelKey = {
-  /** `ssh-ed25519 AAAA… <comment>`, for authorized_keys. */
-  publicLine: string
-  /** The private key in OpenSSH's format (no passphrase): only ever sealed, or in a file ssh reads at once. */
-  privatePem: string
-}
-
-/** A new Ed25519 key for the tunnel account, with `comment` on its public line. */
-export function newTunnelKey(comment: string): TunnelKey {
-  const { publicKey, privateKey } = generateKeyPairSync('ed25519')
-  const pub = Buffer.from(publicKey.export({ format: 'jwk' }).x!, 'base64url')
-  const seed = Buffer.from(privateKey.export({ format: 'jwk' }).d!, 'base64url')
-  const type = Buffer.from('ssh-ed25519')
-  const blob = Buffer.concat([string(type), string(pub)])
-  const check = randomBytes(4).readUInt32BE()
-  let secret = Buffer.concat([u32(check), u32(check), string(type), string(pub), string(Buffer.concat([seed, pub])), string(Buffer.from(comment))])
-  // Padded with 1, 2, 3… to the cipher's block size (8 for "none").
-  const pad = (8 - (secret.length % 8)) % 8
-  secret = Buffer.concat([secret, Buffer.from(Array.from({ length: pad }, (_, i) => i + 1))])
-  const body = Buffer.concat([Buffer.from('openssh-key-v1\0'), string(Buffer.from('none')), string(Buffer.from('none')), string(Buffer.alloc(0)), u32(1), string(blob), string(secret)])
-  const lines = body.toString('base64').match(/.{1,70}/g)!.join('\n')
-  seed.fill(0)
-  secret.fill(0)
-  return { publicLine: `ssh-ed25519 ${blob.toString('base64')} ${comment}`, privatePem: `-----BEGIN OPENSSH PRIVATE KEY-----\n${lines}\n-----END OPENSSH PRIVATE KEY-----\n` }
-}
+// The key of a one-click setup, made in the worker with Node's crypto: a one-time RSA key pair per
+// run. Its public half is in the script, which encrypts the new token secret to it on the server
+// (RSA-OAEP, SHA-256), so a terminal only ever shows ciphertext; the private half lives in this
+// process only, and is wiped once used.
+import { createPrivateKey, createPublicKey, generateKeyPairSync, privateDecrypt, constants } from 'node:crypto'
 
 export type OneTimeKey = {
   /** The public half, PEM (SPKI), for the script. */

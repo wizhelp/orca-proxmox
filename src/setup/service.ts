@@ -12,40 +12,33 @@
 // 4. Nothing the terminal says is taken on its word alone: the answer must be complete and match
 //    its checksum, else the outcome is reported as unknown. The plugin then checks from this
 //    machine what it can: the certificate the host reported is the one the address presents
-//    (the connection test pins it), the token has no right beyond auditing (the API's own
-//    permission list), and with a tunnel the account may only forward to the API (live ssh
-//    attempts, while its key is still limited to this machine and expiring). Only then is the
-//    key made permanent and the connection saved.
-// 5. Undo is bound to one recorded run: its script removes only resources labelled with that
-//    run's id on the host, and the plugin removes only the connection revision that run saved.
+//    (the connection test pins it), and the token has no right beyond auditing (the API's own
+//    permission list, every listed privilege). Only then is the connection saved.
+// 5. Undo is bound to one recorded run: its script removes only what that run recorded as made,
+//    still labelled with its id, and the plugin removes only the connection revision it saved.
+//
+// Only the read-only token: an SSH tunnel account stays the guided manual path (AGENT_SETUP).
 import { randomBytes } from 'node:crypto'
 import type { ConnectionConfig } from '../model'
 import type { ConnectionInput, SetupDetection, SetupHost, SetupHostsAnswer, SetupJobAnswer, SetupPlan, SetupPlanInput, SetupRecord, SetupRunAnswer, TestAnswer } from '../protocol'
 import { safeIp, safeTarget } from '../features/targets'
 import { readOrcaInventory, type CliRunner } from '../orca/inventory'
-import { newTunnelKey, oneTimeKey, type OneTimeKey } from './keys'
+import { oneTimeKey, type OneTimeKey } from './keys'
 import { hostShell, runScript, type HostShell, type RunResult } from './runner'
 import {
   apiPortOf,
   cipherOf,
   detectScript,
-  EXPIRY,
-  finalizeScript,
-  KEY_COMMENT,
-  KEY_LINE,
   productLabel,
   RUN_ID,
-  said,
   ScriptError,
   setupScript,
   tokenIdOf,
-  TUNNEL_USER,
   undoScript,
   valueOf,
   type ScriptAnswer,
   type SetupProduct,
-  type SetupRequest,
-  type TunnelRequest
+  type SetupRequest
 } from './script'
 
 /** A sealed record as stored: who it is for in the clear, the record itself sealed to exactly that. */
@@ -57,17 +50,10 @@ export type SetupDeps = {
   /** Seals a record with the worker's key, bound to its host and run; opens it again or null. */
   sealRecord(hostKey: string, runId: string, plain: string): Promise<string>
   openRecord(hostKey: string, runId: string, sealed: string): Promise<string | null>
-  /** The tunnel's private key, sealed in the plugin's secrets under `ref`. */
-  sealKey(ref: string, pem: string): Promise<void>
-  dropKey(ref: string): Promise<void>
   connections(): Promise<ConnectionConfig[]>
   test(input: ConnectionInput): Promise<TestAnswer>
   /** The token's privileges, as the API lists them for it (GET /access/permissions). */
   privileges(input: ConnectionInput): Promise<string[]>
-  /** Live ssh attempts the tunnel account must be refused (reverse and socket forwards, a command); what was not refused. */
-  scopeCheck(input: ConnectionInput): Promise<string[]>
-  /** The IP addresses a name resolves to here. */
-  resolve(host: string): Promise<string[]>
   save(input: ConnectionInput): Promise<ConnectionConfig>
   /** Removes exactly this connection revision. */
   remove(connection: { id: string; revision: string }): Promise<void>
@@ -94,9 +80,7 @@ const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/
 const VERSION = /^[0-9A-Za-z.+~:-]{1,40}$/
 const SECRET = /^[0-9A-Za-z-]{8,128}$/
 const FINGERPRINT = /^([0-9A-F]{2}:){31}[0-9A-F]{2}$/
-const HOST_KEY = /^(ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521) [A-Za-z0-9+/]+={0,2}$/
 const HOST_KEY_ID = /^(ssh|env):[A-Za-z0-9._:-]{1,120}$/
-const KEY_REF = /^k-[0-9a-f]{16}$/
 
 type Status = SetupRecord['status']
 const STATUSES: Status[] = ['pending', 'unknown', 'stopped', 'failed', 'saved']
@@ -109,8 +93,6 @@ type StoredRecord = {
   at: number
   status: Status
   message?: string
-  tunnel?: TunnelRequest
-  keyRef?: string
   /** The connection revision this run saved. */
   connection?: { id: string; revision: string }
 }
@@ -119,19 +101,13 @@ type StoredRecord = {
 export function validRecord(raw: unknown, hostKey: string, runId: string): StoredRecord | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const r = raw as Record<string, unknown>
-  const allowed = new Set(['hostKey', 'runId', 'product', 'at', 'status', 'message', 'tunnel', 'keyRef', 'connection'])
+  const allowed = new Set(['hostKey', 'runId', 'product', 'at', 'status', 'message', 'connection'])
   if (Object.keys(r).some((k) => !allowed.has(k))) return null
   if (r.hostKey !== hostKey || r.runId !== runId || !HOST_KEY_ID.test(hostKey) || !RUN_ID.test(runId)) return null
   if (r.product !== 'pve' && r.product !== 'pbs') return null
   if (typeof r.at !== 'number' || !Number.isFinite(r.at)) return null
   if (!STATUSES.includes(r.status as Status)) return null
   if (r.message !== undefined && (typeof r.message !== 'string' || r.message.length > 600)) return null
-  if (r.keyRef !== undefined && (typeof r.keyRef !== 'string' || !KEY_REF.test(r.keyRef))) return null
-  if (r.tunnel !== undefined) {
-    const t = r.tunnel as Record<string, unknown>
-    if (!t || typeof t !== 'object' || Object.keys(t).sort().join() !== 'client,keyLine,laddr,lport') return null
-    if (typeof t.keyLine !== 'string' || !KEY_LINE.test(t.keyLine) || safeIp(t.client) !== t.client || safeIp(t.laddr) !== t.laddr || !Number.isInteger(t.lport) || (t.lport as number) < 1 || (t.lport as number) > 65535) return null
-  }
   if (r.connection !== undefined) {
     const c = r.connection as Record<string, unknown>
     if (!c || typeof c !== 'object' || Object.keys(c).sort().join() !== 'id,revision' || typeof c.id !== 'string' || typeof c.revision !== 'string' || c.id.length > 80 || c.revision.length > 80) return null
@@ -149,9 +125,7 @@ type Plan = {
   timer?: ReturnType<typeof setTimeout>
   request?: SetupRequest
   oneTime?: OneTimeKey
-  keyPem?: string
-  keyRef?: string
-  input?: { product: SetupProduct; name: string; address: string; sshPort: number; enrichOnly: boolean }
+  input?: { product: SetupProduct; name: string; address: string; enrichOnly: boolean }
   record?: StoredRecord
 }
 
@@ -174,7 +148,7 @@ export function detectionOf(answer: ScriptAnswer, at: number): SetupDetection | 
     const v = version(p)
     if (v) products[p] = v
   }
-  const out: SetupDetection = { at, root: root === 'yes' || root === 'sudo' ? root : 'no', products, sshd: valueOf(answer, 'sshd') === 'yes', hostname }
+  const out: SetupDetection = { at, root: root === 'yes' || root === 'sudo' ? root : 'no', products, hostname }
   const fqdn = safeTarget(valueOf(answer, 'fqdn'))
   if (fqdn && fqdn !== hostname) out.fqdn = fqdn
   const via = (valueOf(answer, 'via') ?? '').split(/\s+/)
@@ -257,7 +231,6 @@ export class SetupService {
       product: r.product,
       runId: r.runId,
       at: r.at,
-      tunnel: !!r.tunnel,
       status: r.status,
       ...(r.message ? { message: r.message } : {}),
       ...(r.connection ? { connectionId: r.connection.id } : {})
@@ -331,7 +304,6 @@ export class SetupService {
   private forget(plan: Plan): void {
     clearTimeout(plan.timer)
     plan.oneTime?.wipe()
-    plan.keyPem = undefined
     this.plans.delete(plan.id)
   }
 
@@ -351,23 +323,10 @@ export class SetupService {
     if (!detection) throw new SetupInputError('Check the host first.')
     if (!detection.products[product]) throw new SetupInputError(`The check found no ${productLabel(product)} on this host.`)
     if (detection.root === 'no') throw new SetupInputError('Orca’s shell on this host is not root and may not use sudo without a password; nothing can be set up from it.')
-    const tunnel = input.tunnel === true
     const address = safeTarget(input.address)
     if (!address) throw new SetupInputError('The address must be a DNS name or an IP address that this machine reaches the host at.')
     const name = (input.name ?? '').trim()
     if (!NAME.test(name)) throw new SetupInputError('The name may hold letters, digits, ".", "_" and "-" (40 at most).')
-    let context: TunnelRequest | undefined
-    if (tunnel) {
-      if (!detection.sshd) throw new SetupInputError('The check found no SSH server (sshd) on this host for a tunnel.')
-      // The sshd checks are for the very connection the tunnel will make: the one Orca's shell
-      // came in on. Without it (a paired server's own shell), or to another address, they could
-      // check a different connection; so there is no tunnel then.
-      const via = detection.via
-      if (!via) throw new SetupInputError('Orca’s shell on this host did not come in over SSH, so the tunnel’s connection cannot be checked; connect it as an SSH target in Orca, check it again, or set it up without a tunnel.')
-      const ips = safeIp(address) ? [address] : await this.deps.resolve(address).catch(() => [])
-      if (!ips.includes(via.server)) throw new SetupInputError(`For a tunnel, the address must be the one Orca reaches the host at (${via.server}), so the checks apply to the tunnel’s own connection.`)
-      context = { keyLine: '', client: via.client, laddr: via.server, lport: via.port }
-    }
     const { shell, name: hostName } = await this.shellOf(input.hostKey)
     const port = apiPortOf(product)
     const baseUrl = `https://${urlHost(address)}:${port}`
@@ -379,11 +338,8 @@ export class SetupService {
     const oneTime = oneTimeKey()
     let script: string
     let request: SetupRequest
-    let keyPem: string | undefined
     try {
-      const key = context ? newTunnelKey(KEY_COMMENT) : undefined
-      keyPem = key?.privatePem
-      request = { product, runId, resultKey: oneTime.publicPem, replace: input.replace === true, ...(key && context ? { tunnel: { ...context, keyLine: key.publicLine } } : {}) }
+      request = { product, runId, resultKey: oneTime.publicPem, replace: input.replace === true }
       script = setupScript(request)
     } catch (error) {
       oneTime.wipe()
@@ -398,8 +354,7 @@ export class SetupService {
       expiresAt: this.deps.now() + PLAN_MS,
       request,
       oneTime,
-      ...(keyPem ? { keyPem, keyRef: `k-${randomBytes(8).toString('hex')}` } : {}),
-      input: { product, name, address, sshPort: context?.lport ?? 22, enrichOnly }
+      input: { product, name, address, enrichOnly }
     }
     this.keep(plan)
     return {
@@ -414,13 +369,7 @@ export class SetupService {
         `Runs on ${hostName} in a terminal of ${shell.where}, as root${detection.root === 'sudo' ? ' (sudo -n)' : ''}; the terminal is closed afterwards. It keeps a record of what it changes on the host (/var/lib/orca-proxmox-setup), which Undo works from.`,
         `Creates ${tokenIdOf(product)} with ${product === 'pve' ? 'PVEAuditor' : 'Audit'} on / for the user and the token (privilege separation), both labelled with this run. The plugin then asks the API which rights the token has, and refuses it if any is more than auditing.`,
         input.replace === true ? 'Replaces an earlier token of that name: the old one stops working, and Undo cannot bring it back.' : 'Stops without changing anything if that token exists already (choose Replace to make a new one).',
-        ...(request.tunnel
-          ? [
-              `Creates the account ${TUNNEL_USER} (no password, no shell) that may only forward to 127.0.0.1:${port}. sshd's effective rules are checked for the tunnel's own connection (${request.tunnel.client} to ${request.tunnel.laddr} port ${request.tunnel.lport}), on what the running sshd applies, before and after the reload, with root's unchanged.`,
-              'The plugin’s own key (made here, kept sealed) is first allowed from this machine only and expires by itself after 15 minutes; it becomes permanent only once this machine has seen the account refuse a reverse forward, a socket forward and a command.'
-            ]
-          : []),
-        `The host reports the API certificate${request.tunnel ? ' and its SSH host key' : ''}; the plugin pins them and then connects to ${baseUrl} from this machine, which must present the same.`,
+        `The host reports the API certificate; the plugin pins it and then connects to ${baseUrl} from this machine, which must present the same.`,
         'The token secret is printed only encrypted to a one-time key held by the plugin; no secret is ever in the terminal.',
         enrichOnly ? 'PDM already shows this node: the connection is saved as enrich only.' : 'Saved as a direct connection once every check passes.'
       ],
@@ -429,8 +378,7 @@ export class SetupService {
         name,
         baseUrl,
         tokenId: tokenIdOf(product),
-        enrichOnly,
-        ...(request.tunnel ? { tunnel: `${TUNNEL_USER}@${address}:${request.tunnel.lport} → 127.0.0.1:${port}` } : {})
+        enrichOnly
       }
     }
   }
@@ -443,7 +391,7 @@ export class SetupService {
     const undoId = randomBytes(8).toString('hex')
     let script: string
     try {
-      script = undoScript(record.product, record.runId, undoId, record.tunnel?.keyLine)
+      script = undoScript(record.product, record.runId, undoId)
     } catch (error) {
       throw new SetupInputError(error instanceof ScriptError ? error.message : 'The Undo script could not be generated.')
     }
@@ -460,10 +408,9 @@ export class SetupService {
       expiresAt: plan.expiresAt,
       summary: [
         `Runs on ${name} in a terminal of ${shell.where}; the terminal is closed afterwards.`,
-        `Undoes setup run ${record.runId} only: it reads what that run recorded on the host and removes a resource only while it still carries that run's label, each step checked, stopping at the first that fails:`,
-        ...(record.tunnel ? [`the key file (only while it holds exactly that run's key), ${TUNNEL_USER}’s processes, the Match block (only while sshd_config is exactly the backup plus that block), the account`] : []),
-        `the token ${tokenIdOf(record.product)} and its permission; the user, or its permission, only when it has no token left.`,
-        ...(record.connection ? ['Then removes the connection that run saved, if it is still that revision, and the plugin’s own key.'] : [])
+        `Undoes setup run ${record.runId} only, and only while no other Orca step runs on the host: it reads what that run recorded there and removes only what it recorded as made and that still carries its label, each step checked, stopping at the first that fails:`,
+        `the token ${tokenIdOf(record.product)} and its permission; the user, or its permission, only when that run made it and it has no token left. Never what was there before; what that run started but did not record as done is kept and named for you to check.`,
+        ...(record.connection ? ['Then removes the connection that run saved, if it is still that revision.'] : [])
       ]
     }
   }
@@ -490,7 +437,6 @@ export class SetupService {
         job.answer = { ok: false, stage: 'script', outcome: 'unknown', message: `The run failed in the plugin (${message}); what happened on the host is not known. Undo works from the host’s own record.`, steps: [], undo: plan.action === 'setup' }
       } finally {
         plan.oneTime?.wipe()
-        plan.keyPem = undefined
         this.running = false
       }
     })()
@@ -512,9 +458,7 @@ export class SetupService {
       runId: plan.id,
       product: input.product,
       at: this.deps.now(),
-      status: 'pending',
-      ...(request.tunnel ? { tunnel: request.tunnel } : {}),
-      ...(plan.keyRef ? { keyRef: plan.keyRef } : {})
+      status: 'pending'
     }
     // Recorded before anything can change on the host.
     await this.putRecord(record)
@@ -540,13 +484,10 @@ export class SetupService {
     }
     const secret = plan.oneTime!.open(cipherOf(result) ?? '')
     const fingerprint = (valueOf(result, 'api_fp') ?? '').toUpperCase()
-    const hostKey = valueOf(result, 'ssh_hostkey') ?? ''
-    const expiry = valueOf(result, 'key_expiry') ?? ''
-    if (!secret || !SECRET.test(secret) || !FINGERPRINT.test(fingerprint) || (request.tunnel && (!HOST_KEY.test(hostKey) || !EXPIRY.test(expiry) || !said(result, 'created_keyfile')))) {
-      return fail('secret', 'The host’s answer was incomplete (secret, certificate fingerprint, SSH host key or key expiry).')
+    if (!secret || !SECRET.test(secret) || !FINGERPRINT.test(fingerprint)) {
+      return fail('secret', 'The host’s answer was incomplete (secret or certificate fingerprint).')
     }
     this.deps.secretSeen(secret)
-    if (plan.keyRef && plan.keyPem) await this.deps.sealKey(plan.keyRef, plan.keyPem)
     const port = apiPortOf(input.product)
     const connection: ConnectionInput = {
       id: 'new',
@@ -556,15 +497,12 @@ export class SetupService {
       tokenId: tokenIdOf(input.product),
       fingerprint,
       secret,
-      ...(input.enrichOnly ? { enrichOnly: true } : {}),
-      ...(request.tunnel && plan.keyRef
-        ? { tunnel: { host: input.address, port: input.sshPort, user: TUNNEL_USER, identityFile: '', keyRef: plan.keyRef, target: `127.0.0.1:${port}`, hostKey } }
-        : {})
+      ...(input.enrichOnly ? { enrichOnly: true } : {})
     }
-    // From this machine: the address presents the reported certificate (and SSH host key)...
+    // From this machine: the address presents the reported certificate...
     const test = await this.deps.test(connection)
     if (!test.ok) return fail('test', `The connection test from this machine failed: ${test.error.message}.`, test)
-    // ...the token has no right beyond auditing...
+    // ...and the token has no right beyond auditing, at any path.
     let privileges: string[]
     try {
       privileges = await this.deps.privileges(connection)
@@ -573,21 +511,6 @@ export class SetupService {
     }
     const more = privileges.filter((p) => !/^[A-Za-z]+(\.[A-Za-z]+)*\.Audit$/.test(p))
     if (more.length) return fail('rights', `The token has more than read rights (${more.slice(0, 6).join(', ')}).`)
-    if (request.tunnel) {
-      // ...and the tunnel account refuses what it must, as the running sshd applies it.
-      let open: string[]
-      try {
-        open = await this.deps.scopeCheck(connection)
-      } catch (error) {
-        return fail('scope', `The tunnel account’s limits could not be checked: ${error instanceof Error ? error.message : String(error)}. Its key expires by itself at ${expiry} (UTC).`)
-      }
-      if (open.length) return fail('scope', `The tunnel account was not refused: ${open.join('; ')}. Its key expires by itself at ${expiry} (UTC).`)
-      const finalId = randomBytes(8).toString('hex')
-      const final = await runScript(this.runDeps(), plan.shell, finalizeScript(input.product, plan.id, finalId, request.tunnel, expiry), finalId, 'Proxmox setup', RUN_MS)
-      if (final.end !== 'ok' || !said(final, 'finalized_key')) {
-        return fail('scope', `The key could not be made permanent (${final.end === 'stop' ? (final.stop ?? 'stopped') : unknownWhy(final)}); it expires by itself at ${expiry} (UTC).`)
-      }
-    }
     let saved: ConnectionConfig
     try {
       saved = await this.deps.save(connection)
@@ -624,7 +547,6 @@ export class SetupService {
       if (c && c.revision === record.connection.revision) await this.deps.remove(record.connection)
       else if (c) note = ' The connection was changed since; it was kept, remove it in Settings if you want.'
     }
-    if (record.keyRef) await this.deps.dropKey(record.keyRef).catch((error: unknown) => this.deps.log(`Could not delete the tunnel key ${record.keyRef}: ${String(error)}`))
     // Something this run started but did not record as done is never removed: the record (and
     // the host's journal) stay, and the person checks it.
     const unsure = valueOf(result, 'unconfirmed')

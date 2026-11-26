@@ -14,10 +14,6 @@
 // Every ssh child, persistent or for a test, is tracked from the moment it is spawned and goes
 // through one cleanup; a tunnel that exits is started again on the next request, after a growing
 // pause.
-//
-// A tunnel set up by "Connect via Orca" uses the plugin's own key (`keyRef`), kept sealed with
-// the token secrets: it is written to a file of the private folder, closed to others, only for the
-// ssh that starts, and removed as soon as that ssh says it has authenticated (or ends).
 import { createHash } from 'node:crypto'
 import { constants, existsSync } from 'node:fs'
 import { access, chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -51,10 +47,6 @@ export type TunnelDeps = {
   touch?: (port: number) => Promise<void>
   /** Whether the identity file can be read; the real file system by default. */
   identityReadable?: (path: string) => Promise<boolean>
-  /** The plugin's own private key for `keyRef` (opened from its sealed store), or null. */
-  identityKey?: (keyRef: string) => Promise<string | null>
-  /** Makes a new, still empty key file readable by this user only (Windows: its ACL). */
-  protectKeyFile?: (path: string) => Promise<void>
 }
 
 const READY_MS = 20_000
@@ -127,7 +119,7 @@ export function sshConfigPath(path: string): string {
 }
 
 /** The ssh arguments: no config file, no prompts, only this key, only this forward. */
-export function sshArgs(t: SshTunnel, localPort: number, knownHostsFile: string, learn: boolean, identityFile = t.identityFile): string[] {
+export function sshArgs(t: SshTunnel, localPort: number, knownHostsFile: string, learn: boolean): string[] {
   const o = (option: string) => ['-o', option]
   return [
     '-F', 'none',
@@ -138,7 +130,7 @@ export function sshArgs(t: SshTunnel, localPort: number, knownHostsFile: string,
     // Only this key, from the configuration: -i is checked before its % tokens are expanded, and a
     // missing one would fall back to the default keys; no agent's keys either.
     ...o('IdentitiesOnly=yes'),
-    ...o(`IdentityFile=${sshConfigPath(identityFile)}`),
+    ...o(`IdentityFile=${sshConfigPath(t.identityFile)}`),
     ...o('IdentityAgent=none'),
     ...o('PasswordAuthentication=no'),
     ...o('KbdInteractiveAuthentication=no'),
@@ -159,23 +151,6 @@ export function sshArgs(t: SshTunnel, localPort: number, knownHostsFile: string,
     '--', t.host
   ]
 }
-
-/**
- * The same ssh, for one attempt the tunnel account must be refused: a forward the -L is replaced
- * by (`-R …`), or a command run instead of none.
- */
-export function scopeArgs(t: SshTunnel, knownHostsFile: string, identityFile: string, attempt: { forward: string[] } | { command: string }): string[] {
-  const base = sshArgs(t, 1, knownHostsFile, false, identityFile)
-  const head = base.slice(0, base.indexOf('-L')).filter((a) => a !== '-N')
-  return 'forward' in attempt ? ['-N', ...head, ...attempt.forward, '--', t.host] : [...head, '--', t.host, attempt.command]
-}
-
-/** What the tunnel account must refuse, checked live by scopeCheck. */
-export const SCOPE_ATTEMPTS: { what: string; attempt: (n: string) => { forward: string[] } | { command: string } }[] = [
-  { what: 'a reverse forward (-R) was accepted', attempt: () => ({ forward: ['-R', '127.0.0.1:0:127.0.0.1:9'] }) },
-  { what: 'a reverse Unix-socket forward was accepted', attempt: (n) => ({ forward: ['-R', `/tmp/orca-check-${n}.sock:127.0.0.1:9`] }) },
-  { what: 'a command ran successfully', attempt: () => ({ command: 'true' }) }
-]
 
 /** ssh's own words, without its debug lines. */
 const said = (stderr: string) => stderr.split(/\r?\n/).filter((l) => l.trim() && !/^debug\d?:/.test(l.trim())).join('\n')
@@ -206,7 +181,7 @@ export function sshFailure(t: SshTunnel, stderr: string, exit?: { code: number |
     return new ApiError({ kind: 'auth', message: `SSH refused the key for ${at}`, hint: 'Check the user, the identity file (a key without a passphrase, readable by you only) and that its public key is in that user’s authorized_keys on the server.' })
   }
   if (/load key|no such identity|identity file .* not accessible|bad permissions|unprotected private key/i.test(words)) {
-    return new ApiError({ kind: 'invalid-config', message: t.keyRef ? 'SSH cannot use the plugin’s own key for this connection' : `SSH cannot use the identity file ${t.identityFile}`, hint: 'The key file must exist and be readable by you only.' })
+    return new ApiError({ kind: 'invalid-config', message: `SSH cannot use the identity file ${t.identityFile}`, hint: 'The key file must exist and be readable by you only.' })
   }
   if (/forwarding failed|open failed|administratively prohibited|port forwarding is disabled|could not request local forwarding/i.test(words)) {
     return new ApiError({ kind: 'unreachable', message: `SSH on ${t.host} would not forward to ${t.target}`, hint: 'The account’s forwarding rules (permitopen= on the key, PermitOpen in sshd’s Match block) must allow exactly this target.' })
@@ -234,8 +209,6 @@ type Run = {
   child?: TunnelChild
   port: number
   file: string
-  /** The plugin's own key, written for this ssh only until it has authenticated. */
-  keyFile?: string
   stderr: string
   /** How it exited, once it did. */
   exit?: { code: number | null; signal: string | null }
@@ -330,65 +303,6 @@ export class TunnelManager {
     return { connectTo: { host: '127.0.0.1', port: run.port }, hostKey, stop: () => this.end(run) }
   }
 
-  /**
-   * Logs in as the tunnel account once per attempt in SCOPE_ATTEMPTS, with the pinned host key and
-   * the connection's key, and answers what was not refused. A login that does not get as far as
-   * authentication makes the check fail as a whole (it proves nothing).
-   */
-  async scopeCheck(t: SshTunnel, waitMs = 8000): Promise<string[]> {
-    if (this.closed) throw new ApiError({ kind: 'unreachable', message: 'The plugin is stopping; no SSH check is started' })
-    const ssh = this.deps.sshPath()
-    if (!ssh) throw new ApiError({ kind: 'invalid-config', message: 'No OpenSSH client (ssh) was found on this machine' })
-    if (!hostKeyFingerprint(t.hostKey)) throw new ApiError({ kind: 'invalid-config', message: `No SSH host key is pinned for ${t.host}` })
-    const open: string[] = []
-    for (const { what, attempt } of SCOPE_ATTEMPTS) {
-      const run: Run = { port: 0, file: '', stderr: '', ready: false, done: false }
-      this.probes.add(run)
-      try {
-        const dir = await this.folder()
-        const name = createHash('sha256').update(`${t.host}|scope|${this.deps.now()}|${Math.random()}`).digest('hex').slice(0, 16)
-        run.file = join(dir, `${name}.known_hosts`)
-        await writeFile(run.file, `${knownHostsName(t)} ${t.hostKey.trim()}
-`, { mode: 0o600 })
-        if (t.keyRef) {
-          const pem = await this.deps.identityKey?.(t.keyRef).catch(() => null)
-          if (!pem) throw new ApiError({ kind: 'invalid-config', message: 'The plugin’s own SSH key for this connection is missing' })
-          run.keyFile = join(dir, `${name}.key`)
-          await writeFile(run.keyFile, '', { mode: 0o600 })
-          await chmod(run.keyFile, 0o600).catch(() => undefined)
-          await this.deps.protectKeyFile?.(run.keyFile)
-          await writeFile(run.keyFile, pem, { mode: 0o600 })
-        }
-        if (this.closed || run.done) throw new ApiError({ kind: 'unreachable', message: 'The plugin is stopping; no SSH check is started' })
-        const child = this.deps.spawn(ssh, scopeArgs(t, run.file, run.keyFile ?? t.identityFile, attempt(name)))
-        run.child = child
-        const exit = await new Promise<{ code: number | null } | null>((resolve) => {
-          const timer = setTimeout(() => resolve(null), waitMs)
-          child.stderr?.on('data', (chunk) => {
-            run.stderr = (run.stderr + String(chunk)).slice(-16_000)
-            if (run.keyFile && /Authenticated to /.test(run.stderr)) dropKey(run)
-          })
-          child.on('error', () => {
-            clearTimeout(timer)
-            resolve({ code: -1 })
-          })
-          child.on('exit', (code) => {
-            clearTimeout(timer)
-            resolve({ code })
-          })
-        })
-        if (!/Authenticated to /.test(run.stderr)) {
-          throw exit ? sshFailure(t, run.stderr, { code: exit.code, signal: null }) : new ApiError({ kind: 'timeout', message: `The check of the tunnel account on ${t.host} did not get as far as logging in` })
-        }
-        // Still running, or ended well: not refused.
-        if (!exit || exit.code === 0) open.push(what)
-      } finally {
-        this.end(run)
-      }
-    }
-    return open
-  }
-
   /** Only these keys may run (the current configuration): every other tunnel is stopped. */
   retain(keep: ReadonlySet<string>): void {
     this.allowed = new Set(keep)
@@ -428,7 +342,6 @@ export class TunnelManager {
       }
     }
     if (run.file) void rm(run.file, { force: true }).catch(() => undefined)
-    dropKey(run)
   }
 
   /** The private folder for known_hosts files. */
@@ -458,7 +371,7 @@ export class TunnelManager {
       const run: Run = { port: 0, file: '', stderr: '', ready: false, done: false }
       if (this.closed || !track(run)) throw changed()
       // Only the configured key: ssh would otherwise fall back to the default ones.
-      if (!t.keyRef && !(await (this.deps.identityReadable ?? identityReadable)(t.identityFile))) {
+      if (!(await (this.deps.identityReadable ?? identityReadable)(t.identityFile))) {
         this.end(run)
         throw new ApiError({ kind: 'invalid-config', message: `The identity file ${t.identityFile} cannot be read`, hint: 'Give the path of the tunnel’s private key on this machine (readable by you only).' })
       }
@@ -467,19 +380,6 @@ export class TunnelManager {
       run.file = join(dir, `${createHash('sha256').update(`${t.host}|${t.port}|${this.deps.now()}|${Math.random()}`).digest('hex').slice(0, 16)}.known_hosts`)
       await writeFile(run.file, learn ? '' : `${knownHostsName(t)} ${t.hostKey.trim()}\n`, { mode: 0o600 })
       await chmod(run.file, 0o600).catch(() => undefined)
-      if (t.keyRef) {
-        const pem = await this.deps.identityKey?.(t.keyRef).catch(() => null)
-        if (!pem) {
-          this.end(run)
-          throw new ApiError({ kind: 'invalid-config', message: 'The plugin’s own SSH key for this connection is missing', hint: 'Connect the host again from Settings (Connect via Orca), or remove this connection.' })
-        }
-        // Created empty and closed to others first, only then the key; removed once ssh is in.
-        run.keyFile = run.file.replace(/.known_hosts$/, '.key')
-        await writeFile(run.keyFile, '', { mode: 0o600 })
-        await chmod(run.keyFile, 0o600).catch(() => undefined)
-        await this.deps.protectKeyFile?.(run.keyFile)
-        await writeFile(run.keyFile, pem, { mode: 0o600 })
-      }
       // The last moment before a process exists: stopped meanwhile, nothing is spawned.
       if (run.done || this.closed) {
         this.end(run)
@@ -487,7 +387,7 @@ export class TunnelManager {
       }
       let child: TunnelChild
       try {
-        child = this.deps.spawn(ssh, sshArgs(t, run.port, run.file, learn, run.keyFile ?? t.identityFile))
+        child = this.deps.spawn(ssh, sshArgs(t, run.port, run.file, learn))
       } catch (error) {
         this.end(run)
         throw new ApiError({ kind: 'invalid-config', message: `ssh could not be started: ${error instanceof Error ? error.message : String(error)}` })
@@ -540,8 +440,6 @@ export class TunnelManager {
       }
       child.stderr?.on('data', (chunk) => {
         run.stderr = (run.stderr + String(chunk)).slice(-16_000)
-        // Authenticated: the key is not read again by this ssh.
-        if (run.keyFile && /Authenticated to /.test(run.stderr)) dropKey(run)
         if (!checking && !run.done && forwardListening(run.stderr, run.port)) {
           checking = true
           void confirm()
@@ -552,7 +450,6 @@ export class TunnelManager {
         run.done = true
         this.probes.delete(run)
         if (run.file) void rm(run.file, { force: true }).catch(() => undefined)
-        dropKey(run)
         settle(new ApiError({ kind: 'invalid-config', message: `ssh could not be run: ${error.message}` }))
         if (run.ready && !wasDone) run.onLost?.()
       })
@@ -561,7 +458,6 @@ export class TunnelManager {
         run.done = true
         this.probes.delete(run)
         if (run.file) void rm(run.file, { force: true }).catch(() => undefined)
-        dropKey(run)
         run.exit = { code, signal }
         if (!run.ready) settle(portTaken(run.stderr, run.port) ? 'port-taken' : sshFailure(t, run.stderr, run.exit))
         else if (!wasDone) run.onLost?.()
@@ -574,14 +470,6 @@ export class TunnelManager {
     entry.lastError = error
     entry.retryAt = this.deps.now() + Math.min(MAX_BACKOFF_MS, 1000 * 2 ** (entry.failures - 1))
   }
-}
-
-/** Removes a run's copy of the plugin's key, once. */
-function dropKey(run: Run): void {
-  if (!run.keyFile) return
-  const file = run.keyFile
-  run.keyFile = undefined
-  void rm(file, { force: true }).catch(() => undefined)
 }
 
 /** Connects to 127.0.0.1:port and closes again shortly after (time for ssh to take it). */

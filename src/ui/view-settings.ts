@@ -245,9 +245,7 @@ function tunnelFields(kind: SourceKind): HTMLElement {
           field('set-ssh-host', 'SSH host', 'DNS name or IP address of the server.', text('set-ssh-host', t.host, 'pve.example.com', (v) => set({ host: v }))),
           field('set-ssh-port', 'SSH port', '', text('set-ssh-port', String(t.port), '22', (v) => set({ port: Number(v) || 22 }))),
           field('set-ssh-user', 'SSH user', 'The account that may only forward to the API (see the README).', text('set-ssh-user', t.user, 'orca-tunnel', (v) => set({ user: v }))),
-          t.keyRef
-            ? h('div', { class: 'small' }, 'Key: the plugin’s own, made by Connect via Orca and kept sealed; its public half is on the server.')
-            : field('set-ssh-key', 'Identity file', 'The private key on this machine, without a passphrase, readable by you only.', text('set-ssh-key', t.identityFile, '/home/you/.ssh/orca-proxmox-tunnel', (v) => set({ identityFile: v }))),
+          field('set-ssh-key', 'Identity file', 'The private key on this machine, without a passphrase, readable by you only.', text('set-ssh-key', t.identityFile, '/home/you/.ssh/orca-proxmox-tunnel', (v) => set({ identityFile: v }))),
           field('set-ssh-target', 'API as the server reaches it', `Usually ${DEFAULT_TARGET[kind]}.`, text('set-ssh-target', t.target, DEFAULT_TARGET[kind], (v) => set({ target: v }))),
           h(
             'div',

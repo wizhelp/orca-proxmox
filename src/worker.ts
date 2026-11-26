@@ -25,8 +25,8 @@ import { ApiError, normalizeBaseUrl, ProxmoxClient } from './proxmox/client'
 import { nodeTransport, type ConnectTo, type Transport } from './proxmox/http'
 import { findSsh, freeLocalPort, hostKeyFingerprint, sshEnvironment, TunnelManager, type SpawnSsh } from './proxmox/tunnel'
 import { safeTarget } from './features/targets'
-import { execFile, spawn } from 'node:child_process'
-import { tmpdir, userInfo } from 'node:os'
+import { spawn } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { createSource, type AccessCheck } from './proxmox/source'
 import { cliEnvironment, nodeCliRunner } from './orca/cli'
@@ -39,8 +39,6 @@ import { outboundSnapshot, redactDeep, scrubLine } from './scrub'
 import { fileVault, keyFile, memoryVault, type Binding, type Vault } from './vault'
 import { cleanupText, importFile, takeImport, type ImportedConnection } from './importer'
 import { SetupService } from './setup/service'
-import { lookup } from 'node:dns/promises'
-import { readdir, rm } from 'node:fs/promises'
 import type { AlertState } from './features/alerts'
 import type { JsonValue } from 'orca/worker'
 
@@ -64,7 +62,7 @@ const sameEndpoint = (a: ConnectionConfig, b: ConnectionConfig) =>
 /** How a connection is reached when not directly: its SSH tunnel, every field that decides where. */
 const routeOf = (c: ConnectionConfig): string | undefined => {
   const t = c.tunnel
-  return t ? JSON.stringify(['ssh', t.host, t.port, t.user, t.identityFile, t.target, t.hostKey, ...(t.keyRef ? [t.keyRef] : [])]) : undefined
+  return t ? JSON.stringify(['ssh', t.host, t.port, t.user, t.identityFile, t.target, t.hostKey]) : undefined
 }
 /** What a sealed secret is bound to: everything that decides where it is sent. */
 const binding = (c: ConnectionConfig): Binding => {
@@ -83,19 +81,9 @@ let tunnelManager: TunnelManager | undefined
 /** The tunnel manager; none is created once the worker is stopping (a read still in flight then fails). */
 const tunnels = () => {
   if (stopped) throw new ApiError({ kind: 'unreachable', message: 'The plugin is stopping; no SSH tunnel is started' })
-  return (tunnelManager ??= new TunnelManager({ spawn: spawnSsh, sshPath: () => sshPath(), dir: tunnelDir(), freePort: freeLocalPort, now: () => clock(), identityKey: (ref) => openTunnelKey(ref), protectKeyFile: (path) => protectKeyFile(path) }))
+  return (tunnelManager ??= new TunnelManager({ spawn: spawnSsh, sshPath: () => sshPath(), dir: tunnelDir(), freePort: freeLocalPort, now: () => clock() }))
 }
-/** The plugin's own tunnel keys (Connect via Orca), opened from its sealed secrets; set at activation. */
-let openTunnelKey: (ref: string) => Promise<string | null> = async () => null
-/** On Windows, OpenSSH refuses a key others may read: the file's ACL becomes this user's alone. */
-let protectKeyFile: (path: string) => Promise<void> = (path) =>
-  process.platform !== 'win32'
-    ? Promise.resolve()
-    : new Promise((resolve, reject) =>
-        execFile('icacls', [path, '/inheritance:r', '/grant:r', `${userInfo().username}:(F)`], { windowsHide: true, timeout: 10000 }, (error) => (error ? reject(new ApiError({ kind: 'invalid-config', message: 'The tunnel key file could not be closed to other users' })) : resolve()))
-      )
 let clock: () => number = Date.now
-let scopeWaitMs = 8000
 let sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms))
 let cliRunner: (() => CliRunner) | undefined
 let vault: Vault | undefined
@@ -130,14 +118,6 @@ export function privilegeNames(answer: unknown): string[] {
   return [...out].sort()
 }
 
-/** Copies of tunnel keys (`<16 hex>.key`) left in the private folder; answers how many were removed. */
-async function removeOrphanKeys(dir: string): Promise<number> {
-  const names = await readdir(dir).catch(() => [] as string[])
-  const keys = names.filter((n) => /^[0-9a-f]{16}\.key$/.test(n))
-  for (const n of keys) await rm(join(dir, n), { force: true })
-  return keys.length
-}
-
 /** Tests replace the network (and the clock) with recorded answers. Orca never calls this. */
 export function useTestDoubles(doubles: {
   transport: Transport
@@ -152,12 +132,8 @@ export function useTestDoubles(doubles: {
   importPath?: string
   importPlatform?: NodeJS.Platform
   sleep?: (ms: number) => Promise<void>
-  /** How long a scope check waits for ssh to be refused. */
-  scopeWaitMs?: number
 }): void {
-  scopeWaitMs = doubles.scopeWaitMs ?? 8000
   sleep = doubles.sleep ?? ((ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))))
-  protectKeyFile = async () => undefined
   background = doubles.background ?? false
   // Never the real import file in tests: a path that does not exist unless a test makes it.
   importPath = doubles.importPath ?? '\0no-import-file-in-tests'
@@ -247,7 +223,6 @@ function validate(input: ConnectionInput, id: string): ConnectionConfig {
 }
 
 const SSH_USER = /^[A-Za-z_][A-Za-z0-9._-]{0,31}$/
-const KEY_REF = /^k-[0-9a-f]{16}$/
 const NODE_NAME = /^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$/
 
 /** An SSH tunnel's fields, checked one by one; they become ssh arguments (never through a shell). */
@@ -259,17 +234,14 @@ function validTunnel(raw: Partial<Record<keyof SshTunnel, unknown>>, kind: Sourc
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new InputError('The SSH port must be a number from 1 to 65535.')
   const user = text(raw.user)
   if (!SSH_USER.test(user)) throw new InputError('The SSH user must be a plain user name.')
-  const keyRef = text(raw.keyRef)
   const identityFile = text(raw.identityFile)
-  if (keyRef) {
-    if (!KEY_REF.test(keyRef) || identityFile) throw new InputError('The tunnel uses either the plugin’s own key or an identity file, not both.')
-  } else if (!isAbsolute(identityFile) || identityFile.startsWith('-') || /[\0\r\n]/.test(identityFile)) throw new InputError('The identity file must be the absolute path of a private key on this machine, e.g. C:\\Users\\you\\.ssh\\key or C:/Users/you/.ssh/key. On Windows, backslashes lost on the way (in a shell) make a path relative: write it from PowerShell or use forward slashes.')
+  if (!isAbsolute(identityFile) || identityFile.startsWith('-') || /[\0\r\n]/.test(identityFile)) throw new InputError('The identity file must be the absolute path of a private key on this machine, e.g. C:\\Users\\you\\.ssh\\key or C:/Users/you/.ssh/key. On Windows, backslashes lost on the way (in a shell) make a path relative: write it from PowerShell or use forward slashes.')
   const target = text(raw.target) || (kind === 'pbs' ? '127.0.0.1:8007' : '127.0.0.1:8006')
   const t = /^([^:\s]+):(\d{1,5})$/.exec(target)
   if (!t || safeTarget(t[1]) !== t[1] || Number(t[2]) < 1 || Number(t[2]) > 65535) throw new InputError('The tunnel target must be host:port as the SSH server reaches the API, e.g. 127.0.0.1:8006.')
   const hostKey = text(raw.hostKey).split(/\s+/).slice(0, 2).join(' ')
   if (hostKey && !hostKeyFingerprint(hostKey)) throw new InputError('The SSH host key must be one public key, like "ssh-ed25519 AAAA…".')
-  return { host, port, user, identityFile, target, hostKey, ...(keyRef ? { keyRef } : {}) }
+  return { host, port, user, identityFile, target, hostKey }
 }
 
 /** Node names here -> PDM node names (or remote/node), for enrich only. */
@@ -901,13 +873,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     return { how: plan.how, navigated, where: plan.where }
   })
 
-  // Connect via Orca (setup/service.ts): the tunnel keys it makes are sealed like token secrets.
-  const tunnelKeyName = (ref: string) => `tunnel-key:${ref}`
-  const keyBinding = (ref: string): Binding => ({ id: ref, kind: 'ssh-key', baseUrl: '', tokenId: '', fingerprint: '' })
-  openTunnelKey = async (ref) => {
-    const stored = await orca.secrets.get(tunnelKeyName(ref))
-    return stored ? sealer().open(stored, keyBinding(ref)) : null
-  }
+  // Connect via Orca (setup/service.ts).
   // Setup records are sealed like secrets, bound to their host and run: the panel can read and
   // write plugin storage, but cannot forge or alter one.
   const recordBinding = (hostKey: string, runId: string): Binding => ({ id: 'setup-record', kind: 'setup', baseUrl: hostKey, tokenId: runId, fingerprint: '' })
@@ -928,17 +894,6 @@ export default function activate(orca: OrcaWorkerApi): void {
       const answer = await checkWith(c, secret, {}, (client) => client.get<unknown>('/access/permissions'))
       return privilegeNames(answer)
     },
-    scopeCheck: async (input) => {
-      const { c } = setupConnection(input)
-      if (!c.tunnel) return []
-      return tunnels().scopeCheck(c.tunnel, scopeWaitMs)
-    },
-    resolve: async (host) => (await lookup(host, { all: true })).map((a) => a.address),
-    sealKey: async (ref, pem) => {
-      if ((await secretsProtection()) === 'unavailable') throw new InputError('Orca cannot encrypt secrets on this machine (no OS keyring); the tunnel key is not stored.')
-      await orca.secrets.set(tunnelKeyName(ref), await sealer().seal(pem, keyBinding(ref)))
-    },
-    dropKey: (ref) => orca.secrets.delete(tunnelKeyName(ref)),
     connections: loadConnections,
     test: (input) => testConnection(input),
     save: (input) =>
@@ -986,9 +941,6 @@ export default function activate(orca: OrcaWorkerApi): void {
       return setupError(error)
     }
   })
-  // Copies of the plugin's own key that a stopped worker could not remove are removed now.
-  void removeOrphanKeys(tunnelDir()).then((n) => n && log(`Removed ${n} leftover copies of tunnel keys`), (error: unknown) => log(`Could not remove leftover tunnel key copies: ${String(error)}`))
-
   // The status-bar item runs this: show the panel (Orca's plugin API cannot, its CLI can).
   orca.commands.register('proxmox.openPanel', async () => {
     const run = (cliRunner ?? nodeCliRunner)()

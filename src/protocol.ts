@@ -56,7 +56,6 @@ export type SetupDetection = {
   root: 'yes' | 'sudo' | 'no'
   /** Installed product versions. */
   products: { pve?: string; pbs?: string; pdm?: string }
-  sshd: boolean
   hostname: string
   fqdn?: string
   /** From the shell's SSH_CONNECTION: the address it was reached at, and where from. */
@@ -67,7 +66,7 @@ export type SetupDetection = {
  * A setup run the plugin recorded (sealed, before it ran): its last known state. `pending` and
  * `unknown`: what happened on the host is not known; Undo works from the host's own record.
  */
-export type SetupRecord = { product: 'pve' | 'pbs'; runId: string; at: number; tunnel: boolean; status: 'pending' | 'unknown' | 'stopped' | 'failed' | 'saved'; message?: string; connectionId?: string }
+export type SetupRecord = { product: 'pve' | 'pbs'; runId: string; at: number; status: 'pending' | 'unknown' | 'stopped' | 'failed' | 'saved'; message?: string; connectionId?: string }
 
 /** An Orca host for "Connect via Orca". */
 export type SetupHost = {
@@ -98,10 +97,10 @@ export type SetupPlan = {
   summary: string[]
   expiresAt: number
   /** The connection that will be saved (setup only). */
-  connection?: { kind: 'pve' | 'pbs'; name: string; baseUrl: string; tokenId: string; enrichOnly: boolean; tunnel?: string }
+  connection?: { kind: 'pve' | 'pbs'; name: string; baseUrl: string; tokenId: string; enrichOnly: boolean }
 }
 
-export type SetupPlanInput = { hostKey: string; product: 'pve' | 'pbs'; tunnel: boolean; replace: boolean; address: string; name: string }
+export type SetupPlanInput = { hostKey: string; product: 'pve' | 'pbs'; replace: boolean; address: string; name: string }
 
 export type SetupRunAnswer = {
   ok: boolean

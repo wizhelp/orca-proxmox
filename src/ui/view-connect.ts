@@ -9,7 +9,7 @@ import { h } from './dom'
 import { icon } from './icons'
 import { button, callout, chip } from './parts'
 
-type Choice = { product: 'pve' | 'pbs'; tunnel: boolean; replace: boolean; address: string; name: string }
+type Choice = { product: 'pve' | 'pbs'; replace: boolean; address: string; name: string }
 
 const state = {
   loaded: false,
@@ -27,6 +27,7 @@ const state = {
 
 const RECORD_LABEL: Record<SetupRecord['status'], string> = { pending: 'outcome unknown (interrupted)', unknown: 'outcome unknown', stopped: 'stopped on the host', failed: 'not saved', saved: 'set up' }
 
+const TUNNEL_GUIDE = 'https://github.com/wizhelp/orca-proxmox/blob/main/docs/AGENT_SETUP.md#through-an-ssh-tunnel-enrich-only'
 const GUIDE = 'https://github.com/wizhelp/orca-proxmox/blob/main/docs/AGENT_SETUP.md#1-log-in-to-pdms-api'
 
 async function load(): Promise<void> {
@@ -63,7 +64,6 @@ function defaults(host: SetupHost): Choice {
   const d = host.detection!
   return {
     product: d.products.pve ? 'pve' : 'pbs',
-    tunnel: false,
     replace: false,
     address: d.via?.server ?? d.fqdn ?? d.hostname,
     name: d.hostname.slice(0, 40)
@@ -123,7 +123,7 @@ function toggle(id: string, label: string, checked: boolean, onChange: (on: bool
   return h('label', { class: 'check', for: id }, h('input', { id, type: 'checkbox', checked, onChange: (e: Event) => onChange((e.target as HTMLInputElement).checked) }), label)
 }
 
-/** What to set up on a checked host: product, address, name, tunnel, replace. */
+/** What to set up on a checked host: product, address, name, replace. */
 function connectForm(host: SetupHost): HTMLElement {
   const d = host.detection!
   const c = state.choice.get(host.key) ?? defaults(host)
@@ -142,7 +142,6 @@ function connectForm(host: SetupHost): HTMLElement {
       : null,
     h('div', { class: 'field' }, h('label', { for: id('addr') }, 'Address this machine reaches it at'), input(id('addr'), c.address, (v) => set({ address: v })), h('div', { class: 'muted small' }, 'Suggested from what the host reported (where its shell was reached); check it. The plugin connects to this address from here and requires the certificate the host reported.')),
     h('div', { class: 'field' }, h('label', { for: id('name') }, 'Name in the estate'), input(id('name'), c.name, (v) => set({ name: v }))),
-    d.sshd ? toggle(id('tunnel'), 'Reach the API through an SSH tunnel (its port stays closed to the network)', c.tunnel, (on) => set({ tunnel: on })) : null,
     toggle(id('replace'), 'Replace an earlier Orca token on this host (the old one stops working)', c.replace, (on) => set({ replace: on })),
     h('div', { class: 'toolbar' }, button(state.busy?.step === 'plan' && state.busy.hostKey === host.key ? 'Preparing…' : 'Show the script', () => showPlan(host), { icon: 'note', variant: 'primary', disabled: busy }), button('Cancel', () => ((state.open = null), (state.plan = null), actions.render()), { variant: 'ghost', disabled: busy }))
   )
@@ -157,7 +156,7 @@ function planView(plan: SetupPlan): HTMLElement {
     { class: 'confirm stack-sm', role: 'alertdialog', 'aria-label': undo ? 'Review the Undo script' : 'Review the setup script' },
     h('strong', null, undo ? `Undo on ${plan.hostName}` : `Set up ${plan.connection?.kind === 'pbs' ? 'Proxmox Backup Server' : 'Proxmox VE'} on ${plan.hostName}`),
     h('ul', { class: 'options small' }, plan.summary.map((s) => h('li', null, s))),
-    plan.connection ? h('div', { class: 'small' }, 'Saves ', h('code', null, plan.connection.tokenId), ' at ', h('code', null, plan.connection.baseUrl), plan.connection.tunnel ? [' through ', h('code', null, plan.connection.tunnel)] : null, plan.connection.enrichOnly ? ' (enrich only)' : '') : null,
+    plan.connection ? h('div', { class: 'small' }, 'Saves ', h('code', null, plan.connection.tokenId), ' at ', h('code', null, plan.connection.baseUrl), plan.connection.enrichOnly ? ' (enrich only)' : '') : null,
     h('details', { class: 'fold', open: true }, h('summary', null, `The script (${plan.script.split('\n').length} lines): exactly what runs`), h('pre', { class: 'script small' }, plan.script)),
     h('div', { class: 'muted small' }, `Valid until ${new Date(plan.expiresAt).toLocaleTimeString()}, once.`),
     h(
@@ -208,7 +207,7 @@ function hostRow(host: SetupHost): HTMLElement {
             h(
               'span',
               { class: 'setup-record' },
-              chip(`${r.product.toUpperCase()}${r.tunnel ? ' + tunnel' : ''}: ${RECORD_LABEL[r.status]}`, r.status === 'saved' ? 'ok' : 'warn', undefined, `Run ${r.runId}, ${new Date(r.at).toLocaleString()}${r.message ? `: ${r.message}` : ''}`),
+              chip(`${r.product.toUpperCase()}: ${RECORD_LABEL[r.status]}`, r.status === 'saved' ? 'ok' : 'warn', undefined, `Run ${r.runId}, ${new Date(r.at).toLocaleString()}${r.message ? `: ${r.message}` : ''}`),
               host.unavailable ? null : button('Undo…', () => showUndo(host, r.runId), { icon: 'undo', variant: 'ghost', disabled: busy })
             )
           )
@@ -228,7 +227,8 @@ export function connectViaOrca(autoload: boolean): HTMLElement {
   return h(
     'div',
     { class: 'stack-sm' },
-    h('p', { class: 'muted small' }, 'For Proxmox VE and Backup Servers Orca already connects to (SSH targets, paired servers). Check reads what a host runs and changes nothing. Connect shows the exact script first and runs it as root in a terminal of that host only when you click Run. It creates a read-only token (and, if you choose, a tunnel account that may only forward to the API) and keeps a record on the host; no secret is ever shown in the terminal. What the host reports is trusted only as far as the host: the plugin then checks from this machine that the address presents the reported certificate, that the token has read rights only, and that the tunnel account is refused anything else, before it saves the connection. Undo reverses only what one run created.'),
+    h('p', { class: 'muted small' }, 'For Proxmox VE and Backup Servers Orca already connects to (SSH targets, paired servers). Check reads what a host runs and changes nothing. Connect shows the exact script first and runs it as root in a terminal of that host only when you click Run. It creates a read-only API token and keeps a record on the host; no secret is ever shown in the terminal. What the host reports is trusted only as far as the host: the plugin then checks from this machine that the address presents the reported certificate and that the token has read rights only, before it saves the connection. Undo reverses only what one run made.'),
+    h('p', { class: 'muted small' }, 'Advanced: VM disk usage via SSH tunnel (the API stays closed to the network) is set up with the guided steps in ', h('a', { href: TUNNEL_GUIDE, onClick: (e: Event) => (e.preventDefault(), void openLink(TUNNEL_GUIDE)) }, 'the guide’s SSH tunnel section'), ', not from here.'),
     state.answer?.error ? callout('warn', 'Orca’s hosts could not be read', state.answer.error) : null,
     state.answer?.ignoredRecords ? callout('warn', 'Some setup records were ignored', `${state.answer.ignoredRecords} stored record(s) did not open with the plugin’s key or were altered; they cannot be undone from here (the guide’s way back lists what to check on the host).`) : null,
     state.loading && !state.answer ? h('div', { class: 'muted small' }, 'Reading Orca’s hosts…') : null,

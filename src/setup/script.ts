@@ -6,20 +6,20 @@
 // its answers are only as trustworthy as that host: they are framed strictly (run id, sequence
 // number, a checksum over all of them in the last line) so that nothing else in the terminal, a
 // partial read or a lost line can pass for a complete answer, and the plugin checks what it can
-// on its own from this machine (the certificate and SSH host key by connecting, the token's
-// rights through the API, the tunnel account's limits with live ssh attempts).
+// on its own from this machine (the certificate by connecting, the token's rights through the API).
 //
 // Durable host-side state. Before each change the setup script records its intent, and after it
-// the result, in /var/lib/orca-proxmox-setup/<run id> (root only), and everything it creates is
-// labelled with the run id (user and token comments, the account's GECOS field, the exact key
-// line). Undo reads that file on the host and removes a resource only when its label is still
-// this run's: never one an administrator made or remade since, and never on the strength of what
-// the terminal or the plugin's storage says alone.
+// the result, in /var/lib/orca-proxmox-setup/<run id> (root only), and what it creates is
+// labelled with the run id (the user's and token's comments). Undo reads that file on the host
+// and removes a resource only when this run recorded making it and its label is still this run's:
+// never one an administrator made or remade since, never one that was there before, and never on
+// the strength of what the terminal or the plugin's storage says alone.
+//
+// Only the read-only token is set up this way. An SSH tunnel account stays the guided manual path
+// (docs/AGENT_SETUP.md, "Through an SSH tunnel").
 //
 // No script ever prints a secret: the new token's secret is encrypted on the host to the run's
 // one-time public key (keys.ts) and only that ciphertext is printed.
-
-import { safeIp } from '../features/targets'
 
 export type SetupProduct = 'pve' | 'pbs'
 
@@ -32,19 +32,6 @@ export type SetupRequest = {
   resultKey: string
   /** Replace an earlier `orca` token of the plugin's user (the old one stops working). */
   replace: boolean
-  /** Also the restricted tunnel account, with the plugin's own key. */
-  tunnel?: TunnelRequest
-}
-
-/** The tunnel account, and the SSH connection the tunnel will use, as the host must see it. */
-export type TunnelRequest = {
-  /** `ssh-ed25519 AAAA… orca-proxmox-tunnel`, the plugin's public key. */
-  keyLine: string
-  /** This machine's address as the host sees it (its SSH_CONNECTION). */
-  client: string
-  /** The host's address and SSH port the tunnel connects to. */
-  laddr: string
-  lport: number
 }
 
 export class ScriptError extends Error {}
@@ -101,8 +88,6 @@ done
 } as const
 
 export const TOKEN_NAME = 'orca'
-export const TUNNEL_USER = 'orca-tunnel'
-export const KEY_COMMENT = 'orca-proxmox-tunnel'
 const USER_COMMENT = 'Read-only, Orca plugin'
 const STATE_DIR = '/var/lib/orca-proxmox-setup'
 
@@ -130,22 +115,11 @@ export function productLabel(product: SetupProduct): string {
 
 export const RUN_ID = /^[0-9a-f]{16}$/
 const PEM = /^-----BEGIN PUBLIC KEY-----\n[A-Za-z0-9+/=\n]{200,1000}\n-----END PUBLIC KEY-----\n?$/
-export const KEY_LINE = new RegExp(`^ssh-ed25519 AAAAC3NzaC1lZDI1NTE5[A-Za-z0-9+/]{43,}={0,2} ${KEY_COMMENT}$`)
-/** OpenSSH's `expiry-time`, as the setup script writes it (UTC). */
-export const EXPIRY = /^\d{12}Z$/
-
 function check(request: SetupRequest): void {
   if (request.product !== 'pve' && request.product !== 'pbs') throw new ScriptError('Only a Proxmox VE or Backup Server host can be connected this way.')
   if (!RUN_ID.test(request.runId)) throw new ScriptError('The run id is not valid.')
   if (!PEM.test(request.resultKey)) throw new ScriptError('The one-time key is not a PEM public key.')
   if (typeof request.replace !== 'boolean') throw new ScriptError('Replace must be yes or no.')
-  if (request.tunnel) checkTunnel(request.tunnel)
-}
-
-function checkTunnel(t: TunnelRequest): void {
-  if (!KEY_LINE.test(t.keyLine)) throw new ScriptError('The tunnel key is not the plugin’s own Ed25519 public key.')
-  if (safeIp(t.client) !== t.client || safeIp(t.laddr) !== t.laddr) throw new ScriptError('The connection context must be IP addresses.')
-  if (!Number.isInteger(t.lport) || t.lport < 1 || t.lport > 65535) throw new ScriptError('The SSH port is not valid.')
 }
 
 /**
@@ -179,68 +153,6 @@ stop() { say stop "$1"; finish stop; exit 1; }
 `
 }
 
-/** The Match block for the tunnel account: local forwards to the API only. */
-export function policyBlock(port: number): string {
-  return `
-# Orca plugin: an account that may only forward to the local Proxmox API.
-Match User ${TUNNEL_USER}
-    AllowTcpForwarding local
-    AllowStreamLocalForwarding no
-    PermitListen none
-    PermitOpen 127.0.0.1:${port}
-    PermitTTY no
-    X11Forwarding no
-    AllowAgentForwarding no
-    ForceCommand /bin/false
-`
-}
-
-/** The final authorized_keys line: the key may only forward, and only to the API. */
-export function authorizedLine(keyLine: string, port: number): string {
-  return `restrict,port-forwarding,permitopen="127.0.0.1:${port}" ${keyLine}`
-}
-
-/** The line installed first: the same, from this machine only, and expiring by itself. */
-export function probeLine(keyLine: string, port: number, client: string, expiry: string): string {
-  return `restrict,port-forwarding,permitopen="127.0.0.1:${port}",from="${client}",expiry-time="${expiry}" ${keyLine}`
-}
-
-/**
- * The connection context sshd -T -C is asked about: exactly the connection the tunnel will use,
- * which must be the one this shell came in on (its SSH_CONNECTION); anything else stops.
- */
-function contextCheck(t: TunnelRequest, port: number): string {
-  return `# The connection the tunnel will use must be the one this shell came in on.
-set -- \${SSH_CONNECTION:-}
-[ "$#" = 4 ] || stop "this shell did not come in over SSH, so the tunnel's connection cannot be checked; nothing was changed"
-[ "$1" = '${t.client}' ] && [ "$3" = '${t.laddr}' ] && [ "$4" = '${t.lport}' ] || stop "this shell came in from $1 to $3 port $4, not as the tunnel will (${t.client} to ${t.laddr} port ${t.lport}); nothing was changed"
-CH='${t.client}'
-if sshd -T 2>/dev/null | grep -qi '^usedns yes'; then
-  CH=$(getent hosts '${t.client}' | awk '{ print $2; exit }')
-  [ -n "$CH" ] || CH='${t.client}'
-fi
-CTX="host=$CH,addr=${t.client},laddr=${t.laddr},lport=${t.lport}"
-policy_ok() {
-  want=$(printf '%s\\n' 'allowagentforwarding no' 'allowstreamlocalforwarding no' 'allowtcpforwarding local' \\
-    'forcecommand /bin/false' 'permitlisten none' 'permitopen 127.0.0.1:${port}' 'permittty no' 'x11forwarding no')
-  got=$(sshd -T -C "user=${TUNNEL_USER},$CTX" 2>/dev/null |
-    grep -Ei '^(allowtcpforwarding|allowstreamlocalforwarding|permitlisten|permitopen|permittty|x11forwarding|allowagentforwarding|forcecommand) ' | sort)
-  [ "$got" = "$want" ]
-}
-root_policy() { sshd -T -C "user=root,$CTX" 2>/dev/null | sort; }
-# What sshd -T reads from disk must be what the running daemon applies: no change since it last
-# (re)loaded, unless sshd is socket-activated (each connection then reads the files anew).
-if ! systemctl is-active --quiet ssh.socket 2>/dev/null; then
-  SU=ssh.service
-  systemctl is-active --quiet "$SU" || SU=sshd.service
-  systemctl is-active --quiet "$SU" || stop "sshd's service is not active; nothing was changed"
-  SINCE=$(date -d "$(systemctl show -p StateChangeTimestamp --value "$SU")" +%s 2>/dev/null) || stop "when sshd last loaded its settings is unknown; nothing was changed"
-  [ -z "$(find /etc/ssh/sshd_config /etc/ssh/sshd_config.d -newermt "@$SINCE" 2>/dev/null | head -n 1)" ] ||
-    stop "sshd's settings changed on disk since sshd last loaded them; reload sshd yourself first, then run this again; nothing was changed"
-fi
-`
-}
-
 /** Read-only: what this host runs, who the shell is, and where it was reached. */
 export function detectScript(runId: string): string {
   if (!RUN_ID.test(runId)) throw new ScriptError('The run id is not valid.')
@@ -253,7 +165,6 @@ v() { dpkg-query -W -f='\${Version}' "$1" 2>/dev/null; }
 command -v pveum >/dev/null 2>&1 && say pve "$(v pve-manager)"
 command -v proxmox-backup-manager >/dev/null 2>&1 && say pbs "$(v proxmox-backup-server)"
 command -v proxmox-datacenter-manager-admin >/dev/null 2>&1 && say pdm "$(v proxmox-datacenter-manager)"
-command -v sshd >/dev/null 2>&1 && say sshd yes
 say hostname "$(hostname)"
 say fqdn "$(hostname -f 2>/dev/null)"
 say via "\${SSH_CONNECTION:-}"
@@ -269,7 +180,6 @@ const JSON_HELPERS = `has() { h_l=$1; shift; printf '%s\n' "$h_l" | tr '{' '\\n'
 export function setupScript(request: SetupRequest): string {
   check(request)
   const p = PRODUCTS[request.product]
-  const t = request.tunnel
   const lines: string[] = [prelude(request.runId, `connect this ${p.label} to the plugin, read-only`)]
   lines.push(`# Root, the product's own tool and openssl are needed; nothing is changed before these checks.
 [ "$(id -u)" = 0 ] || stop "not root"
@@ -287,16 +197,6 @@ ${LOCK}STATE=${STATE_DIR}/$R
 ( set -C; : > "$STATE" ) 2>/dev/null || stop "this run was started before; nothing was changed"
 mark() { printf '%s\\n' "$*" >> "$STATE" || stop "the state file could not be written"; }
 `)
-  if (t) {
-    lines.push(`# The tunnel account: refused when anything of it exists already.
-command -v sshd >/dev/null 2>&1 || stop "no sshd"
-id ${TUNNEL_USER} >/dev/null 2>&1 && stop "the account ${TUNNEL_USER} exists already; nothing was changed"
-grep -q '^Match User ${TUNNEL_USER}$' /etc/ssh/sshd_config && stop "sshd_config already has a Match User ${TUNNEL_USER} block; nothing was changed"
-sshd -t || stop "sshd_config has an error already; nothing was changed"
-${contextCheck(t, p.port)}BEFORE=$(root_policy)
-[ -n "$BEFORE" ] || stop "sshd -T gave nothing; nothing was changed"
-`)
-  }
   lines.push(`# The read-only user: created, or reused only when it is the plugin's own.
 UL=$(${p.userList}) || stop "the user list could not be read"
 if has "$UL" "\\"userid\\":\\"$U\\""; then
@@ -343,47 +243,6 @@ mark intent token_acl
 ${p.tokenAcl} || stop "the token's permission could not be set"
 mark done token_acl
 `)
-  if (t) {
-    lines.push(`# The tunnel account, with no password and no key yet.
-B=/etc/ssh/sshd_config.orca-backup.$R
-cp -a /etc/ssh/sshd_config "$B" || stop "no backup of sshd_config could be made"
-mark intent account
-useradd --system --create-home --shell /usr/sbin/nologin --comment "Orca plugin $R" ${TUNNEL_USER} || stop "the account could not be created"
-mark done account
-say created_account 1
-usermod -p '*' ${TUNNEL_USER} || stop "the account's password could not be locked"
-install -d -m 700 -o ${TUNNEL_USER} -g ${TUNNEL_USER} /home/${TUNNEL_USER}/.ssh || stop "the account's .ssh could not be made"
-# Its rules, appended; verified for the tunnel's own connection before the reload and after it.
-mark intent policy
-cat >> /etc/ssh/sshd_config <<'ORCA_POLICY' || stop "the rules could not be appended"
-${policyBlock(p.port)}ORCA_POLICY
-mark done policy
-say added_policy 1
-sshd -t || stop "sshd_config has an error now; use Undo"
-policy_ok || stop "an earlier rule wins over the account's rules for this connection; use Undo"
-[ "$(root_policy)" = "$BEFORE" ] || stop "root's effective sshd settings would change; use Undo"
-{ systemctl reload ssh || systemctl reload sshd; } || stop "sshd could not be reloaded; use Undo"
-sleep 1
-policy_ok || stop "the rules differ after the reload; use Undo"
-[ "$(root_policy)" = "$BEFORE" ] || stop "root's effective sshd settings changed with the reload; use Undo"
-[ "$(timeout 5 bash -c 'exec 3<>/dev/tcp/${t.laddr}/${t.lport} && head -c 4 <&3' 2>/dev/null)" = SSH- ] ||
-  stop "sshd does not answer new connections on ${t.laddr} port ${t.lport} after the reload; use Undo now, from this session"
-# Only now a key: for this machine only, expiring by itself in 15 minutes unless the plugin's
-# checks from this machine pass and it is made permanent.
-K=/home/${TUNNEL_USER}/.ssh/authorized_keys
-[ -e "$K" ] && stop "$K exists already; use Undo"
-X=$(date -u -d '+15 min' +%Y%m%d%H%MZ) || stop "no expiry time"
-mark intent keyfile $X ${t.client}
-install -m 600 -o ${TUNNEL_USER} -g ${TUNNEL_USER} /dev/null "$K" || stop "the key file could not be created"
-printf '%s\\n' 'restrict,port-forwarding,permitopen="127.0.0.1:${p.port}",from="${t.client}",expiry-time="'"$X"'" ${t.keyLine}' >> "$K" || stop "the key could not be written; use Undo"
-mark done keyfile $X ${t.client}
-say created_keyfile 1
-say key_expiry "$X"
-for F in /etc/ssh/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ecdsa_key.pub; do
-  [ -r "$F" ] && { say ssh_hostkey "$(cut -d' ' -f1,2 "$F")"; break; }
-done
-`)
-  }
   lines.push(`# What the API presents, read here on the host: the plugin then requires the same from its side.
 FP=$(timeout 10 openssl s_client -connect 127.0.0.1:${p.port} </dev/null 2>/dev/null | openssl x509 -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//')
 say api_fp "$FP"
@@ -397,39 +256,12 @@ finish ok
 }
 
 /**
- * After the plugin's own checks from this machine passed: the key that expires is made the
- * permanent one, only while the file holds exactly the key this run installed.
- */
-export function finalizeScript(product: SetupProduct, setupRunId: string, runId: string, t: TunnelRequest, expiry: string): string {
-  if (product !== 'pve' && product !== 'pbs') throw new ScriptError('Unknown product.')
-  if (!RUN_ID.test(setupRunId) || !RUN_ID.test(runId)) throw new ScriptError('The run id is not valid.')
-  checkTunnel(t)
-  if (!EXPIRY.test(expiry)) throw new ScriptError('The key’s expiry is not valid.')
-  const port = PRODUCTS[product].port
-  return `${prelude(runId, `make the tunnel key of setup run ${setupRunId} permanent`)}
-[ "$(id -u)" = 0 ] || stop "not root"
-${LOCK}STATE=${STATE_DIR}/${setupRunId}
-K=/home/${TUNNEL_USER}/.ssh/authorized_keys
-grep -qx 'done keyfile ${expiry} ${t.client}' "$STATE" 2>/dev/null || stop "the host has no record of that key"
-[ "$(cat "$K" 2>/dev/null)" = '${probeLine(t.keyLine, port, t.client, expiry)}' ] || stop "$K does not hold exactly the key that run installed; nothing was changed"
-printf '%s\\n' "intent final" >> "$STATE" || stop "the state file could not be written"
-install -m 600 -o ${TUNNEL_USER} -g ${TUNNEL_USER} /dev/null "$K.orca-new" || stop "the new key file could not be created"
-printf '%s\\n' '${authorizedLine(t.keyLine, port)}' >> "$K.orca-new" || { rm -f "$K.orca-new"; stop "the key could not be written"; }
-mv -f "$K.orca-new" "$K" || { rm -f "$K.orca-new"; stop "the key file could not be replaced"; }
-printf '%s\\n' "done final" >> "$STATE" || stop "the state file could not be written"
-say finalized_key 1
-finish ok
-`
-}
-
-/**
  * The Undo script for a setup run: what the host recorded for that run, in the guide's order,
  * each resource removed only while it still carries this run's label, every list read checked.
  */
-export function undoScript(product: SetupProduct, setupRunId: string, runId: string, keyLine?: string): string {
+export function undoScript(product: SetupProduct, setupRunId: string, runId: string): string {
   if (product !== 'pve' && product !== 'pbs') throw new ScriptError('Unknown product.')
   if (!RUN_ID.test(setupRunId) || !RUN_ID.test(runId)) throw new ScriptError('The run id is not valid.')
-  if (keyLine !== undefined && !KEY_LINE.test(keyLine)) throw new ScriptError('The tunnel key is not the plugin’s own Ed25519 public key.')
   const p = PRODUCTS[product]
   const lines: string[] = [prelude(runId, `undo what the setup run ${setupRunId} created`)]
   lines.push(`[ "$(id -u)" = 0 ] || stop "not root"
@@ -447,64 +279,7 @@ undone() { grep -qx "undone $1" "$STATE"; }
 mark() { printf '%s\\n' "$*" >> "$STATE" || stop "the state file could not be written"; }
 U='${p.user}'; T='${TOKEN_NAME}'
 ${JSON_HELPERS}`)
-  if (!keyLine) {
-    lines.push(`grep -qE '^intent (keyfile|policy|account)( |$)' "$STATE" && stop "the host recorded a tunnel account for this run, which this Undo does not know; nothing was changed"
-`)
-  } else {
-    lines.push(`# 1. The key first: only while the file holds exactly a key this run installed.
-K=/home/${TUNNEL_USER}/.ssh/authorized_keys
-if did keyfile && ! undone keyfile; then
-  X=$(sed -n 's/^intent keyfile \\([0-9]\\{12\\}Z\\) [0-9A-Fa-f:.]*$/\\1/p' "$STATE" | head -n 1)
-  F=$(sed -n 's/^intent keyfile [0-9]\\{12\\}Z \\([0-9A-Fa-f:.]*\\)$/\\1/p' "$STATE" | head -n 1)
-  if [ -e "$K" ]; then
-    C=$(cat "$K")
-    OK=
-    [ "$C" = '${authorizedLine(keyLine, p.port)}' ] && OK=1
-    [ -n "$X" ] && [ -n "$F" ] && [ "$C" = 'restrict,port-forwarding,permitopen="127.0.0.1:${p.port}",from="'"$F"'",expiry-time="'"$X"'" ${keyLine}' ] && OK=1
-    [ -n "$OK" ] || stop "$K holds more than, or other than, this run's key; remove only that line by hand"
-    rm -f "$K" || stop "the key file could not be removed"
-  fi
-  rm -f "$K.orca-new"
-  mark undone keyfile
-  say removed_keyfile 1
-fi
-# 2. The tunnel account's processes, only while the account is this run's: never anyone else's.
-OURS=
-[ "$(getent passwd ${TUNNEL_USER} | cut -d: -f5)" = "Orca plugin $S" ] && OURS=1
-if did account && ! undone account && [ -n "$OURS" ] && [ "$(id -u ${TUNNEL_USER})" != 0 ]; then
-  pkill -u ${TUNNEL_USER}; sleep 1
-  pgrep -u ${TUNNEL_USER} >/dev/null && stop "${TUNNEL_USER} processes are still running"
-fi
-# 3. The rules this run appended: only while sshd_config is exactly the backup plus those rules
-#    (or already the backup again, when a reload failed last time).
-B=/etc/ssh/sshd_config.orca-backup.$S
-if did policy && ! undone policy; then
-  [ -e "$B" ] || stop "the backup $B is gone; remove the Orca Match block by hand"
-  if { cat "$B"; cat <<'ORCA_POLICY'
-${policyBlock(p.port)}ORCA_POLICY
-  } | cmp -s - /etc/ssh/sshd_config; then
-    cp -a "$B" /etc/ssh/sshd_config || stop "sshd_config could not be restored from $B"
-  elif ! cmp -s "$B" /etc/ssh/sshd_config; then
-    stop "sshd_config changed since the setup; remove the Orca Match block by hand"
-  fi
-  sshd -t || stop "the restored sshd_config has an error"
-  { systemctl reload ssh || systemctl reload sshd; } || stop "sshd could not be reloaded; run Undo again"
-  mark undone policy
-  rm -f "$B"
-  say removed_policy 1
-fi
-# 4. The account this run created, only while it is still labelled as this run's.
-if did account && ! undone account; then
-  if id ${TUNNEL_USER} >/dev/null 2>&1; then
-    [ -n "$OURS" ] || stop "the account ${TUNNEL_USER} is not this run's any more; it was kept"
-    userdel -r ${TUNNEL_USER} || stop "the account could not be removed"
-  fi
-  mark undone account
-  say removed_account 1
-fi
-`)
-  }
-  lines.push(`# 5. The token this run created, only while its comment is still this run's.
+  lines.push(`# 1. The token this run created, only while its comment is still this run's.
 UL=$(${p.userList}) || stop "the user list could not be read"
 UEX=
 has "$UL" "\\"userid\\":\\"$U\\"" && UEX=1
@@ -521,7 +296,7 @@ if made token && ! undone token; then
   fi
   mark undone token
 fi
-# 6. The user (or its permission) only when this run made it and it has no token left at all.
+# 2. The user (or its permission) only when this run made it and it has no token left at all.
 LEFT=$(printf '%s' "$TL" | tr '{' '\\n' | grep -c '"tokenid"')
 if [ -n "$UEX" ] && made user && ! undone user; then
   if ! has "$UL" "\\"userid\\":\\"$U\\"" "\\"comment\\":\\"Read-only, Orca plugin $S\\""; then
@@ -558,9 +333,9 @@ finish ok
 
 /** What a script may answer, and which keys may come more than once. */
 const KEYS = new Set([
-  'root', 'pve', 'pbs', 'pdm', 'sshd', 'hostname', 'fqdn', 'via',
-  'reused_user', 'created_user', 'replaced_token', 'created_token', 'added_user_acl', 'created_account', 'added_policy', 'created_keyfile', 'key_expiry', 'ssh_hostkey', 'api_fp', 'secret',
-  'finalized_key', 'nothing', 'unconfirmed', 'removed_keyfile', 'removed_policy', 'removed_account', 'removed_token', 'kept_token', 'removed_user', 'removed_user_acl', 'kept_user', 'stop'
+  'root', 'pve', 'pbs', 'pdm', 'hostname', 'fqdn', 'via',
+  'reused_user', 'created_user', 'replaced_token', 'created_token', 'added_user_acl', 'api_fp', 'secret',
+  'nothing', 'unconfirmed', 'removed_token', 'kept_token', 'removed_user', 'removed_user_acl', 'kept_user', 'stop'
 ])
 const REPEATED = new Set(['secret'])
 

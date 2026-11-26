@@ -1,24 +1,19 @@
 // Connect via Orca: the generated scripts, what refuses to be generated, how answers are read back
 // from a terminal (strictly framed, kept across reads, checked against their checksum), sealed
 // records, and whole runs through the worker with a fake Orca CLI whose "server" answers like the
-// real scripts (encrypting the token secret to the script's one-time key, as openssl does there)
-// and a fake ssh for the tunnel. The secret must never be in what the terminal shows, the typed
-// command, an answer, a log or storage. Example data only.
+// real scripts (encrypting the token secret to the script's one-time key, as openssl does there).
+// The secret must never be in what the terminal shows, the typed command, an answer, a log or
+// storage. Example data only.
 import { constants, createHash, publicEncrypt } from 'node:crypto'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
-import * as net from 'node:net'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { gunzipSync } from 'node:zlib'
 import { after } from 'node:test'
 import { afterEach, assert, mockHost, mountWorker, test, type TestWorker } from 'orca/testing'
 import type { CliRunner } from '../src/orca/inventory'
 import type { SetupRunAnswer } from '../src/protocol'
-import { newTunnelKey, oneTimeKey } from '../src/setup/keys'
+import { oneTimeKey } from '../src/setup/keys'
 import { commandLine, logicalLines } from '../src/setup/runner'
-import { AnswerReader, authorizedLine, cipherOf, detectScript, finalizeScript, policyBlock, probeLine, setupScript, undoScript, type SetupRequest, type TunnelRequest } from '../src/setup/script'
+import { AnswerReader, cipherOf, detectScript, setupScript, undoScript, type SetupRequest } from '../src/setup/script'
 import { validRecord } from '../src/setup/service'
-import type { TunnelChild } from '../src/proxmox/tunnel'
 import { memoryVault } from '../src/vault'
 import * as main from '../src/worker'
 import { pveRoutes } from './fixtures/direct'
@@ -26,20 +21,12 @@ import { mockTransport } from './fixtures/pdm'
 
 const NOW = Date.UTC(2026, 10, 25, 12, 0, 0)
 const PIN = 'EC:7A:EF:38:FF:F7:59:92:C1:E3:B0:4C:1D:22:FF:C9:67:C6:91:C8:74:48:53:13:12:1A:C0:42:D1:5B:37:05'
-const HOST_KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g'
 const SECRET = '6f1c2b3a-4d5e-4f60-8a71-92b3c4d5e6f7'
 const RUN = '0123456789abcdef'
-const CTX = { client: '198.51.100.7', laddr: '198.51.100.21', lport: 22 }
 const key = oneTimeKey()
-const tunnelKey = newTunnelKey('orca-proxmox-tunnel')
-const TUN: TunnelRequest = { keyLine: tunnelKey.publicLine, ...CTX }
 const request = (over: Partial<SetupRequest> = {}): SetupRequest => ({ product: 'pve', runId: RUN, resultKey: key.publicPem, replace: false, ...over })
 const sha = (t: string) => createHash('sha256').update(t, 'utf8').digest('hex')
-const dir = mkdtempSync(join(tmpdir(), 'orca-setup-'))
-after(() => {
-  key.wipe()
-  rmSync(dir, { recursive: true, force: true })
-})
+after(() => key.wipe())
 
 /** What a script prints for these answers: numbered lines and the checksummed end. */
 function frame(runId: string, pairs: [string, string][], status: 'ok' | 'stop' = 'ok'): string[] {
@@ -53,7 +40,7 @@ const read = (runId: string, ...reads: string[][]) => {
 }
 
 test('the setup script holds only public values, and the secret leaves the host only encrypted', () => {
-  const script = setupScript(request({ tunnel: TUN }))
+  const script = setupScript(request())
   assert.ok(script.includes(key.publicPem.trim()))
   assert.ok(!script.includes('PRIVATE KEY'))
   assert.match(script, /printf '%s' "\$S" \| openssl pkeyutl -encrypt -pubin/)
@@ -61,34 +48,29 @@ test('the setup script holds only public values, and the secret leaves the host 
   for (const line of script.split('\n').filter((l) => /\bsay\b/.test(l) && !/^say\(\)/.test(l.trim()))) assert.ok(!/\$S\b|\$OUT\b/.test(line), line)
   // Everything it creates carries the run id; each change is recorded on the host first.
   assert.ok(script.includes('UC="Read-only, Orca plugin $R"; TC="Orca plugin $R"'))
-  assert.ok(script.includes('--comment "Orca plugin $R" orca-tunnel'))
-  for (const item of ['user', 'token', 'user_acl', 'account', 'policy']) assert.ok(script.includes(`mark intent ${item}`) && script.includes(`mark done ${item}`), item)
+  for (const item of ['user', 'token', 'user_acl', 'token_acl']) assert.ok(script.includes(`mark intent ${item}`) && script.includes(`mark done ${item}`), item)
   // Every list read is checked, never hidden in a pipeline.
   assert.ok(script.includes('UL=$(pveum user list --output-format json) || stop'))
   assert.ok(script.includes('TL=$(pveum user token list "$U" --output-format json) || stop'))
-  // The tunnel: checked for its own connection on what the running sshd applies; key last, limited.
-  const order = ['set -- ${SSH_CONNECTION:-}', 'StateChangeTimestamp', 'policy_ok || stop', 'root_policy)" = "$BEFORE"', 'systemctl reload ssh', 'the rules differ after the reload', '/dev/tcp/198.51.100.21/22', 'mark intent keyfile']
-  const at = order.map((s) => script.indexOf(s))
-  assert.ok(at.every((p, i) => p > 0 && (i === 0 || p > at[i - 1])), JSON.stringify(at))
-  assert.ok(script.includes('addr=198.51.100.7,laddr=198.51.100.21,lport=22'))
-  assert.ok(!script.includes('192.0.2'), 'no example addresses stand in for the real connection')
-  assert.ok(script.includes(`from="198.51.100.7",expiry-time="'"$X"'" ${tunnelKey.publicLine}`))
-  assert.ok(!script.includes(authorizedLine(tunnelKey.publicLine, 8006)), 'the permanent key is only written by finalize')
+  // Only the read-only token: nothing of an SSH account, sshd or keys.
+  assert.ok(!/sshd|useradd|authorized_keys|orca-tunnel|Match User/.test(script))
   assert.deepEqual(script.split('\n').filter((l) => /\bexit\b/.test(l) && !/^stop\(\)/.test(l) && !/trap|exit 0|exit 1; \}; \}|awk/.test(l)), [])
   assert.ok(script.includes('choose Replace') && !script.includes('pveum user token remove'))
   assert.ok(setupScript(request({ replace: true })).includes('pveum user token remove "$U" "$T"'))
 })
 
 test('PBS: only the subcommands and options its CLI has, checked before anything changes', () => {
-  const pbs = setupScript(request({ product: 'pbs', tunnel: TUN }))
+  const pbs = setupScript(request({ product: 'pbs' }))
   // generate-token is the API method itself: no --output-format, a --comment.
   assert.ok(pbs.includes('OUT=$(proxmox-backup-manager user generate-token "$U" "$T" --comment "$TC")'))
   assert.ok(!/user generate-token "\$U"[^\n]*--output-format/.test(pbs))
   for (const used of ['user list --output-format json', 'user list-tokens "$U" --output-format json', 'user create "$U" --comment "$UC"', 'acl list --output-format json', 'acl update / Audit --auth-id "$U!$T"']) assert.ok(pbs.includes(used), used)
+  // The preflight covers every subcommand and option the scripts use, deletions included.
+  for (const checked of ["'user generate-token:--comment'", "'acl update:--delete'", "'acl update:--auth-id'", "'user delete-token:delete-token'", "'user remove:remove'", "'user list-tokens:--output-format'"]) assert.ok(pbs.includes(checked), checked)
   // Its JSON is read whether printed compact or pretty, with "Result:" before it.
   assert.ok(pbs.includes(`tr ',{}' '\\n\\n\\n'`))
   assert.ok(pbs.indexOf("'user generate-token:--comment'") < pbs.indexOf('mark intent user'), 'the preflight comes before any change')
-  assert.ok(pbs.includes('PermitOpen 127.0.0.1:8007') && !pbs.includes('8006'))
+  assert.ok(pbs.includes('127.0.0.1:8007') && !pbs.includes('8006'))
 })
 
 test('anything not exactly as expected is refused before a script exists', () => {
@@ -97,25 +79,19 @@ test('anything not exactly as expected is refused before a script exists', () =>
   refused({ product: 'pdm' as never }, /Proxmox VE or Backup Server/)
   refused({ resultKey: "x'\nrm -rf /\n" }, /PEM public key/)
   refused({ replace: 'yes' as never }, /Replace/)
-  refused({ tunnel: { ...TUN, keyLine: `${tunnelKey.publicLine}\nssh-rsa AAAA evil` } }, /plugin’s own Ed25519/)
-  refused({ tunnel: { ...TUN, keyLine: `command="sh" ${tunnelKey.publicLine}` } }, /plugin’s own Ed25519/)
-  refused({ tunnel: { ...TUN, client: '1.2.3.4,user=root' } }, /IP addresses/)
-  refused({ tunnel: { ...TUN, laddr: "x'; reboot; '" } }, /IP addresses/)
-  refused({ tunnel: { ...TUN, lport: 0 } }, /SSH port/)
   assert.throws(() => detectScript('nope'), /run id/)
-  // Undo and finalize take the stored run id only in its exact form: no line break gets through.
+  // Undo takes the stored run id only in its exact form: no line break gets through.
   assert.throws(() => undoScript('pve', `${RUN}\nrm -rf /`, 'fedcba9876543210'), /run id/)
-  assert.throws(() => undoScript('pve', RUN, 'fedcba9876543210', 'ssh-ed25519 AAAA x'), /plugin’s own/)
-  assert.throws(() => finalizeScript('pve', RUN, 'fedcba9876543210', TUN, '20261125; reboot'), /expiry/)
+  assert.throws(() => undoScript('pdm' as never, RUN, 'fedcba9876543210'), /Unknown product/)
 })
 
 test('a stored record is used only exactly as written', () => {
-  const ok = { hostKey: 'ssh:ssh-example-x1', runId: RUN, product: 'pve', at: NOW, status: 'saved', tunnel: TUN, keyRef: 'k-0123456789abcdef', connection: { id: 'c-1', revision: 'r-1' } }
+  const ok = { hostKey: 'ssh:ssh-example-x1', runId: RUN, product: 'pve', at: NOW, status: 'saved', connection: { id: 'c-1', revision: 'r-1' } }
   assert.ok(validRecord(ok, ok.hostKey, RUN))
   assert.equal(validRecord({ ...ok, runId: `${RUN}\nrm -rf /` }, ok.hostKey, RUN), null)
   assert.equal(validRecord(ok, ok.hostKey, 'fedcba9876543210'), null, 'bound to the run it is stored under')
   assert.equal(validRecord({ ...ok, extra: 1 }, ok.hostKey, RUN), null)
-  assert.equal(validRecord({ ...ok, tunnel: { ...TUN, keyLine: 'x' } }, ok.hostKey, RUN), null)
+  assert.equal(validRecord({ ...ok, tunnel: { keyLine: 'x' } }, ok.hostKey, RUN), null, 'no tunnel field any more')
   assert.equal(validRecord({ ...ok, status: 'done' }, ok.hostKey, RUN), null)
   assert.equal(validRecord({ ...ok, product: 'pdm' }, ok.hostKey, RUN), null)
 })
@@ -144,6 +120,7 @@ test('answers: only whole numbered lines of this run, kept across reads, complet
   assert.ok(read(RUN, full, altered).invalid, 'a line that changed between reads')
   assert.ok(read(RUN, frame(RUN, [['hostname', 'a'], ['hostname', 'b']])).invalid, 'a key twice')
   assert.ok(read(RUN, frame(RUN, [['made_up', '1']])).invalid, 'an unknown key')
+  assert.ok(read(RUN, frame(RUN, [['created_keyfile', '1']])).invalid, 'nothing of a tunnel is an answer any more')
   assert.ok(read(RUN, [`echo ORCA-SETUP-${RUN} 1 created_user 1`, ...full]).invalid, 'a marker that does not start its line')
   assert.equal(read(RUN, frame('ffffffffffffffff', pairs)).end, undefined, 'another run')
   const stopped = read(RUN, frame(RUN, [['created_token', '1'], ['stop', 'the token’s permission could not be set']], 'stop'))
@@ -167,8 +144,8 @@ test('Undo owns only what the run recorded as done, never what it found there; o
   // An ACL is removed only while it is still there as granted, and intent-only items are reported.
   assert.ok(undo.indexOf('AL=$(pveum acl list --output-format json) || stop') > undo.indexOf('made user_acl'))
   assert.ok(undo.includes('say unconfirmed "$UNSURE"'))
-  // Setup, finalize and Undo take the same host-side lock, without waiting, before touching the journal.
-  for (const script of [setup, undo, finalizeScript('pve', RUN, 'fedcba9876543210', TUN, '202611251215Z')]) {
+  // Setup and Undo take the same host-side lock, without waiting, before touching the journal.
+  for (const script of [setup, undo]) {
     const lock = script.indexOf('flock -n 9 || stop')
     assert.ok(lock > 0 && lock < script.indexOf('STATE='), 'lock first')
     assert.ok(script.includes('[ "$(stat -c %u "$D")" = 0 ]'), 'the state folder must be root’s own')
@@ -176,28 +153,15 @@ test('Undo owns only what the run recorded as done, never what it found there; o
   assert.ok(setup.includes('( set -C; : > "$STATE" )'), 'a run’s journal is created exclusively')
 })
 
-test('Undo removes only what carries the run’s label, from the host’s own record, key first', () => {
-  const tokenOnly = undoScript('pve', RUN, 'fedcba9876543210')
-  assert.ok(tokenOnly.includes(`STATE=/var/lib/orca-proxmox-setup/$S`))
-  assert.ok(tokenOnly.includes(`has "$TL" '"tokenid":"orca"' "\\"comment\\":\\"Orca plugin $S\\""`))
-  assert.ok(tokenOnly.includes(`"\\"comment\\":\\"Read-only, Orca plugin $S\\""`))
-  assert.ok(tokenOnly.includes('UL=$(pveum user list --output-format json) || stop'))
-  assert.ok(tokenOnly.includes('TL=$(pveum user token list "$U" --output-format json) || stop'))
-  assert.ok(!tokenOnly.includes('userdel') && !tokenOnly.includes('sshd_config.orca-backup'))
-  assert.ok(tokenOnly.includes('which this Undo does not know'), 'a record without the tunnel never drops the host’s tunnel record')
-  const full = undoScript('pve', RUN, 'fedcba9876543210', tunnelKey.publicLine)
-  const order = ['rm -f "$K"', 'pkill -u orca-tunnel', 'cmp -s - /etc/ssh/sshd_config', 'userdel -r orca-tunnel', 'pveum user token remove', 'pveum user delete']
-  const at = order.map((s) => full.indexOf(s))
-  assert.ok(at.every((p, i) => p > 0 && (i === 0 || p > at[i - 1])), JSON.stringify(at))
-  assert.ok(full.includes(`[ "$C" = '${authorizedLine(tunnelKey.publicLine, 8006)}' ] && OK=1`))
-  assert.ok(full.includes('[ "$(getent passwd orca-tunnel | cut -d: -f5)" = "Orca plugin $S" ] && OURS=1'))
-  assert.ok(full.includes('elif ! cmp -s "$B" /etc/ssh/sshd_config'), 'a restore whose reload failed can be finished')
-  assert.ok(!/>\s*"\$K"|truncate|: >/.test(full), 'authorized_keys is never truncated or rewritten')
-  assert.ok(!/pkill(?! -u orca-tunnel)/.test(full) && !/kill -9|killall|ssh -O/.test(full), 'no other sessions are touched')
-  const fin = finalizeScript('pve', RUN, 'fedcba9876543210', TUN, '202611251215Z')
-  assert.ok(fin.includes(`[ "$(cat "$K" 2>/dev/null)" = '${probeLine(tunnelKey.publicLine, 8006, CTX.client, '202611251215Z')}' ]`))
-  assert.ok(fin.includes(`mv -f "$K.orca-new" "$K"`))
-  assert.ok(policyBlock(8006).includes('PermitOpen 127.0.0.1:8006'))
+test('Undo removes only what carries the run’s label, from the host’s own record', () => {
+  const undo = undoScript('pve', RUN, 'fedcba9876543210')
+  assert.ok(undo.includes(`STATE=/var/lib/orca-proxmox-setup/$S`))
+  assert.ok(undo.includes(`has "$TL" '"tokenid":"orca"' "\\"comment\\":\\"Orca plugin $S\\""`))
+  assert.ok(undo.includes(`"\\"comment\\":\\"Read-only, Orca plugin $S\\""`))
+  assert.ok(undo.includes('UL=$(pveum user list --output-format json) || stop'))
+  assert.ok(undo.includes('TL=$(pveum user token list "$U" --output-format json) || stop'))
+  assert.ok(!/userdel|sshd|authorized_keys|pkill/.test(undo))
+  assert.ok(undo.indexOf('pveum user token remove') > 0 && undo.indexOf('pveum user delete') > undo.indexOf('pveum user token remove'))
 })
 
 test('the API permission list: every listed privilege counts, whatever its propagate bit; any other shape is refused', () => {
@@ -261,71 +225,22 @@ function fakeOrca(server: Server, opts: { failRead?: boolean; shrink?: boolean }
 }
 
 /** The server's side, as the real scripts print it. */
-function server(opts: { stopAt?: string; garble?: boolean } = {}): Server {
+function server(opts: { stopAt?: string; garble?: boolean; unconfirmed?: boolean } = {}): Server {
   return (script, runId) => {
     if (script.includes('detect what this host runs')) {
-      return frame(runId, [['root', 'yes'], ['pve', '9.1.2'], ['sshd', 'yes'], ['hostname', 'pve-x1'], ['fqdn', 'pve-x1.example.test'], ['via', '198.51.100.7 50122 198.51.100.21 22']])
+      return frame(runId, [['root', 'yes'], ['pve', '9.1.2'], ['hostname', 'pve-x1'], ['fqdn', 'pve-x1.example.test'], ['via', '198.51.100.7 50122 198.51.100.21 22']])
     }
-    if (script.includes('make the tunnel key')) return frame(runId, [['finalized_key', '1']])
     if (script.includes('undo what the setup run')) {
-      return frame(runId, [['removed_keyfile', '1'], ['removed_policy', '1'], ['removed_account', '1'], ['removed_token', '1'], ['removed_user', '1']])
+      return frame(runId, opts.unconfirmed ? [['removed_token', '1'], ['unconfirmed', ' user_acl']] : [['removed_token', '1'], ['removed_user', '1']])
     }
     const pem = /<<'ORCA_KEY'\n([\s\S]+?)\nORCA_KEY/.exec(script)![1]
     const cipher = publicEncrypt({ key: pem, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, Buffer.from(SECRET)).toString('base64')
-    const tunnel = script.includes('Match User orca-tunnel')
     const steps: [string, string][] = [['created_user', '1'], ['created_token', '1'], ['added_user_acl', '1']]
-    if (tunnel) steps.push(['created_account', '1'], ['added_policy', '1'], ['created_keyfile', '1'], ['key_expiry', '202611251215Z'], ['ssh_hostkey', HOST_KEY])
     if (opts.stopAt) return frame(runId, [...steps.slice(0, 2), ['stop', opts.stopAt]], 'stop')
     const lines = frame(runId, [...steps, ['api_fp', PIN], ['hostname', 'pve-x1'], ...cipher.match(/.{1,64}/g)!.map((c, i): [string, string] => ['secret', `${i + 1} ${c}`])])
     if (opts.garble) lines[lines.length - 2] = lines[lines.length - 2].replace(/ [0-9a-f]{64}$/, ` ${'0'.repeat(64)}`)
     return lines
   }
-}
-
-/** A fake ssh: logs in, forwards -L, and answers the scope attempts as a well-limited account would. */
-function fakeSsh(opts: { allowReverse?: boolean } = {}) {
-  const runs: { args: string[]; keyAtSpawn: boolean; keyPath: string }[] = []
-  const spawn = (_cmd: string, args: string[]): TunnelChild => {
-    const opt = (name: string) => args.find((a, i) => args[i - 1] === '-o' && a.startsWith(`${name}=`))?.slice(name.length + 1)
-    const keyPath = opt('IdentityFile')!.slice(1, -1).replace(/%%/g, '%').replace(/\\(["\\])/g, '$1')
-    runs.push({ args, keyAtSpawn: existsSync(keyPath), keyPath })
-    const say: ((chunk: string) => void)[] = []
-    const exit: ((code: number | null, signal: string | null) => void)[] = []
-    const end = (code: number | null) => {
-      for (const l of exit.splice(0)) l(code, code === null ? 'SIGTERM' : null)
-    }
-    let server: net.Server | undefined
-    setImmediate(() => {
-      for (const l of say) l('debug1: Authenticated to 198.51.100.21 ([198.51.100.21]:22) using "publickey".\n')
-      if (args.includes('-R')) {
-        if (!opts.allowReverse) {
-          for (const l of say) l('Error: remote port forwarding failed for listen port 0\n')
-          end(255)
-        }
-      } else if (!args.includes('-N')) {
-        end(1)
-      } else {
-        const port = Number(args[args.indexOf('-L') + 1].split(':')[1])
-        server = net.createServer((s) => {
-          for (const l of say) l(`debug1: Connection to port ${port} forwarding to 127.0.0.1 port 8006 requested.\n`)
-          s.destroy()
-        })
-        server.listen(port, '127.0.0.1', () => {
-          for (const l of say) l(`debug1: Local forwarding listening on 127.0.0.1 port ${port}.\n`)
-        })
-      }
-    })
-    return {
-      stderr: { on: (_e: 'data', l: (chunk: string) => void) => say.push(l) },
-      on: (event: 'exit' | 'error', l: never) => (event === 'exit' ? exit.push(l) : 0),
-      kill: () => {
-        server?.close()
-        end(null)
-        return true
-      }
-    } as TunnelChild
-  }
-  return { runs, spawn }
 }
 
 let worker: TestWorker | undefined
@@ -336,14 +251,13 @@ afterEach(async () => {
 
 const READ_ONLY = { '/': { 'Sys.Audit': 1, 'VM.Audit': 1, 'Datastore.Audit': 1, 'VM.GuestAgent.Audit': 1 } }
 
-async function mounted(srv: Server, opts: { failRead?: boolean; shrink?: boolean; allowReverse?: boolean; privileges?: unknown; storage?: Record<string, never> } = {}) {
+async function mounted(srv: Server, opts: { failRead?: boolean; shrink?: boolean; privileges?: unknown; storage?: Record<string, never> } = {}) {
   const orca = fakeOrca(srv, opts)
-  const ssh = fakeSsh(opts)
   const routes = { ...pveRoutes(NOW), '/access/permissions': opts.privileges ?? READ_ONLY }
-  main.useTestDoubles({ transport: mockTransport(routes as never), probe: async () => PIN, now: () => NOW, vault: memoryVault(), orcaCli: orca.cli, spawnSsh: ssh.spawn, sshPath: '/usr/bin/ssh', tunnelDir: dir, scopeWaitMs: 300 })
+  main.useTestDoubles({ transport: mockTransport(routes as never), probe: async () => PIN, now: () => NOW, vault: memoryVault(), orcaCli: orca.cli })
   const host = mockHost(opts.storage ? { storage: opts.storage } : undefined)
   worker = await mountWorker(main, { host })
-  return { orca, ssh, host }
+  return { orca, host }
 }
 
 const X1 = 'ssh:ssh-example-x1'
@@ -357,53 +271,44 @@ async function runJob(planId: string): Promise<SetupRunAnswer> {
   throw new Error('the job did not end')
 }
 const plan = (over: Record<string, unknown> = {}) =>
-  worker!.request('setup.plan', { hostKey: X1, product: 'pve', tunnel: false, replace: false, address: 'pve-x1.example.test', name: 'pve-x1', ...over } as never)
+  worker!.request('setup.plan', { hostKey: X1, product: 'pve', replace: false, address: 'pve-x1.example.test', name: 'pve-x1', ...over } as never)
 
-test('Connect via Orca with a tunnel, end to end: checked from this machine before the key is made permanent', async () => {
-  const { orca, ssh, host } = await mounted(server())
-  await worker!.request('setup.detect', { hostKey: X1 })
-  // A tunnel is checked for the connection Orca's shell came in on: the address must be that one.
-  await assert.rejects(plan({ tunnel: true }), /must be the one Orca reaches the host at \(198\.51\.100\.21\)/)
-  const shown = await plan({ tunnel: true, address: '198.51.100.21' })
-  assert.match(shown.script, /from="198\.51\.100\.7",expiry-time=/)
+test('Connect via Orca end to end: check, show, run, checks from this machine, save; Undo of that run', async () => {
+  const { orca, host } = await mounted(server())
+  const checked = await worker!.request('setup.detect', { hostKey: X1 })
+  assert.deepEqual(checked.hosts[0].detection?.via, { client: '198.51.100.7', server: '198.51.100.21', port: 22 })
+  const shown = await plan()
+  assert.ok(!/orca-tunnel|sshd/.test(shown.script))
   assert.equal(orca.typed.length, 1, 'nothing runs before Run')
   const answer = await runJob(shown.planId)
   assert.equal(answer.ok, true, JSON.stringify(answer))
-  // Three terminals (check, setup, finalize), every one closed.
-  assert.equal(orca.typed.length, 3)
-  assert.match(gunzipSync(Buffer.from(/printf %s ([A-Za-z0-9+/=]+) \|/.exec(orca.typed[2])![1], 'base64')).toString(), /make the tunnel key of setup run/)
-  assert.deepEqual(orca.closed, ['term_1', 'term_2', 'term_3'])
-  // The live checks ran before finalize: a reverse forward, a socket forward and a command were refused.
-  const scope = ssh.runs.filter((r) => r.args.includes('-R') || !r.args.includes('-N'))
-  assert.equal(scope.length, 3)
-  assert.ok(scope.some((r) => r.args.includes('true')))
-  assert.ok(ssh.runs.every((r) => r.keyAtSpawn))
-  await new Promise((r) => setTimeout(r, 50))
-  assert.ok(ssh.runs.every((r) => !existsSync(r.keyPath)), 'every copy of the key is gone')
+  assert.match(answer.message, /read rights only/)
+  assert.equal(gunzipSync(Buffer.from(/printf %s ([A-Za-z0-9+/=]+) \|/.exec(orca.typed[1])![1], 'base64')).toString(), shown.script)
+  assert.deepEqual(orca.closed, ['term_1', 'term_2'])
   const config = await worker!.request('config.get')
   const saved = config.connections[0]
-  assert.deepEqual([saved.kind, saved.baseUrl, saved.tokenId, saved.fingerprint, saved.tunnel?.hostKey, saved.tunnel?.port], ['pve', 'https://198.51.100.21:8006', 'orca-monitor@pve!orca', PIN, HOST_KEY, 22])
-  // Records are sealed: storage holds no readable record, and an altered one is ignored.
+  assert.deepEqual([saved.kind, saved.baseUrl, saved.tokenId, saved.fingerprint, saved.hasSecret, saved.tunnel], ['pve', 'https://pve-x1.example.test:8006', 'orca-monitor@pve!orca', PIN, true, undefined])
+  // Records are sealed: storage holds no readable record.
   const stored = host.data().storage['setup.records'] as { sealed: string }[]
   assert.equal(stored.length, 1)
-  assert.ok(!JSON.stringify(stored).includes('keyLine') && !JSON.stringify(stored).includes('198.51.100.7'))
+  assert.ok(!JSON.stringify(stored).includes('pve-x1.example.test'))
   const listed = await worker!.request('setup.hosts')
   assert.equal(listed.hosts[0].records[0].status, 'saved')
   // The secret never in the terminal, the typed lines, answers, logs or storage.
   const all = JSON.stringify([worker!.logs, host.data().storage, orca.typed, orca.shown, answer, listed, config])
   assert.ok(!all.includes(SECRET) && !all.includes(SECRET.slice(0, 8)) && !all.includes('PRIVATE KEY'))
-  // Undo of exactly that run: removes the connection that run saved, and the plugin's key.
+  const secrets = JSON.stringify(host.data().secrets)
+  assert.ok(!secrets.includes(SECRET), 'secrets are only stored sealed')
+  // Undo of exactly that run: removes the connection that run saved, and its record.
   const undo = await worker!.request('setup.undoPlan', { hostKey: X1, runId: listed.hosts[0].records[0].runId })
-  assert.match(undo.script, /userdel -r orca-tunnel/)
+  assert.match(undo.script, /flock -n 9/)
   const undone = await runJob(undo.planId)
   assert.equal(undone.ok, true, JSON.stringify(undone))
   assert.equal((await worker!.request('config.get')).connections.length, 0)
-  assert.ok(!Object.keys(host.data().secrets).some((k) => k.startsWith('tunnel-key:')))
   assert.deepEqual((await worker!.request('setup.hosts')).hosts[0].records, [])
 })
 
-test('a token with more than read rights, or an account that is not refused, is not saved', async () => {
-  // A write privilege granted on one guest only, not propagating: still refused.
+test('a token with more than read rights is not saved, even a write privilege on one guest that does not propagate', async () => {
   await mounted(server(), { privileges: { '/': { 'Sys.Audit': 1, 'VM.Audit': 1 }, '/vms/100': { 'VM.PowerMgmt': 0 } } })
   await worker!.request('setup.detect', { hostKey: X1 })
   const rights = await runJob((await plan()).planId)
@@ -414,14 +319,18 @@ test('a token with more than read rights, or an account that is not refused, is 
   assert.equal((await worker!.request('setup.hosts')).hosts[0].records[0].status, 'failed')
   await worker!.deactivate()
 
-  const { orca } = await mounted(server(), { allowReverse: true })
+  // PBS answers booleans; false still means granted there.
+  await mounted(server(), { privileges: { '/': { 'Sys.Audit': true }, '/datastore/store1': { 'Datastore.Modify': false } } })
   await worker!.request('setup.detect', { hostKey: X1 })
-  const scope = await runJob((await plan({ tunnel: true, address: '198.51.100.21' })).planId)
-  assert.equal(scope.ok, false)
-  assert.equal(scope.stage, 'scope')
-  assert.match(scope.message, /reverse forward \(-R\) was accepted.*expires by itself at 202611251215Z/)
-  assert.equal(orca.typed.length, 2, 'no finalize: the key stays limited and expiring')
-  assert.equal((await worker!.request('config.get')).connections.length, 0)
+  assert.match((await runJob((await plan()).planId)).message, /Datastore\.Modify/)
+  await worker!.deactivate()
+
+  // A permission list in an unexpected shape is never taken for "no rights".
+  await mounted(server(), { privileges: { '/': ['Sys.Audit', 'VM.PowerMgmt'] } })
+  await worker!.request('setup.detect', { hostKey: X1 })
+  const odd = await runJob((await plan()).planId)
+  assert.equal(odd.stage, 'rights')
+  assert.match(odd.message, /could not be read: The permission list has an unexpected shape/)
 })
 
 test('an answer seen only in parts is assembled; one that does not check out is of unknown outcome, and recorded', async () => {
@@ -442,6 +351,20 @@ test('an answer seen only in parts is assembled; one that does not check out is 
   assert.equal((await worker!.request('config.get')).connections.length, 0)
   // Undo is offered for it: it works from the host's own record.
   assert.match((await worker!.request('setup.undoPlan', { hostKey: X1, runId: record.runId })).script, /STATE=\/var\/lib\/orca-proxmox-setup/)
+})
+
+test('Undo that finds something only started, not done, keeps it and the record, and says so', async () => {
+  await mounted(server({ unconfirmed: true }))
+  await worker!.request('setup.detect', { hostKey: X1 })
+  assert.equal((await runJob((await plan()).planId)).ok, true)
+  const record = (await worker!.request('setup.hosts')).hosts[0].records[0]
+  const undone = await runJob((await worker!.request('setup.undoPlan', { hostKey: X1, runId: record.runId })).planId)
+  assert.equal(undone.ok, false)
+  assert.match(undone.message, /Not recorded as done, so kept for you to check on the host: user_acl/)
+  const kept = (await worker!.request('setup.hosts')).hosts[0].records
+  assert.equal(kept.length, 1)
+  assert.match(kept[0].message ?? '', /kept: user_acl/)
+  assert.equal((await worker!.request('config.get')).connections.length, 0, 'the connection that run saved is removed all the same')
 })
 
 test('a run that stops, or whose save fails, keeps its record; Undo keeps a connection edited since', async () => {

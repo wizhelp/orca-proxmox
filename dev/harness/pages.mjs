@@ -34,9 +34,9 @@ const stub = `<script>
         if (name.startsWith('setup.')) {
           const at = Date.UTC(2026, 10, 25, 12, 0, 0);
           const hosts = [
-            { key: 'ssh:ssh-example-x1', name: 'pve-x1', kind: 'ssh', connected: true, where: 'the work workspace on pve-x1', detection: { at, root: 'yes', products: { pve: '9.1.2' }, sshd: true, hostname: 'pve-x1', fqdn: 'pve-x1.example.test', via: { client: '198.51.100.7', server: '198.51.100.21', port: 22 } }, records: [] },
-            { key: 'ssh:ssh-example-x2', name: 'pbs-x1', kind: 'ssh', connected: true, where: 'the work workspace on pbs-x1', detection: { at, root: 'sudo', products: { pbs: '4.0.14' }, sshd: true, hostname: 'pbs-x1' }, records: [{ product: 'pbs', runId: '0123456789abcdef', at, tunnel: false, status: 'saved', connectionId: 'c-example' }, { product: 'pbs', runId: 'fedcba9876543210', at, tunnel: false, status: 'unknown', message: 'The outcome is unknown: its terminal could not be read to the end.' }] },
-            { key: 'env:example-pdm', name: 'pdm-x1', kind: 'environment', where: 'the home workspace of pdm-x1', detection: { at, root: 'yes', products: { pdm: '1.0.2' }, sshd: true, hostname: 'pdm-x1' }, records: [] },
+            { key: 'ssh:ssh-example-x1', name: 'pve-x1', kind: 'ssh', connected: true, where: 'the work workspace on pve-x1', detection: { at, root: 'yes', products: { pve: '9.1.2' }, hostname: 'pve-x1', fqdn: 'pve-x1.example.test', via: { client: '198.51.100.7', server: '198.51.100.21', port: 22 } }, records: [] },
+            { key: 'ssh:ssh-example-x2', name: 'pbs-x1', kind: 'ssh', connected: true, where: 'the work workspace on pbs-x1', detection: { at, root: 'sudo', products: { pbs: '4.0.14' }, hostname: 'pbs-x1' }, records: [{ product: 'pbs', runId: '0123456789abcdef', at, status: 'saved', connectionId: 'c-example' }, { product: 'pbs', runId: 'fedcba9876543210', at, status: 'unknown', message: 'The outcome is unknown: its terminal could not be read to the end.' }] },
+            { key: 'env:example-pdm', name: 'pdm-x1', kind: 'environment', where: 'the home workspace of pdm-x1', detection: { at, root: 'yes', products: { pdm: '1.0.2' }, hostname: 'pdm-x1' }, records: [] },
             { key: 'ssh:ssh-example-x3', name: 'build-x1', kind: 'ssh', connected: false, unavailable: 'Orca is not connected to build-x1; connect it in Orca first.', records: [] }
           ];
           if (name === 'setup.hosts' || name === 'setup.detect') return { hosts, busy: false };
