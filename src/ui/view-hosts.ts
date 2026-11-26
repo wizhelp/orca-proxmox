@@ -348,8 +348,21 @@ export function hostsView(snap: EstateSnapshot): HTMLElement {
             actions.render()
           })
         : null,
-      app.order.length ? button('Reset order', () => actions.saveOrder([]), { icon: 'undo', variant: 'ghost', title: "Go back to PDM's order" }) : null
+      app.order.length && app.confirm !== 'reset-order' ? button('Reset order…', () => ((app.confirm = 'reset-order'), actions.render()), { icon: 'undo', variant: 'ghost', title: "Go back to PDM's order" }) : null
     ),
+    app.confirm === 'reset-order'
+      ? h(
+          'div',
+          { class: 'confirm', role: 'alertdialog', 'aria-label': 'Confirm reset' },
+          h('div', null, h('strong', null, 'Reset to the default order?'), ' Your own order of remotes, nodes and guests is forgotten.'),
+          h(
+            'div',
+            { class: 'toolbar' },
+            button('Reset', () => ((app.confirm = null), actions.saveOrder([])), { icon: 'undo', variant: 'danger', id: 'confirm-reset' }),
+            button('Keep it', () => ((app.confirm = null), actions.render()), { variant: 'ghost' })
+          )
+        )
+      : null,
     h('p', { class: 'hint' }, layout === 'tree' && app.treeGuestSort !== 'manual'
       ? 'Guests are sorted; choose “my order” to drag them. Remotes and nodes still drag.'
       : 'Drag to reorder, within the same level only. Alt+↑/↓ moves the focused item.'),

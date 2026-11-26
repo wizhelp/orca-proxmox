@@ -41,6 +41,7 @@ export function fillForm(id?: string, kind: SourceKind = 'pdm'): void {
 
 /** Opens the form on a connection (by id) or on a new one. */
 function openForm(id: string, kind?: SourceKind): void {
+  app.confirm = null
   fillForm(id, kind)
   app.formOpen = true
   app.settingsMessage = null
@@ -48,6 +49,7 @@ function openForm(id: string, kind?: SourceKind): void {
 }
 
 function closeForm(): void {
+  app.confirm = null
   fillForm()
   app.formOpen = false
   actions.render()
@@ -55,6 +57,7 @@ function closeForm(): void {
 
 async function run(kind: 'test' | 'save' | 'clear' | 'import' | 'dismiss'): Promise<void> {
   app.busy = kind
+  app.confirm = null
   app.settingsMessage = null
   actions.render()
   try {
@@ -208,14 +211,26 @@ function connectionForm(list: ConnectionView[]): HTMLElement {
     app.config?.secretsProtection === 'unavailable'
       ? callout('bad', 'Orca cannot encrypt secrets on this machine', 'There is no OS keyring, so the token secret cannot be saved. This plugin will not store it in plain text.')
       : null,
-    h(
-      'div',
-      { class: 'toolbar' },
-      button(busy === 'save' ? 'Saving…' : 'Save', () => void run('save'), { icon: 'check', variant: 'primary', disabled: busy !== null }),
-      button(busy === 'test' ? 'Testing…' : 'Test', () => void run('test'), { icon: 'plug', disabled: busy !== null }),
-      list.length ? button('Cancel', closeForm, { variant: 'ghost', disabled: busy !== null }) : null,
-      current ? button('Remove', () => void run('clear'), { icon: 'trash', variant: 'danger', disabled: busy !== null }) : null
-    ),
+    current && app.confirm === `remove:${current.id}`
+      ? h(
+          'div',
+          { class: 'confirm', role: 'alertdialog', 'aria-label': 'Confirm removal' },
+          h('div', null, h('strong', null, `Remove ${KIND_SHORT[current.kind]} ${current.name || hostOf(current)}?`), ` This deletes its stored token secret; the panel stops showing its remotes.${list.length > 1 ? ' The other connections stay.' : ''}`),
+          h(
+            'div',
+            { class: 'toolbar' },
+            button(busy === 'clear' ? 'Removing…' : 'Remove', () => void run('clear'), { icon: 'trash', variant: 'danger', disabled: busy !== null, id: 'confirm-remove' }),
+            button('Keep it', () => ((app.confirm = null), actions.render()), { variant: 'ghost', disabled: busy !== null })
+          )
+        )
+      : h(
+          'div',
+          { class: 'toolbar' },
+          button(busy === 'save' ? 'Saving…' : 'Save', () => void run('save'), { icon: 'check', variant: 'primary', disabled: busy !== null }),
+          button(busy === 'test' ? 'Testing…' : 'Test', () => void run('test'), { icon: 'plug', disabled: busy !== null }),
+          list.length ? button('Cancel', closeForm, { variant: 'ghost', disabled: busy !== null }) : null,
+          current ? button('Remove…', () => ((app.confirm = `remove:${current.id}`), actions.render()), { icon: 'trash', variant: 'danger', disabled: busy !== null }) : null
+        ),
     test?.ok
       ? callout(
           'ok',

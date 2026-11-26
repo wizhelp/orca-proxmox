@@ -28,6 +28,7 @@ const stub = `<script>
         if (name === 'config.save') return d.config;
         if (name === 'config.import') return { ...d.config, found: false };
         if (name === 'config.dismissImport') return { ...d.config, importStatus: null };
+        if (name === 'config.clear') { const connections = d.config.connections.filter((c) => c.id !== input?.id); return { ...d.config, connections, connection: connections[0] ?? null } }
         if (name === 'orca.link') return { links: {} };
         if (name === 'orca.terminal') return { how: 'workspace', navigated: true, where: 'the example workspace' };
         throw Object.assign(new Error('unknown ' + name), { code: 'unknown_method' });

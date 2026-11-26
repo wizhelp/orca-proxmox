@@ -48,6 +48,8 @@ export const app = {
   formDirty: false,
   /** The connection form is shown: after Edit or Add, or while there is no connection yet. */
   formOpen: false,
+  /** A destructive action waiting for its in-panel confirmation: `remove:<connection id>`, `reset-order`. */
+  confirm: null as string | null,
   testResult: null as TestAnswer | null,
   settingsMessage: null as { tone: Tone; text: string } | null,
   busy: null as 'test' | 'save' | 'clear' | 'import' | 'dismiss' | null
