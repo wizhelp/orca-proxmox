@@ -42,7 +42,7 @@ Rendered from the bundled example estate (no real servers):
   <img src="docs/screenshots/tree-drag.png" alt="The tree of remotes, nodes, Orca hosts and guests in the dark theme, with a guest being dragged within its node" width="240">
   <img src="docs/screenshots/guests.png" alt="The guests table sorted by disk use, with a VM's use from its guest agent and others' allocated size marked unknown, one guest opened with its actions, tags, notes, charts and details" width="240">
   <img src="docs/screenshots/tasks.png" alt="The tasks of all remotes, with two failed backups in red" width="240">
-  <img src="docs/screenshots/planner.png" alt="Where a new VM fits: free memory, disk and CPU per node, best fit first" width="240">
+  <img src="docs/screenshots/planner.png" alt="The Place a VM tool open: free memory, disk and CPU per node for a VM of a given size, best fit first" width="240">
   <img src="docs/screenshots/orca.png" alt="The Orca tab: one Orca server per Proxmox node, with its bot and workspaces" width="240">
   <img src="docs/screenshots/settings.png" alt="Settings: a PDM, a PVE and a PBS connection listed compactly, one opened for editing with its token and pinned certificate, and folded sections for the import file, help and plugin options" width="240">
   <img src="docs/screenshots/copy-for-ai.png" alt="The Copy for AI preview in the mode without addresses, with the text to copy" width="240">
@@ -104,8 +104,9 @@ follow [Setup](#setup).
 - **Warnings**: guest disks over 85 % (containers, and VMs whose guest agent reports their use), datastores over 80 % and storages over 85 %, with "full
   in ~N days" when the history shows a steady rise; pending package updates and version drift
   between hosts.
-- **Where should a new VM go?**: free memory, disk and CPU per node for a VM of a given size, best
-  fit first.
+- **Where should a new VM go?**: the *Place a VM* tool in the header's tools row (beside Copy for
+  AI; their labels open out on hover and focus) shows free memory, disk and CPU per node for a VM
+  of a given size, best fit first.
 - **Copy for AI**: a clean Markdown summary of the estate (hosts, guests with tags, state and
   addresses, disk use, backups, warnings, where Orca runs) to paste into an agent, shown first and copied on
   request: with addresses; without addresses, a **best-effort filter** that takes IP addresses,
@@ -372,8 +373,10 @@ through PDM, on the backup scan's cadence; the Auditor role covers both.
 - **The placement planner** is advisory. PDM's resource list does not say which storages hold VM
   disks. Unless PDM reports a storage's content types, a storage is only ruled out by its name
   (backup, ISO, template, dump) and otherwise counted as *unverified*: its free space is shown, but
-  the node is never called a best fit, only a fit for memory and CPU. A node with no possible
-  storage shows its disk space as unknown.
+  the node is never called a best fit, only a fit for memory and CPU, and ranks after nodes whose
+  disk space is verified. A storage too small is no fit either way. A node with no possible storage
+  shows its disk space as unknown; one whose running guests could already claim all its memory
+  ranks lower.
 - **Large estates.** The first refresh waits for the inventory and every enrichment (backups,
   history, tasks, updates, addresses, Orca), four requests at a time with a 15-second timeout each;
   the panel waits up to two minutes. Very large estates (hundreds of guests, many slow remotes) can
