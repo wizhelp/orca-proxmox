@@ -13,8 +13,9 @@ per PVE cluster (or standalone host) and per PBS: see
 **First, the easiest way.** When the person's PVE and PBS hosts are already connected to Orca
 (SSH targets or paired servers) and Orca's shell there is root or may use `sudo` without a
 password, they do not need this guide for them: the panel's **Settings → Connect via Orca** checks
-each host, shows the exact setup script, runs it on their click, pins both fingerprints read on the
-server itself and saves the tested connection, with an Undo per host (see the README's
+each host, shows the exact setup script, runs it on their click, checks from this machine what the
+host reported (certificate, token rights, tunnel limits) and saves the connection, with an Undo per
+run (see the README's
 [Connect via Orca](../README.md#connect-via-orca-easiest)). Point the person there, and let them
 press the buttons: never approve or run it on their behalf. Use this guide for PDM's own token
 (PDM has no local command for it), for hosts Orca does not reach, or when the person prefers to
@@ -490,12 +491,16 @@ WORK=$(mktemp -d) || { echo "no private temporary folder: stop"; exit 1; }
 trap 'rm -rf "$WORK"' EXIT INT TERM HUP
 [ -d "$WORK" ] && [ -O "$WORK" ] || { echo "temporary folder not private: stop"; exit 1; }
 proxmox-backup-manager user create monitor@pbs --comment 'Read-only, Orca plugin'
-proxmox-backup-manager user generate-token monitor@pbs orca --output-format json > "$WORK/token.json"
+# generate-token is the API method itself: it has no --output-format and prints its result (the
+# token ID and the secret "value") as JSON, possibly after "Result:". Read only that JSON.
+proxmox-backup-manager user generate-token monitor@pbs orca > "$WORK/token.json" || exit 1
 python3 - "$WORK" <<'PY' || exit 1
 import json, os, sys
 work = sys.argv[1]
-answer = json.load(open(os.path.join(work, "token.json")))
+text = open(os.path.join(work, "token.json")).read()
 os.remove(os.path.join(work, "token.json"))
+start = text.find("{")
+answer = json.loads(text[start:]) if start >= 0 else {}
 value = (answer.get("data") or answer).get("value", "")
 if not value.strip():
     sys.exit("No secret came back: delete the token and create it again.")

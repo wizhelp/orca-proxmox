@@ -18,7 +18,7 @@ The first row sets up the direct and tunnel rows for you on hosts Orca already r
 
 | Setup | What it needs | What it adds |
 | --- | --- | --- |
-| **Connect via Orca (easiest)** | The PVE or PBS host already connected to Orca (SSH target or paired server), where Orca's shell is root or may use `sudo` without a password | One click per host instead of the manual steps below: the read-only token, optionally the SSH tunnel account, both fingerprints pinned, the connection saved and tested (enrich only when PDM already shows the node); Undo per host |
+| **Connect via Orca (easiest)** | The PVE or PBS host already connected to Orca (SSH target or paired server), where Orca's shell is root or may use `sudo` without a password | One click per host instead of the manual steps below: the read-only token, optionally the SSH tunnel account, pins reported by the host and confirmed from this machine, the token's rights checked, the connection saved (enrich only when PDM already shows the node); Undo per run |
 | **PDM** | A read-only PDM token (Auditor role), HTTPS to PDM (8443) | Every remote's hosts, guests and storages, containers' disk use, PBS datastores and backups, tasks, alerts, the planner, Copy for AI |
 | **PVE and PBS directly** (instead of PDM, or beside it) | A read-only token on each server (PVEAuditor, Audit), HTTPS to each (8006, 8007) | The same per connection; one connection shows one cluster or one standalone host |
 | **+ SSH tunnel, enrich only** | Per PVE: SSH to the node (22) as a dedicated account that may only forward to the API, a key just for it, and a read-only PVE token; nothing else opened | VM disk use from the QEMU guest agent and what PDM cannot give (storage content types, pending updates), added to the guests PDM shows |
@@ -37,33 +37,46 @@ servers. What you do, per host, in the panel's **Settings → Connect via Orca**
 
 1. **Check.** The plugin opens a terminal in one of that host's Orca workspaces, runs a read-only
    check (which products are installed, whether Orca's shell there is root or may use
-   `sudo -n`, its host name, where Orca reached it), and closes the terminal. Nothing changes.
+   `sudo -n`, its host name, where Orca's connection came from and to), and closes the terminal.
+   Nothing changes.
 2. **Connect…** Choose Proxmox VE or Backup Server, the address this machine reaches it at
-   (prefilled), the name in the estate, and whether the API should be reached through an SSH
-   tunnel. **Show the script** shows the exact script that will run, generated from the plugin's
-   fixed template (nothing is downloaded), and what it does.
-3. **Run.** Only this click runs it, once, within 10 minutes. On the host it creates the user
-   `orca-monitor@pve` (or `@pbs`) and its token `orca` with `PVEAuditor` (or `Audit`) on `/`
-   for both, with privilege separation; with a tunnel, also the account `orca-tunnel` that may
-   only forward to the local API, verifying sshd's effective rules before and after the reload
-   (and that root's are unchanged) before it installs the plugin's own key. It reads the API
-   certificate's fingerprint and the SSH host key on the server itself, so there is nothing to
-   compare by hand. The token secret is printed only encrypted to a one-time key that exists only
-   in the plugin's memory; the terminal never shows it.
-4. The plugin decrypts the secret, tests the connection (through the pinned tunnel, if any) and
-   saves it only if the test passes: **enrich only** when your PDM connection already shows that
-   node, else a direct connection. The result is shown under the host.
-5. **Undo…** shows and runs a script that reverses only what that setup reported creating (the
-   key file only while it holds exactly the plugin's key, the `Match` block only while
-   `sshd_config` is exactly the backup plus that block, the user only when it has no other
-   token), then removes the connection and the plugin's key.
+   (suggested from what the host reported: check it), the name in the estate, and whether the
+   API should be reached through an SSH tunnel. **Show the script** shows the exact script that
+   will run, generated from the plugin's fixed template (nothing is downloaded), and what it does.
+3. **Run.** Only this click runs it, once, within 10 minutes, in the background (the panel follows
+   it). The plugin first records the run (sealed, so the panel cannot alter it). On the host the
+   script records every change before and after making it in `/var/lib/orca-proxmox-setup/`, and
+   creates the user `orca-monitor@pve` (or `@pbs`) and its token `orca` with `PVEAuditor` (or
+   `Audit`) on `/` for both, with privilege separation, both labelled with the run. With a tunnel
+   it also creates the account `orca-tunnel` that may only forward to the local API. sshd's
+   effective rules are checked for the tunnel's own connection (the one Orca's shell came in
+   on), on what the running sshd applies, before and after the reload, with root's unchanged.
+   The plugin's own key is first allowed from this machine only and expires by itself after 15
+   minutes. The token secret is printed only encrypted to a one-time key that exists only in the
+   plugin's memory; the terminal never shows it.
+4. **The plugin checks it from this machine.** The host reports the API certificate (and SSH host
+   key); the plugin pins them and connects to the address you confirmed, which must present the
+   same. It asks the API which rights the token has and refuses one with anything beyond
+   auditing. With a tunnel, it logs in as the account and must see a reverse forward, a socket
+   forward and a command refused; only then is the key made permanent. The connection is saved
+   only if all of this passes: **enrich only** when your PDM connection already shows that node,
+   else a direct connection. The result is shown under the host.
+5. **Undo…** is per run. It reads what that run recorded on the host and removes a resource only
+   while it still carries that run's label: the key file only while it holds exactly that run's
+   key, the `Match` block only while `sshd_config` is exactly the backup plus that block, the
+   account and token only while labelled with that run, the user only when it has no token left.
+   Every list it reads must succeed. Then it removes the connection that run saved, if it is
+   still that revision, and the plugin's key.
 
-If a token `orca` exists already, the script stops without changing anything unless you tick
-**Replace** (the old token then stops working, and Undo cannot bring it back). A host running
-**PDM** is recognized, but PDM has no local command to create tokens, so its token is made with
-your PDM login, which the plugin never handles: follow the guide's
-[PDM steps](docs/AGENT_SETUP.md#1-log-in-to-pdms-api). How the secrets stay out of the terminal
-is in [SECURITY.md](SECURITY.md#connect-via-orca).
+If the answer from the host is not seen complete (the terminal could not be read, or it does not
+match its checksum), the run is shown as **outcome unknown**, never as done, and Undo still works
+from the host's own record. If a token `orca` exists already, the script stops without changing
+anything unless you tick **Replace** (the old token then stops working, and Undo cannot bring it
+back). A tunnel needs the host connected to Orca as an SSH target (its shell then knows the
+connection), and the address Orca reaches it at. A host running **PDM** is recognized, but PDM has
+no local command to create tokens, so its token is made with your PDM login, which the plugin
+never handles: follow the guide's [PDM steps](docs/AGENT_SETUP.md#1-log-in-to-pdms-api). What is
+trusted, and what is checked, is in [SECURITY.md](SECURITY.md#connect-via-orca).
 
 ## Set it up with your agent
 
@@ -514,7 +527,9 @@ See [SECURITY.md](SECURITY.md) for the details and the residual risks. In short:
   print no secret: the token secret is encrypted on the server to a one-time key held in the
   plugin's memory (and wiped after use), and the tunnel's private key never leaves this machine
   (it is kept sealed like a token secret, and written to a private file for `ssh` only until it
-  has authenticated).
+  has authenticated). What the host reports is trusted only as far as that host: the plugin
+  checks the certificate, the token's rights and the tunnel account's limits from this machine
+  before it saves anything, and Undo removes only what carries the run's own label on the host.
 - An SSH tunnel runs the system's `ssh` without a shell and without your SSH config, with only
   the configured key, no password or prompt, and the server's host key pinned like the
   certificate (learnt only by a test you confirm, never silently); the TLS pin still applies
