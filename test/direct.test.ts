@@ -1,6 +1,7 @@
 // Proxmox VE and PBS reached directly, and several connections as one estate. Example data only.
 import { assert, test } from 'orca/testing'
 import { EstateService } from '../src/estate'
+import { estateMarkdown } from '../src/features/insights'
 import { DEFAULT_SETTINGS, estateScope, type ConnectionConfig } from '../src/model'
 import { ProxmoxClient } from '../src/proxmox/client'
 import { CompositeSource } from '../src/proxmox/composite'
@@ -113,4 +114,9 @@ test('the harness estate: PDM, a direct PVE and a direct PBS together', async ()
   assert.equal(vm('lab/501').diskUsage?.from, 'agent')
   // Through PDM the agent call is not offered (404): unknown, not 0 %.
   assert.ok(snapshot.guests.filter((g) => g.remote === 'pve-a' && g.type === 'qemu' && g.status === 'running').every((g) => g.diskUnknown === 'unsupported'))
+  // Copy for AI names both ways in and carries disk use, known or not.
+  const md = estateMarkdown(snapshot, { mode: 'full', now: snapshot.fetchedAt })
+  assert.ok(md.includes('through Proxmox Datacenter Manager and Proxmox servers connected directly.'))
+  assert.ok(md.includes('| web-x | 501 | VM | lab/pve-x1 | running | 35% of 60.0 GiB |'), md)
+  assert.match(md, /\| db-x \| 502 \| VM \| lab\/pve-x1 \| running \| [\d.]+ GiB allocated, use unknown \|/)
 })

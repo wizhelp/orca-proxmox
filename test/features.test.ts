@@ -85,7 +85,7 @@ test('the Markdown summary, with or without addresses', async () => {
   const snap = await renamedEstate()
   const md = estateMarkdown(snap, { includeIps: true, now: RENAMED_AT })
   assert.match(md, /^# Proxmox estate/)
-  assert.match(md, /\| vm-pve-a-320 \| 320 \| VM \| pve-a\/pve-a \| running \| infra, pdm \|/)
+  assert.match(md, /\| vm-pve-a-320 \| 320 \| VM \| pve-a\/pve-a \| running \| 32\.0 GiB allocated, use unknown \| infra, pdm \|/)
   assert.ok(md.includes('10.0.10.30'))
   assert.ok(md.includes('## Where Orca runs'))
   assert.ok(md.includes('pve-a (paired as server-a): node pve-a/pve-a; 2 workspace(s); bots Runner.'))

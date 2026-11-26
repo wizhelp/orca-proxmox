@@ -1,5 +1,5 @@
 // Version drift, task labels, the status-bar line and the Markdown estate summary. Pure.
-import type { EstateSnapshot, Host, Task } from '../model'
+import type { EstateSnapshot, Guest, Host, Task } from '../model'
 import { guestAddress, hostAddress } from './links'
 import { isIpv6 } from './targets'
 import { diskWarnings } from './capacity'
@@ -98,6 +98,12 @@ export function statusLine(snap: EstateSnapshot | null, error?: string): StatusL
 
 const fmtBytes = (n: number | undefined) => (n === undefined ? '-' : n >= 1024 ** 4 ? `${(n / 1024 ** 4).toFixed(1)} TiB` : `${(n / 1024 ** 3).toFixed(1)} GiB`)
 const pct = (f: number | undefined) => (f === undefined ? '-' : `${Math.round(f * 100)}%`)
+/** A guest's disk use (containers from Proxmox, VMs from the guest agent), else its allocated size. */
+function diskText(g: Guest): string {
+  const known = g.type === 'lxc' ? (g.maxdisk ? { used: g.disk, total: g.maxdisk } : undefined) : g.diskUsage
+  if (known && known.total > 0) return `${pct(known.used / known.total)} of ${fmtBytes(known.total)}`
+  return g.maxdisk ? `${fmtBytes(g.maxdisk)} allocated, use unknown` : '-'
+}
 
 /** What "Copy for AI" includes: everything, no endpoints, or no endpoints and no names. */
 export type ExportMode = 'full' | 'no-addresses' | 'anonymized'
@@ -198,7 +204,10 @@ export function estateMarkdown(snap: EstateSnapshot, opts: { mode?: ExportMode; 
   const remote = (id: string) => name('remote', id)
   const node = (r: string, n: string) => (anon ? alias('node', `${r}/${n}`) : text(n))
   const lines: string[] = ['# Proxmox estate', '']
-  lines.push(`Snapshot from ${new Date(snap.fetchedAt).toISOString()}. Read-only view through Proxmox Datacenter Manager.`, '')
+  const direct = snap.remotes.some((r) => r.direct)
+  const pdm = snap.remotes.some((r) => !r.direct)
+  const via = direct ? (pdm ? 'Proxmox Datacenter Manager and Proxmox servers connected directly' : 'Proxmox servers connected directly') : 'Proxmox Datacenter Manager'
+  lines.push(`Snapshot from ${new Date(snap.fetchedAt).toISOString()}. Read-only view through ${via}.`, '')
   if (!full) lines.push(anon ? 'Addresses, host names and other names are replaced by placeholders.' : 'Addresses, host names and paths are filtered out of names and tags, best effort.', '')
   lines.push('## Hosts', '', `| Host | Remote | Type | Status | CPU | RAM | Root disk | Version${full ? ' | Address' : ''} |`, `|---|---|---|---|---|---|---|---${full ? '|---' : ''}|`)
   for (const h of snap.hosts.filter((x) => x.node)) {
@@ -209,12 +218,12 @@ export function estateMarkdown(snap: EstateSnapshot, opts: { mode?: ExportMode; 
   // Only which remotes are down: their error text is the server's, so it stays out.
   const down = snap.remotes.filter((r) => !r.online)
   if (down.length) lines.push('', `Unreachable remotes: ${down.map((r) => remote(r.id)).join(', ')}.`)
-  lines.push('', '## Guests', '', `| Guest | VMID | Kind | Host | Status | Tags | Last backup${full ? ' | Address' : ''} |`, `|---|---|---|---|---|---|---${full ? '|---' : ''}|`)
+  lines.push('', '## Guests', '', `| Guest | VMID | Kind | Host | Status | Disk | Tags | Last backup${full ? ' | Address' : ''} |`, `|---|---|---|---|---|---|---|---${full ? '|---' : ''}|`)
   for (const g of [...snap.guests].sort((a, b) => a.remote.localeCompare(b.remote) || a.vmid - b.vmid)) {
     const backup = g.template ? 'template' : g.lastBackup ? `${g.backupState}, ${Math.round((now - g.lastBackup) / 3_600_000)} h ago` : g.backupState
     const tags = anon ? '-' : g.tags.map((t) => text(t, 30)).join(', ') || '-'
     lines.push(
-      `| ${anon ? alias('guest', g.key) : text(g.name)} | ${anon ? '-' : g.vmid} | ${g.type === 'qemu' ? 'VM' : 'CT'} | ${remote(g.remote)}/${node(g.remote, g.node)} | ${statusWord(g.status)} | ${tags} | ${backup}${full ? ` | ${plainText(guestAddress(g) ?? '-', 60)}` : ''} |`
+      `| ${anon ? alias('guest', g.key) : text(g.name)} | ${anon ? '-' : g.vmid} | ${g.type === 'qemu' ? 'VM' : 'CT'} | ${remote(g.remote)}/${node(g.remote, g.node)} | ${statusWord(g.status)} | ${diskText(g)} | ${tags} | ${backup}${full ? ` | ${plainText(guestAddress(g) ?? '-', 60)}` : ''} |`
     )
   }
   lines.push('', '## Backups', '')
