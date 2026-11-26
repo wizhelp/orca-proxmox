@@ -427,7 +427,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     try {
       if (!c.tunnel.hostKey) {
         if (!opened.hostKey) throw new ApiError({ kind: 'unreachable', message: `SSH did not report the host key of ${c.tunnel.host}` })
-        seen.sshHostKey = { key: opened.hostKey, fingerprint: hostKeyFingerprint(opened.hostKey) ?? '' }
+        seen.sshHostKey = { key: opened.hostKey, fingerprint: hostKeyFingerprint(opened.hostKey) ?? '', for: `${c.tunnel.host}:${c.tunnel.port}` }
       }
       return await work(new ProxmoxClient({ connection: c, secret, transport, probe, route: async () => opened.connectTo }))
     } finally {

@@ -234,7 +234,7 @@ function tunnelFields(kind: SourceKind): HTMLElement {
     'div',
     { class: 'conn-extra stack-sm' },
     check('set-tunnel', 'Reach via SSH tunnel', !!t, (on) =>
-      edit({ tunnel: on ? { host: '', port: 22, user: '', identityFile: '', target: DEFAULT_TARGET[kind], hostKey: '' } : undefined })
+      edit({ tunnel: on ? { host: '', port: 22, user: 'orca-tunnel', identityFile: '', target: DEFAULT_TARGET[kind], hostKey: '' } : undefined })
     ),
     t
       ? h(
@@ -243,8 +243,8 @@ function tunnelFields(kind: SourceKind): HTMLElement {
           h('div', { class: 'muted small' }, 'For an API that only the server itself reaches (only SSH open): the plugin runs ssh -N -L with this key and talks to the API through it, still checking the certificate above.'),
           field('set-ssh-host', 'SSH host', 'DNS name or IP address of the server.', text('set-ssh-host', t.host, 'pve.example.com', (v) => set({ host: v }))),
           field('set-ssh-port', 'SSH port', '', text('set-ssh-port', String(t.port), '22', (v) => set({ port: Number(v) || 22 }))),
-          field('set-ssh-user', 'SSH user', 'A user whose key may only forward to the API (see the README).', text('set-ssh-user', t.user, 'orca-tunnel', (v) => set({ user: v }))),
-          field('set-ssh-key', 'Identity file', 'The private key on this machine, without a passphrase, readable by you only.', text('set-ssh-key', t.identityFile, '/home/you/.ssh/orca-proxmox', (v) => set({ identityFile: v }))),
+          field('set-ssh-user', 'SSH user', 'The account that may only forward to the API (see the README).', text('set-ssh-user', t.user, 'orca-tunnel', (v) => set({ user: v }))),
+          field('set-ssh-key', 'Identity file', 'The private key on this machine, without a passphrase, readable by you only.', text('set-ssh-key', t.identityFile, '/home/you/.ssh/orca-proxmox-tunnel', (v) => set({ identityFile: v }))),
           field('set-ssh-target', 'API as the server reaches it', `Usually ${DEFAULT_TARGET[kind]}.`, text('set-ssh-target', t.target, DEFAULT_TARGET[kind], (v) => set({ target: v }))),
           h(
             'div',
@@ -292,9 +292,12 @@ function enrichFields(): HTMLElement {
 }
 
 /** A host key the test saw (a first contact): shown to compare; pinned only on the person's click. */
-function hostKeyCallout(key: { key: string; fingerprint: string }): HTMLElement {
+function hostKeyCallout(key: { key: string; fingerprint: string; for: string }): HTMLElement {
   sshFingerprints.set(key.key, key.fingerprint)
-  const pinned = app.form.tunnel?.hostKey === key.key
+  const t = app.form.tunnel
+  // Only for the SSH server that was tested: after the host or port changed, test again.
+  if (!t || `${t.host}:${t.port}` !== key.for) return callout('warn', 'Test again', `The key shown was presented by ${key.for}; the form now names another SSH server.`)
+  const pinned = t.hostKey === key.key
   return callout(
     pinned ? 'ok' : 'warn',
     pinned ? 'SSH host key ready to pin' : 'Compare the SSH host key',

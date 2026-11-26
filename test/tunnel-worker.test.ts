@@ -84,7 +84,7 @@ test('a tunnelled PVE: the test shows the SSH host key, saving pins it, reads go
   await assert.rejects(worker!.request('config.save', PVE), /Test the connection first/)
   const tested = await worker!.request('connection.test', PVE)
   assert.equal(tested.ok, true)
-  assert.deepEqual(tested.sshHostKey, { key: HOST_KEY, fingerprint: 'SHA256:mKqU+0K8OhKmA8bBQi9Rz0Q5l7/g160hIP+rJYSTNj4' })
+  assert.deepEqual(tested.sshHostKey, { key: HOST_KEY, fingerprint: 'SHA256:mKqU+0K8OhKmA8bBQi9Rz0Q5l7/g160hIP+rJYSTNj4', for: 'pve-x1.example.test:22' })
   assert.equal(ssh.runs.length, 1)
   assert.ok(ssh.runs[0].killed, 'the test tunnel is stopped after the test')
   // Every API request of the test went to the tunnel's local end, with the server's own URL and pin.

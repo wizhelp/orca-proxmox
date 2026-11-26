@@ -23,7 +23,7 @@ export type ConnectionInput = {
 }
 
 /** The SSH server's host key a test saw (learnt, when none was pinned): to compare and save. */
-export type SshHostKey = { key: string; fingerprint: string }
+export type SshHostKey = { key: string; fingerprint: string; /** The SSH server tested, `host:port`: the key is for it only. */ for: string }
 
 export type SecretsProtection = 'os-keyring' | 'unavailable' | 'unknown'
 
