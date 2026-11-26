@@ -570,21 +570,27 @@ token.
 ### T2. On each host: the tunnel account, verified before it can be used
 
 Everything in T2 runs in the open root session, one block at a time, each after the person's
-approval. The key is installed last (T2f), only once the account's effective policy is verified.
+approval. **Nothing here ends that session**: no block uses `exit`; a problem prints a line starting
+with `STOP`, and then no further block is run until the person decides (the way back at the end
+undoes exactly what this run did). The key is installed last (T2f), only once the account's
+effective policy is verified. The blocks record what they changed in shell variables
+(`ORCA_*`), which the way back uses, so keep to this one session.
 
 **T2a. Backup and account** (no key yet, so nobody can log in as it):
 
 ```sh
-set -u; umask 077
-BACKUP=/etc/ssh/sshd_config.orca-backup.$(date +%Y%m%d-%H%M%S)
-cp -a /etc/ssh/sshd_config "$BACKUP" && echo "backup: $BACKUP"
-if id orca-tunnel >/dev/null 2>&1; then
-  echo "orca-tunnel already exists: show the person 'id orca-tunnel' and its ~/.ssh before going on"
+umask 077
+ORCA_BACKUP=/etc/ssh/sshd_config.orca-backup.$(date +%Y%m%d-%H%M%S)
+if ! cp -a /etc/ssh/sshd_config "$ORCA_BACKUP"; then
+  echo "STOP: no backup could be made"
+elif id orca-tunnel >/dev/null 2>&1; then
+  echo "STOP: orca-tunnel already exists; show the person 'id orca-tunnel' and its ~/.ssh first"
+elif useradd --system --create-home --shell /usr/sbin/nologin orca-tunnel && usermod -p '*' orca-tunnel &&
+     install -d -m 700 -o orca-tunnel -g orca-tunnel /home/orca-tunnel/.ssh; then
+  ORCA_CREATED_ACCOUNT=1; echo "backup: $ORCA_BACKUP; account created (no password, no key)"
 else
-  useradd --system --create-home --shell /usr/sbin/nologin orca-tunnel
+  echo "STOP: the account could not be set up"
 fi
-usermod -p '*' orca-tunnel                        # no password; key login only
-install -d -m 700 -o orca-tunnel -g orca-tunnel /home/orca-tunnel/.ssh
 ```
 
 **T2b. Earlier Match blocks.** sshd uses the **first** value it finds for each keyword, so a
@@ -602,8 +608,10 @@ stop and agree with the person how to change it; T2d shows the outcome either wa
 **T2c. The account's rules**, appended at the end of `sshd_config` (once):
 
 ```sh
-grep -q '^Match User orca-tunnel$' /etc/ssh/sshd_config && { echo "already present: review it"; exit 1; }
-cat >> /etc/ssh/sshd_config <<'EOF'
+if grep -q '^Match User orca-tunnel$' /etc/ssh/sshd_config; then
+  echo "STOP: a Match User orca-tunnel block is already there; review it with the person"
+else
+  cat >> /etc/ssh/sshd_config <<'EOF' && ORCA_ADDED_POLICY=1 && echo "policy appended"
 
 # Orca plugin: an account that may only forward to the local Proxmox API.
 Match User orca-tunnel
@@ -616,68 +624,108 @@ Match User orca-tunnel
     AllowAgentForwarding no
     ForceCommand /bin/false
 EOF
+fi
 ```
 
-For PBS use `127.0.0.1:8007` (a host running both: `PermitOpen 127.0.0.1:8006 127.0.0.1:8007`).
+For PBS use `127.0.0.1:8007` (a host running both: `PermitOpen 127.0.0.1:8006 127.0.0.1:8007`, and
+the same in `orca_policy_ok` below).
 
 **T2d. Verify the effective policy before reloading.** `sshd -T` reads the configuration on disk,
 not the running daemon, so this checks exactly what a reload would apply, for a connection from
 Orca's machine to this host:
 
 ```sh
-sshd -t || { cp -a "$BACKUP" /etc/ssh/sshd_config; echo "syntax error: restored"; exit 1; }
-sshd -T -C user=orca-tunnel,host=orca-client,addr=192.0.2.10,laddr=192.0.2.20,lport=22 |
-  grep -Ei '^(allowtcpforwarding|allowstreamlocalforwarding|permitlisten|permitopen|permittty|x11forwarding|allowagentforwarding|forcecommand) '
+orca_policy_ok() {  # what sshd applies to orca-tunnel coming from Orca's machine, exactly
+  local want got
+  want=$(printf '%s\n' 'allowagentforwarding no' 'allowstreamlocalforwarding no' 'allowtcpforwarding local' \
+    'forcecommand /bin/false' 'permitlisten none' 'permitopen 127.0.0.1:8006' 'permittty no' 'x11forwarding no')
+  got=$(sshd -T -C user=orca-tunnel,host=orca-client,addr=192.0.2.10,laddr=192.0.2.20,lport=22 2>/dev/null |
+    grep -Ei '^(allowtcpforwarding|allowstreamlocalforwarding|permitlisten|permitopen|permittty|x11forwarding|allowagentforwarding|forcecommand) ' | sort)
+  [ "$got" = "$want" ] && return 0
+  printf 'effective policy:\n%s\n' "$got"; return 1
+}
+if ! sshd -t; then
+  echo "STOP: sshd_config has an error; restore it with the way back"
+elif orca_policy_ok; then
+  echo "policy OK (not reloaded yet)"
+else
+  echo "STOP: an earlier rule wins (T2b); use the way back"
+fi
 ```
 
-Expected, every line: `allowtcpforwarding local`, `allowstreamlocalforwarding no`,
-`permitlisten none`, `permitopen 127.0.0.1:8006`, `permittty no`, `x11forwarding no`,
-`allowagentforwarding no`, `forcecommand /bin/false`. Any other value means an earlier rule wins
-(T2b): restore with `cp -a "$BACKUP" /etc/ssh/sshd_config` and stop.
-
-**T2e. Reload, verify again, then check a fresh admin login** (keep this session open):
+**T2e. Reload, verify again, then check a fresh admin login** (in the same session):
 
 ```sh
-systemctl reload ssh || systemctl reload sshd || { echo "reload failed: use the way back"; exit 1; }
-sshd -T -C user=orca-tunnel,host=orca-client,addr=192.0.2.10,laddr=192.0.2.20,lport=22 |
-  grep -Ei '^(allowtcpforwarding|allowstreamlocalforwarding|permitlisten|permitopen|permittty|x11forwarding|allowagentforwarding|forcecommand) '
+if ! { systemctl reload ssh || systemctl reload sshd; }; then
+  echo "STOP: the reload failed; use the way back"
+elif orca_policy_ok; then
+  echo "reloaded, policy OK"
+else
+  echo "STOP: the policy differs after the reload; use the way back"
+fi
 ```
 
-The values must be exactly those of T2d; otherwise use the way back and stop. Then, from Orca's
-machine in a **new** terminal, open a **new** authenticated admin connection, with connection
-sharing off so an existing one cannot stand in for it:
+Then, from Orca's machine in a **new** terminal, open a **new** authenticated admin connection,
+with connection sharing off, so an existing (multiplexed) connection can neither stand in for it
+nor be touched by it; do not close or `ssh -O exit` any existing master connection:
 
 ```sh
 ssh -o ControlMaster=no -o ControlPath=none root@pve-a.example.com true && echo "fresh admin login works"
 ```
 
-If it fails, use the way back from the open session and stop.
+If it fails, use the way back from the open session.
 
-**T2f. Only now, the key.** Never overwrite an existing `authorized_keys`; each step stops on
-failure:
+**T2f. Only now, the key.** Only into a file this run creates; an existing `authorized_keys` is
+never touched:
 
 ```sh
-F=/home/orca-tunnel/.ssh/authorized_keys
-[ -e "$F" ] && { echo "$F exists: show it to the person, do not overwrite"; exit 1; }
-install -m 600 -o orca-tunnel -g orca-tunnel /dev/null "$F" || { echo "could not create $F: stop"; exit 1; }
-printf '%s\n' 'restrict,port-forwarding,permitopen="127.0.0.1:8006" <contents of orca-proxmox-tunnel.pub>' >> "$F" ||
-  { rm -f "$F"; echo "could not write $F: stop"; exit 1; }
+ORCA_KEYFILE=/home/orca-tunnel/.ssh/authorized_keys
+ORCA_KEYLINE='restrict,port-forwarding,permitopen="127.0.0.1:8006" <contents of orca-proxmox-tunnel.pub>'
+if [ -e "$ORCA_KEYFILE" ]; then
+  echo "STOP: $ORCA_KEYFILE already exists; show it to the person, nothing was changed"
+elif install -m 600 -o orca-tunnel -g orca-tunnel /dev/null "$ORCA_KEYFILE" && ORCA_CREATED_KEYFILE=1 &&
+     printf '%s\n' "$ORCA_KEYLINE" >> "$ORCA_KEYFILE"; then
+  echo "key installed"
+else
+  echo "STOP: the key could not be installed; use the way back"
+fi
 ```
 
 `restrict` turns off every forwarding, PTY and agent feature for the key, `port-forwarding` allows
 forwards again and `permitopen` limits local forwards to the API; the `Match` block makes the
 account's effective policy local TCP forwarding to the API only, whatever key is used.
 
-**The way back**, at any point and in this order, so the key is never left enabled under a weaker
-policy: first disable the key and end the account's sessions, then restore the policy, then reload.
-Each step checks its result and stops on failure:
+**The way back**, at any point, in the same session. It undoes only what this run did, in an
+order that never leaves the key enabled under a weaker policy: first the key (only the file this
+run created, and only while it holds exactly this run's key line), then the `orca-tunnel` sessions
+(that account's only: never root's or anyone else's, so this session and any admin connection
+stay open), then the policy this run appended, then the reload, then the account this run
+created. It stops at the first step that fails, without closing the session:
 
 ```sh
-rm -f /home/orca-tunnel/.ssh/authorized_keys || { echo "could not remove the key: stop"; exit 1; }
-pkill -u orca-tunnel; sleep 1; pgrep -u orca-tunnel >/dev/null && { echo "orca-tunnel sessions still running: stop"; exit 1; }
-cp -a "$BACKUP" /etc/ssh/sshd_config && sshd -t || { echo "could not restore $BACKUP: stop"; exit 1; }
-systemctl reload ssh || systemctl reload sshd || { echo "reload failed: stop"; exit 1; }
-userdel -r orca-tunnel                            # if the account should go too
+orca_way_back() {
+  if [ "${ORCA_CREATED_KEYFILE:-}" = 1 ]; then
+    if [ "$(cat "$ORCA_KEYFILE")" = "$ORCA_KEYLINE" ]; then
+      rm -f "$ORCA_KEYFILE" || { echo "STOP: could not remove the key file"; return 1; }
+    else
+      echo "STOP: $ORCA_KEYFILE now holds more than this run's key; remove only that line by hand"; return 1
+    fi
+  fi
+  # Only when this run made the account or its key: an account that was there before is left alone.
+  if { [ "${ORCA_CREATED_ACCOUNT:-}" = 1 ] || [ "${ORCA_CREATED_KEYFILE:-}" = 1 ]; } && [ "$(id -u orca-tunnel 2>/dev/null)" != 0 ]; then
+    pkill -u orca-tunnel; sleep 1
+    pgrep -u orca-tunnel >/dev/null && { echo "STOP: orca-tunnel processes still running"; return 1; }
+  fi
+  if [ "${ORCA_ADDED_POLICY:-}" = 1 ]; then
+    cp -a "$ORCA_BACKUP" /etc/ssh/sshd_config && sshd -t || { echo "STOP: could not restore $ORCA_BACKUP"; return 1; }
+    { systemctl reload ssh || systemctl reload sshd; } || { echo "STOP: the reload failed"; return 1; }
+  fi
+  if [ "${ORCA_CREATED_ACCOUNT:-}" = 1 ]; then
+    userdel -r orca-tunnel || { echo "STOP: could not remove the account"; return 1; }
+  fi
+  echo "undone"
+}
+orca_way_back
 ```
 
 ### T3. Pin both keys

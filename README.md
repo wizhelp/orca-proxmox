@@ -305,8 +305,11 @@ Set it up with the staged procedure in
 [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md#t2-on-each-host-the-tunnel-account-verified-before-it-can-be-used),
 which stops at each gate instead of running as one block: write the policy, check what sshd would
 apply to this account (`sshd -T -C user=orca-tunnel,…`; an earlier `Match` block can win), reload,
-check again and check a fresh admin login, and only then install the key. Its way back removes the
-key and ends the account's sessions before it restores the previous policy. It then checks that a
+check again and check a fresh admin login, and only then install the key into a file it creates
+(an existing `authorized_keys` is never touched). Its way back undoes only what that run did: the
+key file it created (only while it holds just that key), then `orca-tunnel`'s sessions (no one
+else's), then the policy it appended, then the account it created; no step closes the admin's
+session. It then checks that a
 shell, a command, `-R` and other `-L` targets are refused. For PBS use port 8007. Then a read-only
 token as in "Without PDM" (`orca-monitor@pve!orca`, PVEAuditor on `/` for the user and the token).
 
