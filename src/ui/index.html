@@ -1345,6 +1345,36 @@
         font-variant-numeric: tabular-nums;
       }
 
+      /* settings: Connect via Orca */
+      .conn-row.setup-host {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .setup-head {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .setup-host a {
+        color: var(--orca-ring, currentColor);
+      }
+      .setup-record {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+      pre.script {
+        margin: 6px 0 0;
+        padding: 6px 8px;
+        max-height: 320px;
+        overflow: auto;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        font: 11px/1.45 var(--orca-font-mono, ui-monospace, monospace);
+        white-space: pre;
+      }
+
       /* settings */
       .field {
         display: flex;

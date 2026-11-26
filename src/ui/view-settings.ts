@@ -9,6 +9,7 @@ import { h } from './dom'
 import { icon } from './icons'
 import { ask, CONFIRM_MS, connectionTarget, mayAct, pending } from './confirm'
 import { button, callout, chip, errorCallout, select } from './parts'
+import { connectSection } from './view-connect'
 
 const KIND_LABEL: Record<SourceKind, string> = { pdm: 'Proxmox Datacenter Manager', pve: 'Proxmox VE', pbs: 'Proxmox Backup Server' }
 const KIND_SHORT: Record<SourceKind, string> = { pdm: 'PDM', pve: 'PVE', pbs: 'PBS' }
@@ -244,7 +245,9 @@ function tunnelFields(kind: SourceKind): HTMLElement {
           field('set-ssh-host', 'SSH host', 'DNS name or IP address of the server.', text('set-ssh-host', t.host, 'pve.example.com', (v) => set({ host: v }))),
           field('set-ssh-port', 'SSH port', '', text('set-ssh-port', String(t.port), '22', (v) => set({ port: Number(v) || 22 }))),
           field('set-ssh-user', 'SSH user', 'The account that may only forward to the API (see the README).', text('set-ssh-user', t.user, 'orca-tunnel', (v) => set({ user: v }))),
-          field('set-ssh-key', 'Identity file', 'The private key on this machine, without a passphrase, readable by you only.', text('set-ssh-key', t.identityFile, '/home/you/.ssh/orca-proxmox-tunnel', (v) => set({ identityFile: v }))),
+          t.keyRef
+            ? h('div', { class: 'small' }, 'Key: the plugin’s own, made by Connect via Orca and kept sealed; its public half is on the server.')
+            : field('set-ssh-key', 'Identity file', 'The private key on this machine, without a passphrase, readable by you only.', text('set-ssh-key', t.identityFile, '/home/you/.ssh/orca-proxmox-tunnel', (v) => set({ identityFile: v }))),
           field('set-ssh-target', 'API as the server reaches it', `Usually ${DEFAULT_TARGET[kind]}.`, text('set-ssh-target', t.target, DEFAULT_TARGET[kind], (v) => set({ target: v }))),
           h(
             'div',
@@ -426,6 +429,7 @@ export function settingsView(): HTMLElement {
   return h(
     'div',
     { class: 'view stack settings' },
+    connectSection(list.length > 0),
     h(
       'section',
       { class: 'connections stack' },
