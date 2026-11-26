@@ -199,7 +199,8 @@ first connection starts as one), and enter:
 - **API token secret**
 - **Pinned certificate fingerprint** (optional): `AA:BB:…` (colons and case don't matter)
 
-Press **Test**, then **Save**; the form closes and the connection is listed. **Edit** opens it again; **Remove…** asks before it deletes the connection and its stored secret.
+Press **Test**, then **Save**; the form closes and the connection is listed. **Edit** opens it
+again; **Remove…** asks before it deletes the connection and its stored secret.
 
 Without the panel (an agent or a script): write the same four fields as JSON to the plugin's
 import file (readable by you only, written to a temporary name and renamed into place); the
