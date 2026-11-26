@@ -4,7 +4,9 @@ An [Orca](https://github.com/stablyai/orca) plugin that shows your Proxmox estat
 sidebar: every PVE host, VM and container, your Proxmox Backup Server datastores, and when each
 guest was last backed up. It reads everything through
 [Proxmox Datacenter Manager](https://pdm.proxmox.com/) (PDM), which already aggregates many PVE
-clusters and PBS servers, so one read-only API token is all it needs.
+clusters and PBS servers, so one read-only API token is all it needs. Without PDM, it connects to
+PVE hosts and PBS servers directly, each with its own read-only token; PDM and direct connections
+can be combined, and every connection shows as part of one estate.
 
 It is **read-only**: it only sends `GET` requests, and the token it needs cannot change anything.
 
@@ -26,8 +28,10 @@ you make it in PDM. If the plugin is not installed yet, install it and tell me t
 approve it.
 ```
 
-The agent needs the PDM URL and either an admin login to PDM or SSH to its host. No PDM yet? The
-guide's appendix shows a small setup.
+The agent needs the PDM URL and either an admin login to PDM or SSH to its host. No PDM? Name
+your PVE hosts and PBS servers in the prompt instead: the guide's
+[direct section](docs/AGENT_SETUP.md#without-pdm-pve-and-pbs-directly) covers them, and its
+appendix shows a small PDM setup.
 
 ## Screenshots
 
@@ -36,10 +40,11 @@ Rendered from the bundled example estate (no real servers):
 <p>
   <img src="docs/screenshots/hosts-cards.png" alt="Host cards with CPU, memory and network sparklines, disk bars, update and version badges, notes and copy and open actions" width="240">
   <img src="docs/screenshots/tree-drag.png" alt="The tree of remotes, nodes, Orca hosts and guests in the dark theme, with a guest being dragged within its node" width="240">
-  <img src="docs/screenshots/guests.png" alt="The guests table with CPU and memory sparklines, one guest opened with its actions, tags, notes, charts and details" width="240">
+  <img src="docs/screenshots/guests.png" alt="The guests table with CPU and memory sparklines and disk use, one guest opened with its actions, tags, notes, charts and details" width="240">
   <img src="docs/screenshots/tasks.png" alt="The tasks of all remotes, with two failed backups in red" width="240">
   <img src="docs/screenshots/planner.png" alt="Where a new VM fits: free memory, disk and CPU per node, best fit first" width="240">
   <img src="docs/screenshots/orca.png" alt="The Orca tab: one Orca server per Proxmox node, with its bot and workspaces" width="240">
+  <img src="docs/screenshots/settings.png" alt="Settings: a PDM connection, a PVE cluster and a PBS reached directly, each with its token and pinned certificate" width="240">
   <img src="docs/screenshots/copy-for-ai.png" alt="The Copy for AI preview in the mode without addresses, with the text to copy" width="240">
 </p>
 
@@ -75,8 +80,10 @@ follow [Setup](#setup).
   item; Esc cancels. The order is saved and shared by the cards, the tree and the Orca tab;
   *Reset order* goes back to PDM's. The tree can also order guests by name, status, CPU, memory
   or backup age.
-- **Guests**: every VM and container with status, a CPU sparkline, a memory bar, uptime and
-  backup state. Search by name, VMID, tag, host or address; filter by type, status and host; sort
+- **Guests**: every VM and container with status, a CPU sparkline, a memory bar, disk use, uptime
+  and backup state. Disk use is used of size with a bar: from Proxmox for containers, from the
+  QEMU guest agent for VMs where it can be read, else the VM's allocated size with its use marked
+  *unknown* and why (no guest agent, no permission, not offered through PDM), never 0 %. Search by name, VMID, tag, host or address; filter by type, status and host; sort
   any column; select a row for its charts and details.
 - **Backups**: PBS datastore usage with its last day as a chart, and each guest's newest PBS
   snapshot as a bar against the age limit. A guest with no snapshot in the last 26 hours
@@ -92,7 +99,7 @@ follow [Setup](#setup).
 - **Tasks**: the newest tasks of every remote (starts, stops, backups, updates), failures in red
   with their error; filters for problems and backups.
 - **Tags and notes**: Proxmox tags on guests, with a tag filter; the notes of guests and nodes.
-- **Warnings**: container disks over 85 %, datastores over 80 % and storages over 85 %, with "full
+- **Warnings**: guest disks over 85 % (containers, and VMs whose guest agent reports their use), datastores over 80 % and storages over 85 %, with "full
   in ~N days" when the history shows a steady rise; pending package updates and version drift
   between hosts.
 - **Where should a new VM go?**: free memory, disk and CPU per node for a VM of a given size, best
@@ -114,6 +121,9 @@ follow [Setup](#setup).
   them from a new baseline.
 - **Auto refresh** every 30 seconds (configurable) while the panel is visible, and a clear error
   for an unreachable server, a rejected token, a missing permission or a certificate problem.
+- **Connections**: PDM, or PVE hosts and PBS servers directly, or both; each with its own URL,
+  token, pinned certificate and sealed secret, added, tested, edited and removed one by one in
+  Settings. A connection that cannot be read shows as one unreachable remote; the others still load.
 - Follows Orca's theme (light and dark) and honours *reduce motion*.
 
 ## Requirements
@@ -122,6 +132,9 @@ follow [Setup](#setup).
 - Proxmox Datacenter Manager 1.x, reachable over HTTPS from the machine Orca runs on. Tested with
   PDM 1.1.10 (PVE 9.x and PBS 4.x remotes); other 1.x releases use the same endpoints, and
   answers of an unexpected shape are skipped with a warning rather than misread.
+- Or, without PDM: Proxmox VE 8.x/9.x hosts and Proxmox Backup Server 3.x/4.x, each reachable
+  over HTTPS. These direct connections use the servers' documented API and are tested against
+  example answers in that shape.
 - For Orca awareness, terminals and opening the panel from the status bar: Orca's own CLI, which
   ships with Orca (see [Orca awareness](#orca-awareness)).
 
@@ -151,6 +164,7 @@ state. The plugin uses these endpoints, all `GET`:
 | `/remotes/tasks/list` | The tasks feed and backup-failure alerts |
 | `/pve/remotes/{remote}/updates` | Pending updates, where PDM has checked |
 | `/pve/remotes/{remote}/nodes/{node}/config`, guest configs | Notes (and addresses) |
+| `/pve/remotes/{remote}/qemu/{vmid}/agent/get-fsinfo` | VM disk use, where PDM offers it (PDM 1.1 does not: asked again after 6 h) |
 | `/pve/remotes/{remote}/nodes/{node}/rrddata`, `…/qemu|lxc/{vmid}/rrddata`, `/pbs/remotes/{remote}/rrddata`, `…/datastore/{store}/rrddata` | The charts (once a minute) |
 
 If the token sees no remotes, the connection test says so; that almost always means the Auditor
@@ -175,7 +189,7 @@ presented and offers to put it in the form, so you can compare it and save.
 
 ### 3. Connect
 
-Open the **Proxmox** panel in Orca's right sidebar, go to **Settings**, and enter:
+Open the **Proxmox** panel in Orca's right sidebar, go to **Settings**, choose the kind **PDM** (the first connection starts as one), and enter:
 
 - **Base URL**: `https://pdm.example.com:8443`
 - **API token ID**: `monitor@pdm!orca`
@@ -193,6 +207,53 @@ Settings → *Set up from a file*, with an *Import now* button.
 Under Orca **Settings → Plugins → Proxmox** you can change the refresh interval (default 30 s),
 the backup age warning (default 26 h) and how often PBS snapshot lists are read (default 5 min;
 they are the slowest part of a refresh).
+
+### Without PDM: PVE and PBS directly
+
+Each PVE cluster (or standalone host) and each PBS is its own connection, with its own token.
+One connection to any node of a cluster shows the whole cluster; a standalone PVE host cannot see
+other hosts' guests, so add each host. [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md#without-pdm-pve-and-pbs-directly)
+does the same through the API.
+
+**PVE** (web interface on port 8006, **Datacenter → Permissions**):
+
+1. **Users**: add `monitor@pve` (realm *Proxmox VE authentication server*; it needs no password
+   for the token).
+2. **API Tokens**: add `orca` for that user, with *Privilege Separation* on. Copy the secret.
+3. **Permissions → Add → API Token Permission** and **User Permission**: role **PVEAuditor** on
+   path `/`, for **both** the token `monitor@pve!orca` and the user `monitor@pve`. A separated
+   token has only the permissions given to it, capped by its user's.
+
+`PVEAuditor` reads everything and changes nothing. It does not include the guest agent, so a VM's
+disk use stays *unknown* (its allocated size is shown). To read it, optionally add a role with
+**`VM.GuestAgent.Audit`** (PVE 9; it allows the agent's informational calls only) on `/vms`, for
+the token and the user. On PVE 8 the only privilege for it is `VM.Monitor`, which also lets the
+token run commands inside the guest through the agent: the plugin does not ask for it, and without
+it VM disk use stays unknown. The guest agent must be enabled in the VM's options and running in it.
+
+**PBS** (web interface on port 8007, **Configuration → Access Control**):
+
+1. **User Management**: add `monitor@pbs`.
+2. **API Token**: add `orca` for that user. Copy the secret.
+3. **Permissions**: role **Audit** on `/` for the token `monitor@pbs!orca` and the user. Only
+   `DatastoreAudit` on `/datastore` is enough for datastores and backups; the server's own status,
+   tasks and updates may then be missing.
+
+**Fingerprints**: the same `openssl s_client` as in step 2, against port 8006 or 8007; compare it
+with the node's **System → Certificates** (PVE) or the dashboard's **Show Fingerprint** (PBS).
+
+**Connect**: **Settings → Add a connection**, choose **PVE** or **PBS**, then the base URL
+(`https://pve.example.com:8006`, `https://pbs.example.com:8007`), the token ID, the secret and the
+fingerprint, and optionally a **name** for it in the panel (else the cluster's name, a standalone
+node's name, or the host name of the URL). Test, then Save. Each URL can be added once. A cluster
+added both through PDM and directly is shown twice.
+
+The direct connections use these endpoints, all `GET`:
+
+| Server | Endpoints |
+| --- | --- |
+| PVE | `/version`, `/cluster/status`, `/cluster/resources`, `/nodes/{node}/status`, `/cluster/tasks`, `/nodes/{node}/apt/update`, `/nodes/{node}/network`, `/nodes/{node}/config`, guest configs, `…/rrddata`, `/nodes/{node}/qemu/{vmid}/agent/get-fsinfo` |
+| PBS | `/version`, `/nodes/localhost/status`, `/status/datastore-usage` (else `/admin/datastore`), `/admin/datastore/{store}/namespace` and `/snapshots`, `…/rrd`, `/nodes/localhost/tasks`, `/nodes/localhost/apt/update`, `/nodes/localhost/network` |
 
 ## How backups are matched
 
@@ -271,7 +332,14 @@ through PDM, on the backup scan's cadence; the Auditor role covers both.
   for updates (its UI does this). PDM's summary of all remotes and the nodes' `apt/update` list need
   more than the Auditor role, so a read-only token cannot ask for a fresh check; until PDM has
   checked, the plugin shows version drift only.
-- **Guest disk use** is known for containers only: Proxmox does not see inside a VM's disk.
+- **Guest disk use of a VM** is known only to its QEMU guest agent; Proxmox itself knows the
+  allocated size. PDM 1.1 does not pass the agent call on, so through PDM a VM shows its allocated
+  size and *unknown* use; a direct PVE connection reads it where the agent runs and the token may
+  ask it (see [Without PDM](#without-pdm-pve-and-pbs-directly)). Each VM is read every 10 minutes
+  at most, 24 per refresh and two at a time; a remote that refuses the call is not asked again
+  for 6 hours.
+- **Several connections** are read side by side; their remotes, guests and tasks are merged. Two
+  remotes of the same name are kept apart by a `-2` suffix on the later one.
 - **Opening the panel** from the status bar and **opening terminals** go through the `orca` CLI,
   as the plugin API has no call for either yet (see [Orca awareness](#orca-awareness)). A terminal
   on a paired server starts in the background, so the plugin then switches Orca to it; when Orca
@@ -307,9 +375,10 @@ See [SECURITY.md](SECURITY.md) for the details and the residual risks. In short:
 - With a pinned fingerprint, the TLS handshake finishes and the certificate is compared **before**
   any HTTP is sent, so a mismatched server never sees the token. Without a pin, the system CAs
   and hostname checks apply. Only `https://` URLs are accepted.
-- Each saved configuration has its own secret entry; a secret carries over only to the same base
-  URL (path included) and token ID, so a token is never sent to a server it was not entered for,
-  not even by a refresh that was running while you saved.
+- Each connection (PDM, PVE or PBS) has its own sealed secret entry, bound to that connection's
+  URL, token ID and pin; a secret carries over only to the same base URL (path included) and
+  token ID, so a token is never sent to a server it was not entered for, not even by a refresh
+  that was running while you saved. Each server only ever receives its own token.
 - All network calls happen in the plugin's worker; the panel only talks to the worker. Error
   texts are the plugin's own, and everything sent to the panel, logged or notified is scrubbed of
   credential-shaped text first.
@@ -342,7 +411,8 @@ orca plugin dev watch .     # load into Orca (asks you to approve its access fir
 Tests never contact a real server or run the orca CLI. `test/fixtures/recorded-pdm.ts` and
 `recorded-pdm-renamed.ts` hold answers recorded from a real PDM 1.1.10 (scrubbed of public
 addresses, fingerprints, guest names and secrets), `test/fixtures/orca-cli.ts` the orca CLI's
-answers reduced to the fields read, `test/fixtures/pdm.ts` synthetic ones for edge cases, and
+answers reduced to the fields read, `test/fixtures/pdm.ts` synthetic ones for edge cases,
+`test/fixtures/direct.ts` an example PVE cluster and PBS reached directly, and
 pinning is tested against a local HTTPS server with a throwaway certificate.
 
 Layout:
@@ -367,8 +437,11 @@ src/model.ts             the normalized estate both sides share, and formatting
 src/estate.ts            refresh cadence and backup matching per snapshot
 src/proxmox/http.ts      HTTPS transport with certificate pinning
 src/proxmox/client.ts    token auth, `{ data }` unwrapping, error mapping
-src/proxmox/source.ts    the EstateSource interface (PDM now; single PVE/PBS hosts later)
+src/proxmox/source.ts    the EstateSource interface
 src/proxmox/pdm.ts       the PDM source
+src/proxmox/direct.ts    PVE and PBS reached directly
+src/proxmox/composite.ts several connections as one estate
+src/proxmox/agent.ts     VM disk use from the guest agent, cached and paced
 src/proxmox/backups.ts   snapshot-to-guest matching
 src/presence.ts          per node/guest rollups: guests, backups, Orca presence
 src/orca/inventory.ts    Orca hosts, bots and workspaces from the orca CLI
@@ -377,10 +450,6 @@ src/orca/match.ts        placing Orca hosts on nodes and guests
 src/orca/service.ts      the Orca inventory cache
 ```
 
-Adding a single PVE or PBS host means another `EstateSource` over the same `ProxmoxClient`: the
-connection model (`kind`, base URL, token ID, secret, fingerprint) and the auth header scheme for
-`pve` and `pbs` are already in place.
-
 ## Roadmap
 
 See [BACKLOG.md](BACKLOG.md). In short:
@@ -388,7 +457,7 @@ See [BACKLOG.md](BACKLOG.md). In short:
 - A container or micro VM per Orca worktree, created from the panel and registered with Orca as a
   host, so a worktree can be tested on its own guest.
 - Guest actions (start, shutdown, reboot) behind an explicit confirmation, with a separate token.
-- Connecting to a single PVE or PBS host directly, and more than one connection.
+- VM disk use through PDM, once PDM passes the guest agent's call on.
 - Using Orca's plugin API instead of the CLI once it lists hosts and bots.
 
 ## Credits
