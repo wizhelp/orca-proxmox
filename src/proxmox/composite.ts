@@ -90,7 +90,7 @@ export class CompositeSource implements EstateSource {
     while (taken.has(id)) id = `${id}-x`
     taken.add(id)
     const type = connection.kind === 'pbs' ? 'pbs' : 'pve'
-    merged.remotes.push({ id, type, online: false, error: reason })
+    merged.remotes.push({ id, type, online: false, error: reason, direct: true })
     merged.hosts.push(unreachableHost(id, type, reason))
     merged.warnings.push(`The connection ${connectionLabel(connection)} could not be read: ${reason}`)
   }

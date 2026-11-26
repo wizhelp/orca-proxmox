@@ -81,6 +81,8 @@ export type Remote = {
   nodeAddress?: string
   /** Its port, when PDM names one. */
   nodePort?: number
+  /** Not one of PDM's remotes (reached directly, or a connection that could not be read): PDM has no page for it. */
+  direct?: boolean
 }
 
 /** A PVE storage on a node (from /resources/list; `content` only where PDM reports it). */

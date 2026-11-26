@@ -24,7 +24,7 @@ test('a PVE cluster reached directly: nodes, guests, storages, history, tasks, u
   const { source, transport } = sourceOf(pve, pveRoutes(NOW))
   assert.deepEqual(await source.checkAccess(), { version: '9.1.2', remotes: 2, unit: 'nodes' })
   const inv = await source.fetchInventory({ maxAgeSeconds: 30 })
-  assert.deepEqual(inv.remotes, [{ id: 'lab', type: 'pve', online: true, webUrl: 'https://pve.example.test:8006' }])
+  assert.deepEqual(inv.remotes, [{ id: 'lab', type: 'pve', online: true, webUrl: 'https://pve.example.test:8006', direct: true }])
   assert.deepEqual(inv.hosts.map((h) => [h.key, h.version, h.online]), [['lab/pve-x1', '9.1.2', true], ['lab/pve-x2', '9.1.1', true]])
   assert.deepEqual(inv.guests.map((g) => [g.key, g.type, g.status]), [['lab/501', 'qemu', 'running'], ['lab/502', 'qemu', 'running'], ['lab/503', 'lxc', 'running'], ['lab/504', 'qemu', 'stopped']])
   assert.deepEqual(inv.guests[0].tags, ['prod', 'web'])
@@ -93,6 +93,10 @@ test('PDM plus a direct PVE: names kept apart, and a failing connection is one u
   assert.ok(snap.hosts.some((h) => h.key === 'pve-fsn-2/pve-x1'))
   const down = snap.remotes.find((r) => r.id === 'backup-y')!
   assert.equal(down.online, false)
+  // Neither a direct nor an unreadable connection is one of PDM's remotes: no PDM link for them.
+  assert.equal(down.direct, true)
+  assert.equal(snap.remotes.find((r) => r.id === 'pve-fsn')!.direct, undefined)
+  assert.equal(snap.remotes.find((r) => r.id === 'pve-fsn-2')!.direct, true)
   assert.ok(snap.warnings.some((w) => /backup-y could not be read/.test(w)))
   // Every part failing is the whole refresh failing, as with one connection.
   const broken = new CompositeSource([{ connection: pve, source: sourceOf(pve, {}).source }])

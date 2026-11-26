@@ -125,7 +125,7 @@ export class PveSource implements EstateSource {
     const nodes = resources.filter((r): r is Extract<PdmResource, { type: 'pve-node' }> => r.type === 'pve-node')
     this.remoteId ??= remoteName(this.connection, (isObj(cluster) && str(cluster.name)) || (nodes.length === 1 ? nodes[0].node : undefined))
     const id = this.remoteId
-    const remote: Remote = { id, type: 'pve', online: true, webUrl: this.client.baseUrl }
+    const remote: Remote = { id, type: 'pve', online: true, webUrl: this.client.baseUrl, direct: true }
     const address = safeTarget(hostOf(this.connection.baseUrl))
     const hosts: Host[] = nodes.map((n) => ({
       key: `${id}/${n.node}`,
@@ -332,7 +332,7 @@ export class PbsSource implements EstateSource {
       ...(typeof s.error === 'string' ? { detailError: s.error } : {})
     }
     const datastores: Datastore[] = stores.map((d) => ({ key: `${id}/${d.store}`, remote: id, name: d.store, used: d.used, total: d.total, usage: d.total > 0 ? d.used / d.total : 0 }))
-    const remote: Remote = { id, type: 'pbs', online: true, webUrl: this.client.baseUrl }
+    const remote: Remote = { id, type: 'pbs', online: true, webUrl: this.client.baseUrl, direct: true }
     return { remotes: [remote], hosts: [host], guests: [], datastores, warnings: [] }
   }
 

@@ -89,6 +89,11 @@ function mini(label: string, iconName: IconName, title: string, run: () => void)
   return h('button', { type: 'button', class: 'btn mini', title, onClick: (e: MouseEvent) => (e.stopPropagation(), run()) }, icon(iconName, 12), label)
 }
 
+/** Whether PDM has a page for this remote: not for one reached directly. */
+function inPdm(snap: EstateSnapshot, remote: string): boolean {
+  return !snap.remotes.find((r) => r.id === remote)?.direct
+}
+
 function bar(buttons: (HTMLButtonElement | null)[]): HTMLElement {
   return h('div', { class: 'actions', role: 'toolbar', 'aria-label': 'Actions' }, buttons)
 }
@@ -96,7 +101,7 @@ function bar(buttons: (HTMLButtonElement | null)[]): HTMLElement {
 export function hostActions(snap: EstateSnapshot, host: Host, presence: OrcaPresence | undefined): HTMLElement {
   const ip = hostAddress(host)
   const ssh = hostSsh(host)
-  const pdm = pdmLink(snap.pdmUrl, host.remote, host.remoteType === 'pve' ? { node: host.node } : undefined)
+  const pdm = inPdm(snap, host.remote) ? pdmLink(snap.pdmUrl, host.remote, host.remoteType === 'pve' ? { node: host.node } : undefined) : undefined
   const web = proxmoxLink(snap, { host })
   const orcaHost = presence?.hosts[0]
   return bar([
@@ -113,7 +118,7 @@ export function guestActions(snap: EstateSnapshot, guest: Guest, presence: OrcaP
   const ips = (guest.addresses ?? []).filter((a) => safeTarget(a) === a)
   const ip = guestAddress(guest)
   const ssh = guestSsh(guest, host)
-  const pdm = pdmLink(snap.pdmUrl, guest.remote, { vmid: guest.vmid })
+  const pdm = inPdm(snap, guest.remote) ? pdmLink(snap.pdmUrl, guest.remote, { vmid: guest.vmid }) : undefined
   const web = proxmoxLink(snap, { guest })
   const consoleUrl = guest.status === 'running' ? consoleLink(snap, guest) : undefined
   const orcaHost = presence?.hosts[0]
