@@ -82,7 +82,7 @@ test('agent reads are capped, cached and backed off per remote', async () => {
 })
 
 test('the Disk column: containers known, VMs by agent, unknown sorted last and never 0 %', () => {
-  const ct = guest(200, 'lxc', { disk: 9 * GiB, maxdisk: 10 * GiB })
+  const ct = withDiskUsage([guest(200, 'lxc', { disk: 9 * GiB, maxdisk: 10 * GiB })], new Map(), undefined, 1)[0]
   const vmKnown = guest(201, 'qemu', { diskUsage: { used: 5 * GiB, total: 50 * GiB, from: 'agent' } })
   const vmUnknown = guest(202, 'qemu', { diskUnknown: 'no-agent' })
   const stopped = guest(203, 'qemu', { status: 'stopped', diskUnknown: 'stopped' })
@@ -97,4 +97,20 @@ test('the Disk column: containers known, VMs by agent, unknown sorted last and n
   const full = guest(204, 'qemu', { diskUsage: { used: 47 * GiB, total: 50 * GiB, from: 'agent' } })
   const keys = diskWarnings({ guests: [ct, vmKnown, vmUnknown, full], datastores: [], hosts: [] } as never).map((w) => w.key)
   assert.deepEqual(keys.sort(), ['guest|r/200', 'guest|r/204'])
+})
+
+test('a stopped container is not an empty one: its last use while running, else unknown', () => {
+  const cache = new Map<string, DiskEntry>()
+  const running = guest(300, 'lxc', { disk: 9 * GiB, maxdisk: 10 * GiB })
+  assert.deepEqual(withDiskUsage([running], cache, undefined, 1_000)[0].diskUsage, { used: 9 * GiB, total: 10 * GiB, from: 'container' })
+  // Stopped, Proxmox reports 0 of the configured size: shown as the last use, marked, not as 0 %.
+  const stopped = withDiskUsage([{ ...running, status: 'stopped', disk: 0 }], cache, undefined, 5_000)[0]
+  assert.equal(stopped.diskUnknown, 'stopped')
+  assert.deepEqual(stopped.diskUsage, { used: 9 * GiB, total: 10 * GiB, from: 'container', asOf: 1_000 })
+  assert.equal(diskShare(stopped), 0.9)
+  // Never seen running: unknown, with no share at all.
+  const never = withDiskUsage([guest(301, 'lxc', { status: 'stopped', disk: 0, maxdisk: 8 * GiB })], cache, undefined, 5_000)[0]
+  assert.equal(never.diskUsage, undefined)
+  assert.equal(diskShare(never), undefined)
+  assert.equal(diskUnknownText(never), 'unknown (stopped)')
 })

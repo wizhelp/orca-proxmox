@@ -190,10 +190,12 @@ export type Guest = {
   /** The last hour, one point a minute, for sparklines. */
   metrics?: Metrics
   /**
-   * Filesystem use inside the guest: from Proxmox for a container, from the QEMU guest agent for a
-   * VM. Absent when unknown; then `diskUnknown` says why (and `maxdisk` is the allocated size).
+   * Filesystem use inside the guest: from Proxmox for a running container, from the QEMU guest agent
+   * for a VM. Absent when unknown; then `diskUnknown` says why (and `maxdisk` is the allocated
+   * size). A stopped guest has no current use (Proxmox reports 0 for a stopped container): it
+   * keeps the last one measured while it ran, with `asOf`, and `diskUnknown` is 'stopped'.
    */
-  diskUsage?: { used: number; total: number; from: 'container' | 'agent' }
+  diskUsage?: { used: number; total: number; from: 'container' | 'agent'; asOf?: number }
   diskUnknown?: DiskUnknown
 }
 

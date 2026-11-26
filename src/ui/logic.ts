@@ -79,9 +79,8 @@ export function filterGuests(guests: readonly Guest[], f: GuestFilter): Guest[] 
 
 export type GuestSort = { column: 'name' | 'status' | 'cpu' | 'mem' | 'disk' | 'uptime' | 'node' | 'backup'; direction: 'asc' | 'desc' }
 
-/** A guest's disk use as a share, or undefined when unknown (a VM without guest agent data). */
+/** A guest's disk use as a share (the last one measured for a stopped guest), or undefined when unknown. */
 export function diskShare(g: Guest): number | undefined {
-  if (g.type === 'lxc') return g.maxdisk ? g.disk / g.maxdisk : undefined
   return g.diskUsage && g.diskUsage.total ? g.diskUsage.used / g.diskUsage.total : undefined
 }
 

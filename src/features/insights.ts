@@ -100,8 +100,8 @@ const fmtBytes = (n: number | undefined) => (n === undefined ? '-' : n >= 1024 *
 const pct = (f: number | undefined) => (f === undefined ? '-' : `${Math.round(f * 100)}%`)
 /** A guest's disk use (containers from Proxmox, VMs from the guest agent), else its allocated size. */
 function diskText(g: Guest): string {
-  const known = g.type === 'lxc' ? (g.maxdisk ? { used: g.disk, total: g.maxdisk } : undefined) : g.diskUsage
-  if (known && known.total > 0) return `${pct(known.used / known.total)} of ${fmtBytes(known.total)}`
+  const known = g.diskUsage
+  if (known && known.total > 0) return `${pct(known.used / known.total)} of ${fmtBytes(known.total)}${known.asOf !== undefined ? ' (last measured while running)' : ''}`
   return g.maxdisk ? `${fmtBytes(g.maxdisk)} allocated, use unknown` : '-'
 }
 

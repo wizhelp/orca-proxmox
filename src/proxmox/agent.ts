@@ -90,20 +90,32 @@ export async function refreshGuestDisks(
   })
 }
 
-/** The guests with disk usage filled in: containers from Proxmox, VMs from the agent cache. */
+/**
+ * The guests with disk usage filled in: running containers from Proxmox, VMs from the agent cache.
+ * A running container's use is remembered in `cache`, so that once stopped (Proxmox then reports
+ * 0) it shows the last use measured, marked as such, rather than an empty disk.
+ */
 export function withDiskUsage(guests: readonly Guest[], cache: Map<string, DiskEntry> | undefined, blocked: Map<string, { until: number; reason: DiskUnknown }> | undefined, now: number): Guest[] {
   return guests.map((g) => {
     const next: Guest = { ...g }
     delete next.diskUsage
     delete next.diskUnknown
-    if (g.type === 'lxc') {
-      if (g.maxdisk > 0) next.diskUsage = { used: g.disk, total: g.maxdisk, from: 'container' }
+    const from = g.type === 'lxc' ? 'container' : 'agent'
+    const entry = cache?.get(g.key)
+    if (g.status !== 'running') {
+      next.diskUnknown = 'stopped'
+      if (entry?.total) next.diskUsage = { used: entry.used ?? 0, total: entry.total, from, asOf: entry.at }
       return next
     }
-    const entry = cache?.get(g.key)
+    if (g.type === 'lxc') {
+      if (g.maxdisk > 0) {
+        next.diskUsage = { used: g.disk, total: g.maxdisk, from }
+        cache?.set(g.key, { at: now, used: g.disk, total: g.maxdisk })
+      } else next.diskUnknown = 'not-read'
+      return next
+    }
     const block = blocked?.get(g.remote)
-    if (g.status !== 'running') next.diskUnknown = 'stopped'
-    else if (entry && entry.total) next.diskUsage = { used: entry.used ?? 0, total: entry.total, from: 'agent' }
+    if (entry && entry.total) next.diskUsage = { used: entry.used ?? 0, total: entry.total, from }
     else if (block && block.until > now) next.diskUnknown = block.reason
     else next.diskUnknown = entry?.unknown ?? 'not-read'
     return next

@@ -164,11 +164,9 @@ export function guestDetails(guest: Guest, snap: EstateSnapshot, presence: OrcaP
       ['Host', `${guest.remote}/${guest.node}`],
       [
         'Disk',
-        guest.type === 'lxc' && guest.maxdisk
-          ? formatUsage(guest.disk, guest.maxdisk)
-          : guest.diskUsage
-            ? `${formatUsage(guest.diskUsage.used, guest.diskUsage.total)} (guest agent; ${formatBytes(guest.maxdisk)} allocated)`
-            : `${formatBytes(guest.maxdisk)} allocated; use ${diskUnknownText(guest)}`
+        guest.diskUsage
+          ? `${formatUsage(guest.diskUsage.used, guest.diskUsage.total)}${guest.diskUsage.from === 'agent' ? ` (guest agent; ${formatBytes(guest.maxdisk)} allocated)` : ''}${guest.diskUsage.asOf !== undefined ? `, last measured ${ago(guest.diskUsage.asOf, now)} while running` : ''}`
+          : `${formatBytes(guest.maxdisk)} allocated; use ${diskUnknownText(guest)}`
       ],
       ['Uptime', formatUptime(guest.uptime)],
       ...(guest.hostname ? ([['Hostname', guest.hostname]] as [string, Child][]) : []),

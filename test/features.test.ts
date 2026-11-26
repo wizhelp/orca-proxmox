@@ -42,7 +42,7 @@ test('disk warnings, with a forecast where the history rises steadily', async ()
   const snap = clone(await renamedEstate())
   assert.deepEqual(diskWarnings(snap), [])
   const ct = snap.guests.find((g) => g.key === 'pve-a/430')!
-  ct.disk = ct.maxdisk * 0.9
+  ct.diskUsage = { used: ct.maxdisk * 0.9, total: ct.maxdisk, from: 'container' }
   snap.datastores[0].usage = 0.82
   // 60 % to 70 % over a day: full in about 3 days.
   snap.datastores[0].usageHistory = Array.from({ length: 48 }, (_, i) => 0.6 + (0.1 * i) / 47)

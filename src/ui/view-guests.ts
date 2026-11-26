@@ -7,7 +7,7 @@ import { actions, app, KEYS } from './app'
 import { meter, sparkline } from './charts'
 import { cx, h } from './dom'
 import { icon } from './icons'
-import { allTags, BACKUP_LABEL, BACKUP_TONE, diskShare, diskUnknownText, filterGuests, guestKind, guestName, nextSort, placeOptions, sortGuests, statusTone, type GuestSort } from './logic'
+import { ago, allTags, BACKUP_LABEL, BACKUP_TONE, diskShare, diskUnknownText, filterGuests, guestKind, guestName, nextSort, placeOptions, sortGuests, statusTone, type GuestSort } from './logic'
 import { chip, dot, guestDetails, select } from './parts'
 
 const COLUMNS: { key: GuestSort['column']; label: string; className?: string }[] = [
@@ -27,13 +27,14 @@ function diskCell(g: Guest): HTMLElement {
   if (share === undefined) {
     return h('td', { class: 'col-disk cell-disk muted', title: `${formatBytes(g.maxdisk)} allocated; use ${diskUnknownText(g)}` }, h('span', null, `${formatBytes(g.maxdisk)}`), h('span', { class: 'small' }, ' ?'))
   }
-  const used = g.type === 'lxc' ? g.disk : g.diskUsage!.used
-  const total = g.type === 'lxc' ? g.maxdisk : g.diskUsage!.total
+  const { used, total, from, asOf } = g.diskUsage!
+  const last = asOf !== undefined ? `, last measured ${ago(asOf, Date.now())} while running` : ''
   return h(
     'td',
-    { class: cx('col-disk cell-disk', share > GUEST_DISK_LIMIT && 'warn-text'), title: `${formatBytes(used)} of ${formatBytes(total)} used${g.type === 'qemu' ? ' (guest agent)' : ''}` },
-    meter(share, `Disk ${formatPercent(share)}`, 40),
-    h('span', null, formatPercent(share))
+    { class: cx('col-disk cell-disk', asOf !== undefined && 'muted', share > GUEST_DISK_LIMIT && 'warn-text'), title: `${formatBytes(used)} of ${formatBytes(total)} used${from === 'agent' ? ' (guest agent)' : ''}${last}` },
+    meter(share, `Disk ${formatPercent(share)}${last}`, 40),
+    h('span', null, formatPercent(share)),
+    asOf !== undefined ? h('span', { class: 'small' }, ' last') : null
   )
 }
 
