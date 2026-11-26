@@ -33,6 +33,25 @@ and tested on its own guest.
 Open questions: who owns the guest's lifetime (the worktree, or the person), and whether to use
 Orca's per-workspace environment recipes (`orca vm recipe`) as the provisioning step.
 
+**Callable by Orca's bots and agents?** Not with today's plugin API (checked against host API 1
+and Orca 1.4's CLI, 2026-11): a plugin's worker can register commands, but they are palette
+commands run by the person (or a status-bar item); `orca plugin dev request` calls a worker
+handler only for a development plugin (installed plugins are refused); and MCP servers, skills
+and tools are reserved contributions, not buildable yet. So a bot cannot ask the plugin for a
+sandbox. If Orca adds a way, the sandbox harness lives in the plugin: a separate token scoped to
+one pool (clone, allocate and power its guests only, never the monitoring token), quotas (guests
+per worktree and in total, CPU, memory, disk), a TTL per guest with cleanup of expired ones, and
+every create shown in the panel's log. What Orca would need to add:
+
+- an agent-callable plugin surface, for example `contributes.tools` (or an MCP server
+  contribution) with a JSON schema per tool, or `orca plugin run <plugin> <command> --data` for
+  installed plugins, limited to commands the manifest marks as callable by agents;
+- the caller's identity in the handler (bot, agent session, workspace), so quotas, TTLs and the
+  log are per caller;
+- the person's approval per plugin tool and bot (as for capabilities), and Orca's own audit of
+  each call;
+- `hosts.add` (above), so the new guest becomes the worktree's host.
+
 ## Guest actions
 
 Start, shutdown and reboot a guest from its details card, behind an explicit confirmation that
