@@ -239,3 +239,11 @@ test('with "Disk use inside VMs" off, the guest agent is never asked', async () 
   assert.equal(snap.guests.find((g) => g.vmid === 501)!.diskUnknown, 'off')
   assert.ok(snap.guests.find((g) => g.vmid === 503)!.diskUsage, 'containers still show their use')
 })
+
+test('a refusal names the right role for the product', async () => {
+  const forbidden = { '/version': { status: 403, body: '{"data":null}' } }
+  const hint = async (c: ConnectionConfig) => sourceOf(c, forbidden).source.checkAccess().then(() => '', (e: { info: { hint?: string } }) => e.info.hint ?? '')
+  assert.match(await hint(pve), /PVEAuditor role on \//)
+  assert.match(await hint(pbs), /Audit role on \//)
+  assert.match(await hint(pdm), /Auditor role on \/resource/)
+})

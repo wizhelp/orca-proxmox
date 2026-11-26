@@ -49,6 +49,25 @@ export function normalizeBaseUrl(input: string): string {
   return `${url.origin}${path}`
 }
 
+/** Hints that name the product the connection is to. */
+const HINTS: Record<ConnectionConfig['kind'], { forbidden: string; serverError: string; unreachable: string }> = {
+  pdm: {
+    forbidden: 'Give the token (and its user) the Auditor role on /resource, or on each remote.',
+    serverError: 'PDM or the remote behind it reported an error; PDM’s own task and system logs say more.',
+    unreachable: 'Check the URL and port (PDM listens on 8443) and that this machine can reach it.'
+  },
+  pve: {
+    forbidden: 'Give the token (and, with privilege separation, its user too) the PVEAuditor role on /.',
+    serverError: 'Proxmox VE reported an error; the node’s system log (journalctl -u pveproxy) says more.',
+    unreachable: 'Check the URL and port (Proxmox VE listens on 8006) and that this machine can reach it.'
+  },
+  pbs: {
+    forbidden: 'Give the token and its user the Audit role on / (or DatastoreAudit on /datastore).',
+    serverError: 'Proxmox Backup Server reported an error; its system log (journalctl -u proxmox-backup-proxy) says more.',
+    unreachable: 'Check the URL and port (Proxmox Backup Server listens on 8007) and that this machine can reach it.'
+  }
+}
+
 export class ProxmoxClient {
   readonly baseUrl: string
   private readonly authorization: string
@@ -92,7 +111,7 @@ export class ProxmoxClient {
         kind: 'forbidden',
         status: 403,
         message: `The token may not read ${path} (403)`,
-        hint: 'Give the token (and its user) the Auditor role on /resource, or on each remote.'
+        hint: HINTS[this.options.connection.kind].forbidden
       })
     }
     if (response.status < 200 || response.status >= 300) {
@@ -102,7 +121,7 @@ export class ProxmoxClient {
         kind: 'http',
         status: response.status,
         message: `${path} answered HTTP ${response.status}${statusText(response.status)}`,
-        ...(response.status >= 500 ? { hint: 'PDM or the remote behind it reported an error; PDM’s own task and system logs say more.' } : {})
+        ...(response.status >= 500 ? { hint: HINTS[this.options.connection.kind].serverError } : {})
       })
     }
     return parseData<T>(response.body, response.contentType, path)
@@ -123,7 +142,7 @@ export class ProxmoxClient {
       info.hint =
         'Proxmox uses a self-signed certificate by default. Pin its SHA-256 fingerprint (shown under Certificates in Proxmox) after checking it matches.'
     } else if (error.kind === 'unreachable' || error.kind === 'timeout') {
-      info.hint = 'Check the URL and port (PDM listens on 8443) and that this machine can reach it.'
+      info.hint = HINTS[this.options.connection.kind].unreachable
     }
     return new ApiError(info)
   }
