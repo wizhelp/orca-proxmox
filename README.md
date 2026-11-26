@@ -10,6 +10,21 @@ can be combined, and every connection shows as part of one estate.
 
 It is **read-only**: it only sends `GET` requests, and the token it needs cannot change anything.
 
+## Choose your setup
+
+Each way of connecting adds to the one before; all of them are read-only towards Proxmox.
+
+| Setup | What it needs | What it adds |
+| --- | --- | --- |
+| **PDM** | A read-only PDM token (Auditor role), HTTPS to PDM (8443) | Every remote's hosts, guests and storages, containers' disk use, PBS datastores and backups, tasks, alerts, the planner, Copy for AI |
+| **PVE and PBS directly** (instead of PDM, or beside it) | A read-only token on each server (PVEAuditor, Audit), HTTPS to each (8006, 8007) | The same per connection; one connection shows one cluster or one standalone host |
+| **+ SSH tunnel, enrich only** | Per PVE: SSH to the node (22) with a forward-only key, and a read-only PVE token; nothing else opened | VM disk use from the QEMU guest agent and what PDM cannot give (storage content types, pending updates), added to the guests PDM shows |
+| **+ hosts connected to Orca over SSH** | The Proxmox nodes (or the guests Orca runs on) added to Orca as SSH targets or paired servers | Where Orca runs on the map (bots, workspaces, agents per node or guest), *Open Orca terminal here*, and the base for per-worktree VMs ([BACKLOG.md](BACKLOG.md)) |
+
+**Recommended:** PDM, plus the Proxmox hosts connected to Orca over SSH, plus SSH-tunnelled
+enrich-only connections if you want VM disk use. Each level is set up in
+[Setup](#setup), and an agent can do all of it with [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md).
+
 ## Set it up with your agent
 
 Let your coding agent (Claude Code, Codex, an Orca bot) do the setup: it creates a read-only token
@@ -271,6 +286,54 @@ The direct connections use these endpoints, all `GET`:
 | PVE | `/version`, `/cluster/status`, `/cluster/resources`, `/nodes/{node}/status`, `/cluster/tasks`, `/nodes/{node}/apt/update`, `/nodes/{node}/network`, `/nodes/{node}/config`, guest configs, `…/rrddata`, `/nodes/{node}/qemu/{vmid}/agent/get-fsinfo` |
 | PBS | `/version`, `/nodes/localhost/status`, `/status/datastore-usage` (else `/admin/datastore`), `/admin/datastore/{store}/namespace` and `/snapshots`, `…/rrd`, `/nodes/localhost/tasks`, `/nodes/localhost/apt/update`, `/nodes/localhost/network` |
 
+### Through an SSH tunnel (enrich only)
+
+For a PVE (or PBS) whose API is closed to the network, with only SSH open. The plugin runs the
+system's OpenSSH client (`ssh -N -L 127.0.0.1:<free port>:127.0.0.1:8006`), without your
+`~/.ssh/config` and with every option explicit (`BatchMode`, `IdentitiesOnly`,
+`ExitOnForwardFailure`, `StrictHostKeyChecking=yes`), and talks to the API through it, still
+checking the PVE certificate's pin. It restarts a tunnel that drops, with a growing pause, and stops
+it when the connection changes or Orca stops the plugin. Windows 10 and later include OpenSSH;
+on macOS and Linux it is `/usr/bin/ssh`.
+
+**On the PVE node** (as root), a user that can only forward to the API, and a read-only token:
+
+```sh
+useradd --system --create-home --shell /usr/sbin/nologin orca-tunnel
+install -d -m 700 -o orca-tunnel -g orca-tunnel /home/orca-tunnel/.ssh
+# The public key from Orca's machine (below), allowed to forward to the API and nothing else.
+echo 'restrict,port-forwarding,permitopen="127.0.0.1:8006",command="/bin/false" ssh-ed25519 AAAA… orca-proxmox' \
+  > /home/orca-tunnel/.ssh/authorized_keys
+chown orca-tunnel:orca-tunnel /home/orca-tunnel/.ssh/authorized_keys; chmod 600 /home/orca-tunnel/.ssh/authorized_keys
+# A read-only token as in "Without PDM" (PVEAuditor on / for the user and the token).
+```
+
+`restrict` turns off everything (shell, agent and X11 forwarding, PTY), `port-forwarding` allows
+forwards again and `permitopen` limits them to the API. sshd's `AllowTcpForwarding` must not be
+`no` for this user. For PBS, use port 8007.
+
+**On Orca's machine**, a key without a passphrase (the plugin cannot type one), readable by you only:
+
+```sh
+ssh-keygen -t ed25519 -N '' -C orca-proxmox -f ~/.ssh/orca-proxmox      # PowerShell: -N '""'
+```
+
+**In Settings**, add (or edit) the PVE connection: base URL `https://<node>:8006`, the token, the
+certificate fingerprint (read it on the node: `openssl x509 -in /etc/pve/local/pve-ssl.pem
+-noout -fingerprint -sha256`), then **Reach via SSH tunnel** with the SSH host, port, user
+(`orca-tunnel`), identity file (`~/.ssh/orca-proxmox` as an absolute path) and target
+(`127.0.0.1:8006`). Press **Test**: it connects once accepting the server's SSH host key and
+shows its fingerprint. Compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the
+node, press **It matches: pin this key**, then **Save**. From then on any other host key is
+refused.
+
+**Enrich only** (PVE, usually with PDM): the connection then adds nothing of its own to the
+estate. For each guest it shows with the same node name and VMID as a guest PDM shows, VM disk
+use is read from its guest agent; its nodes' storage content types and pending updates fill in
+what PDM does not report. Where the node is named differently in PDM, map it (`pve-x1=pve-a`, or
+`pve-x1=remote/node`). A guest that matches more than one of PDM's is left alone, and a connection
+that matches nothing says so in the warnings. PDM's own data always comes first.
+
 ## How backups are matched
 
 A PBS snapshot names a guest only by type and VMID (`vm/100`, `ct/101`), not by the cluster it
@@ -350,11 +413,15 @@ through PDM, on the backup scan's cadence; the Auditor role covers both.
   checked, the plugin shows version drift only.
 - **Guest disk use of a VM** is known only to its QEMU guest agent; Proxmox itself knows the
   allocated size. PDM 1.1 does not pass the agent call on, so through PDM a VM shows its allocated
-  size and *unknown* use; a direct PVE connection reads it where the agent runs and the token may
+  size and *unknown* use; a direct PVE connection (or an enrich-only one through an
+  [SSH tunnel](#through-an-ssh-tunnel-enrich-only)) reads it where the agent runs and the token may
   ask it (see [Without PDM](#without-pdm-pve-and-pbs-directly)). Each VM is read every 10 minutes
   at most, 24 per refresh and two at a time, and no new read starts after 20 seconds in one
   refresh; a remote whose API has no agent call is not asked again for 6 hours, nor is a VM that
   the token may not ask.
+- **SSH tunnels** need the system's OpenSSH client and a key without a passphrase; the first
+  request after a tunnel dropped waits for it to come up again (up to 20 s), and a tunnel that keeps
+  failing is retried after a pause that grows to a minute.
 - **Several connections** are read side by side; their remotes, guests and tasks are merged.
   Remote names come from the configuration (see [Without PDM](#without-pdm-pve-and-pbs-directly)),
   so they stay the same whichever connections answer. Two direct connections of the same name are
@@ -397,6 +464,11 @@ See [SECURITY.md](SECURITY.md) for the details and the residual risks. In short:
 - With a pinned fingerprint, the TLS handshake finishes and the certificate is compared **before**
   any HTTP is sent, so a mismatched server never sees the token. Without a pin, the system CAs
   and hostname checks apply. Only `https://` URLs are accepted.
+- An SSH tunnel runs the system's `ssh` without a shell and without your SSH config, with only
+  the configured key, no password or prompt, and the server's host key pinned like the
+  certificate (learnt only by a test you confirm, never silently); the TLS pin still applies
+  through it. The tunnel's settings are bound to the sealed secret with the rest of the endpoint.
+  On the server, the key may only forward to the API (`restrict,port-forwarding,permitopen=…`).
 - Each connection (PDM, PVE or PBS) has its own sealed secret entry, bound to that connection's
   URL, token ID and pin; a secret carries over only to the same base URL (path included) and
   token ID, so a token is never sent to a server it was not entered for, not even by a refresh
@@ -464,6 +536,7 @@ src/proxmox/pdm.ts       the PDM source
 src/proxmox/direct.ts    PVE and PBS reached directly
 src/proxmox/composite.ts several connections as one estate
 src/proxmox/agent.ts     VM disk use from the guest agent, cached and paced
+src/proxmox/tunnel.ts    SSH tunnels for direct connections (ssh -N -L, pinned host key)
 src/proxmox/backups.ts   snapshot-to-guest matching
 src/presence.ts          per node/guest rollups: guests, backups, Orca presence
 src/orca/inventory.ts    Orca hosts, bots and workspaces from the orca CLI
