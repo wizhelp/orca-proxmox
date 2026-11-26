@@ -65,6 +65,7 @@ export const fixtureConnection: ConnectionConfig = {
 
 export function fixtureConfig(configured: boolean): ConfigAnswer {
   return {
+    connections: configured ? [{ ...fixtureConnection, hasSecret: true }] : [],
     connection: configured ? { ...fixtureConnection, hasSecret: true } : null,
     secretsProtection: 'os-keyring',
     settings: DEFAULT_SETTINGS,

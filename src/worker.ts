@@ -7,6 +7,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 import { EstateService, StaleRefreshError } from './estate'
 import {
   connectionScope,
+  estateScope,
   DEFAULT_SETTINGS,
   normalizeFingerprint,
   type ConnectionConfig,
@@ -14,12 +15,14 @@ import {
   type EstateResponse,
   type EstateSnapshot,
   type PluginSettings,
-  type SourceError
+  type SourceError,
+  type SourceKind
 } from './model'
+import { CompositeSource, type FailedPart, type Part } from './proxmox/composite'
 import type { ConfigAnswer, ConnectionInput, ImportStatus, SecretsProtection, TestAnswer } from './protocol'
 import { ApiError, normalizeBaseUrl, ProxmoxClient } from './proxmox/client'
 import { nodeTransport, type Transport } from './proxmox/http'
-import { createSource } from './proxmox/source'
+import { createSource, type AccessCheck } from './proxmox/source'
 import { nodeCliRunner } from './orca/cli'
 import type { CliRunner } from './orca/inventory'
 import { parseLink, type OrcaLinks } from './orca/match'
@@ -121,8 +124,17 @@ function cleanSecret(secret: string | undefined): string | undefined {
   return value
 }
 
+const KINDS: Record<SourceKind, string> = { pdm: 'PDM', pve: 'PVE', pbs: 'PBS' }
+/** A direct connection's name becomes a remote's key: plain characters only. */
+const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/
+
 /** Validated connection fields, or an InputError naming what is wrong. */
 function validate(input: ConnectionInput, id: string): ConnectionConfig {
+  const kind: SourceKind = input.kind === 'pve' || input.kind === 'pbs' ? input.kind : 'pdm'
+  const name = (input.name ?? '').trim()
+  if (name && (kind === 'pdm' || !NAME.test(name))) {
+    throw new InputError(kind === 'pdm' ? 'A PDM connection has no name: its remotes keep theirs.' : 'The name may hold letters, digits, ".", "_" and "-" (40 at most).')
+  }
   let baseUrl: string
   try {
     baseUrl = normalizeBaseUrl(input.baseUrl ?? '')
@@ -137,7 +149,7 @@ function validate(input: ConnectionInput, id: string): ConnectionConfig {
     if (!normalized) throw new InputError('The fingerprint must be a SHA-256 fingerprint: 32 hex bytes, colons optional')
     fingerprint = normalized
   }
-  return { id, kind: 'pdm', baseUrl, tokenId, fingerprint }
+  return { id, kind, baseUrl, tokenId, fingerprint, ...(name ? { name } : {}) }
 }
 
 export default function activate(orca: OrcaWorkerApi): void {
@@ -166,14 +178,19 @@ export default function activate(orca: OrcaWorkerApi): void {
     return secret
   }
 
-  async function loadConnection(): Promise<ConnectionConfig | null> {
+  /** Every saved connection: PDM and PVE or PBS servers reached directly. */
+  async function loadConnections(): Promise<ConnectionConfig[]> {
     const stored = await orca.storage.get(CONNECTIONS_KEY)
-    // A list, so more connections (single PVE or PBS hosts) can join later; v1 uses the first.
     const list = Array.isArray(stored) ? (stored as unknown as ConnectionConfig[]) : []
-    const first = list[0]
-    if (!first || typeof first !== 'object' || typeof first.baseUrl !== 'string' || typeof first.id !== 'string') return null
-    return first
+    return list.filter((c) => c && typeof c === 'object' && typeof c.baseUrl === 'string' && typeof c.id === 'string' && ['pdm', 'pve', 'pbs'].includes(c.kind))
   }
+
+  async function loadConnection(): Promise<ConnectionConfig | null> {
+    return (await loadConnections())[0] ?? null
+  }
+
+  /** Orca placements are kept per estate: its connections' URLs. */
+  const linksKey = (list: readonly ConnectionConfig[]) => list.map((c) => c.baseUrl).sort().join(' ')
 
   /**
    * Bumped on every configuration change: answers, terminal targets and alerts of an older
@@ -206,17 +223,20 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
   }
 
+  /** Runs `read` as a reader of every connection in `list`. */
+  function asReaders<T>(list: readonly ConnectionConfig[], read: () => Promise<T>): Promise<T> {
+    return list.reduceRight<() => Promise<T>>((inner, connection) => () => asReader(connection, inner), read)()
+  }
+
   /** After a save or a clear: nothing of the previous configuration is used any more. */
-  async function switched(previous: ConnectionConfig | null): Promise<void> {
+  async function switched(previous: readonly ConnectionConfig[]): Promise<void> {
     generation += 1
     estate.reset()
     latest = undefined
     loop?.reset()
     await orca.storage.set(ALERT_STATE_KEY, null).catch(() => undefined)
-    if (previous) {
-      retiring.set(connectionScope(previous), previous)
-      await sweepRetired()
-    }
+    for (const old of previous) retiring.set(connectionScope(old), old)
+    if (previous.length) await sweepRetired()
   }
 
   async function loadSettings(): Promise<PluginSettings> {
@@ -249,10 +269,11 @@ export default function activate(orca: OrcaWorkerApi): void {
   }
 
   async function configAnswer(): Promise<ConfigAnswer> {
-    const connection = await loadConnection()
+    const connections = await Promise.all((await loadConnections()).map((c) => view(c)))
     const status = await orca.storage.get(IMPORT_STATUS_KEY)
     return toJson<ConfigAnswer>({
-      connection: await view(connection),
+      connections: connections.filter((c): c is ConnectionView => c !== null),
+      connection: connections[0] ?? null,
       secretsProtection: await secretsProtection(),
       settings: await loadSettings(),
       importPath: importPath ?? importFile(),
@@ -298,8 +319,13 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   /** Saves a connection as the Settings form does: new revision, sealed and bound secret, switch. */
   async function saveConnection(input: ConnectionInput): Promise<ConnectionConfig> {
-    const current = await loadConnection()
-    const next: ConnectionConfig = { ...validate(input, current?.id ?? 'default'), revision: randomUUID() }
+    const list = await loadConnections()
+    // An id changes that connection; `new` (or none while there is none) adds one.
+    const id = input.id === 'new' || (!input.id && !list.length) ? (list.length ? `c-${randomUUID().slice(0, 8)}` : 'default') : (input.id ?? list[0].id)
+    const current = list.find((c) => c.id === id) ?? null
+    if (input.id && input.id !== 'new' && !current) throw new InputError('That connection no longer exists; reload Settings.')
+    const next: ConnectionConfig = { ...validate(input, id), revision: randomUUID() }
+    if (list.some((c) => c.id !== id && c.baseUrl === next.baseUrl)) throw new InputError('Another connection already uses this URL.')
     const fresh = cleanSecret(input.secret)
     if (fresh && (await secretsProtection()) === 'unavailable') {
       throw new InputError('Orca cannot encrypt secrets on this machine (no OS keyring), and this plugin will not store the token in plain text.')
@@ -308,14 +334,15 @@ export default function activate(orca: OrcaWorkerApi): void {
     // keep reading theirs. Then switch the configuration in one write.
     const secret = await secretFor(next, current, input)
     if (secret) await orca.secrets.set(secretKey(next), await sealer().seal(secret, binding(next)))
+    const nextList = current ? list.map((c) => (c.id === id ? next : c)) : [...list, next]
     try {
-      await orca.storage.set(CONNECTIONS_KEY, [toJson(next)])
+      await orca.storage.set(CONNECTIONS_KEY, toJson(nextList) as unknown as JsonValue)
     } catch (error) {
       if (secret) await orca.secrets.delete(secretKey(next)).catch(() => undefined)
       throw error
     }
-    await switched(current)
-    log(`Saved connection to ${next.baseUrl} as ${next.tokenId}${next.fingerprint ? ' (pinned)' : ''}`)
+    await switched(current ? [current] : [])
+    log(`Saved the ${KINDS[next.kind]} connection to ${next.baseUrl} as ${next.tokenId}${next.fingerprint ? ' (pinned)' : ''}`)
     return next
   }
 
@@ -367,7 +394,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   }
 
   async function useImported(
-    imported: { baseUrl: string; tokenId: string; fingerprint: string; secret: string },
+    imported: { baseUrl: string; tokenId: string; fingerprint: string; secret: string; kind?: string; name?: string },
     fileFate: string,
     epoch: number,
     trigger: string,
@@ -382,11 +409,12 @@ export default function activate(orca: OrcaWorkerApi): void {
       await finish(false, `${problem} Nothing was changed.`, fileFate)
       return true
     }
-    const candidate: ConnectionConfig = { ...validate({ ...fields, secret }, 'default') }
-    let access: { version: string; remotes: number }
+    const input: ConnectionInput = { ...fields, kind: fields.kind as SourceKind | undefined, secret }
+    const candidate: ConnectionConfig = { ...validate(input, 'import') }
+    let access: AccessCheck
     try {
       const client = new ProxmoxClient({ connection: candidate, secret: secret.trim(), transport, probe })
-      access = await createSource(candidate.kind, client).checkAccess()
+      access = await createSource(candidate.kind, client, candidate).checkAccess()
     } catch (error) {
       const info = toSourceError(error)
       await finish(
@@ -402,15 +430,20 @@ export default function activate(orca: OrcaWorkerApi): void {
         await recordImport(false, 'The connection was changed in Settings while the file was imported; the import was dropped.', fileFate)
         return
       }
-      await saveConnection({ ...fields, secret })
-      await recordImport(true, `Imported the connection to ${candidate.baseUrl} as ${candidate.tokenId}${candidate.fingerprint ? ', pinned' : ''} (${trigger}). Connection test: PDM ${access.version}, ${access.remotes} remotes visible.`, fileFate)
+      // The same URL again replaces that connection; a new one is added beside the others.
+      const list = await loadConnections()
+      const same = list.find((c) => c.baseUrl === candidate.baseUrl)
+      await saveConnection({ ...input, id: same?.id ?? (list.length ? 'new' : undefined) })
+      await recordImport(true, `Imported the ${KINDS[candidate.kind]} connection to ${candidate.baseUrl} as ${candidate.tokenId}${candidate.fingerprint ? ', pinned' : ''} (${trigger}). Connection test: ${KINDS[candidate.kind]} ${access.version}, ${access.remotes} ${access.unit ?? 'remotes'} visible.`, fileFate)
     })
     return true
   }
 
   /** What is wrong with an imported connection, by field and without any value; else undefined. */
-  function importProblem(c: { baseUrl: string; tokenId: string; fingerprint: string; secret: string }): string | undefined {
+  function importProblem(c: { baseUrl: string; tokenId: string; fingerprint: string; secret: string; kind?: string; name?: string }): string | undefined {
     const problems: string[] = []
+    if (c.kind !== undefined && !['pdm', 'pve', 'pbs'].includes(c.kind)) problems.push('kind is not pdm, pve or pbs')
+    if (c.name !== undefined && c.name !== '' && ((c.kind ?? 'pdm') === 'pdm' || !NAME.test(c.name))) problems.push('name is not a plain name, or is given for a PDM connection')
     try {
       normalizeBaseUrl(c.baseUrl)
     } catch {
@@ -463,23 +496,27 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.log(maskKnown(`Connection import file: ${importPath ?? importFile()}`))
   void importConnection('start')
 
-  orca.panels.handle('config.clear', async () => {
+  orca.panels.handle('config.clear', async (input) => {
+    const raw = (input as { id?: unknown } | undefined)?.id
+    const id = typeof raw === 'string' ? raw : undefined
     await withConfigLock(async () => {
       configEpoch += 1
-      const current = await loadConnection()
-      await orca.storage.set(CONNECTIONS_KEY, [])
+      const list = await loadConnections()
+      const gone = id ? list.filter((c) => c.id === id) : list
+      await orca.storage.set(CONNECTIONS_KEY, toJson(list.filter((c) => !gone.includes(c))) as unknown as JsonValue)
       await orca.storage.set(IMPORT_STATUS_KEY, null).catch(() => undefined)
-      await switched(current)
+      await switched(gone)
     })
-    log('Removed the connection and its secret')
+    log(id ? 'Removed a connection and its secret' : 'Removed the connections and their secrets')
     return configAnswer()
   })
 
   orca.panels.handle('connection.test', async (input, { signal }): Promise<TestAnswer> => {
-    const current = await loadConnection()
+    const list = await loadConnections()
+    const current = input.id && input.id !== 'new' ? (list.find((c) => c.id === input.id) ?? null) : input.id === 'new' ? null : (list[0] ?? null)
     let next: ConnectionConfig
     try {
-      next = validate(input, current?.id ?? 'default')
+      next = validate(input, current?.id ?? 'new')
     } catch (error) {
       return { ok: false, error: { kind: 'invalid-config', message: (error as Error).message } }
     }
@@ -489,10 +526,10 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
     try {
       const client = new ProxmoxClient({ connection: next, secret, transport, probe })
-      const access = await createSource(next.kind, client).checkAccess(signal)
-      log(`Connection test to ${next.baseUrl}: PDM ${access.version}, ${access.remotes} remotes visible`)
+      const access = await createSource(next.kind, client, next).checkAccess(signal)
+      log(`Connection test to ${next.baseUrl}: ${KINDS[next.kind]} ${access.version}, ${access.remotes} ${access.unit ?? 'remotes'} visible`)
       // Scrubbed like every answer: a server could put anything in what it calls its version.
-      return toJson<TestAnswer>(redactDeep({ ok: true, version: scrubLine(access.version, knownSecrets, 40), remotes: access.remotes }, [...knownSecrets]))
+      return toJson<TestAnswer>(redactDeep({ ok: true, version: scrubLine(access.version, knownSecrets, 40), remotes: access.remotes, ...(access.unit ? { unit: access.unit } : {}) }, [...knownSecrets]))
     } catch (error) {
       const info = toSourceError(error)
       log(`Connection test to ${next.baseUrl} failed: ${info.kind}: ${info.message}`)
@@ -521,8 +558,8 @@ export default function activate(orca: OrcaWorkerApi): void {
   }
 
   /** The panel's action is for the estate it shows: refused when that is not the current one. */
-  function requireScope(scope: unknown, connection: ConnectionConfig | null): void {
-    if (!connection || typeof scope !== 'string' || scope !== connectionScope(connection)) {
+  function requireScope(scope: unknown, list: readonly ConnectionConfig[]): void {
+    if (!list.length || typeof scope !== 'string' || scope !== estateScope(list)) {
       throw new InputError('The connection changed since this view was loaded; it is refreshed now, try again.')
     }
   }
@@ -530,14 +567,15 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('orca.link', async ({ hostKey, link, scope }) => {
     if (typeof hostKey !== 'string' || !hostKey) throw new InputError('hostKey is required')
     if (link !== null && parseLink(link) === undefined) throw new InputError('link must be node:<key>, guest:<key>, none or null')
-    const connection = await loadConnection()
-    if (!connection) throw new InputError('Connect to PDM first.')
-    requireScope(scope, connection)
-    const links = { ...(await loadLinks(connection.baseUrl)) }
+    const list = await loadConnections()
+    if (!list.length) throw new InputError('Connect to Proxmox first.')
+    requireScope(scope, list)
+    const key = linksKey(list)
+    const links = { ...(await loadLinks(key)) }
     if (link === null) delete links[hostKey]
     else links[hostKey] = link
     const all = await orca.storage.get(ORCA_LINKS_BY_ESTATE_KEY)
-    await orca.storage.set(ORCA_LINKS_BY_ESTATE_KEY, { ...(isRecord(all) ? (all as Record<string, JsonValue>) : {}), [connection.baseUrl]: links })
+    await orca.storage.set(ORCA_LINKS_BY_ESTATE_KEY, { ...(isRecord(all) ? (all as Record<string, JsonValue>) : {}), [key]: links })
     await orca.storage.set(ORCA_LINKS_KEY, null)
     latest = undefined
     return { links }
@@ -566,35 +604,39 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   async function readEstate(force: boolean | undefined, started: number): Promise<EstateResponse> {
     const settings = await loadSettings()
-    const connection = await loadConnection()
-    if (!connection) return { state: 'unconfigured', refreshSeconds: settings.refreshSeconds }
-    return asReader(connection, () => readEstateOf(connection, settings, force, started))
+    const list = await loadConnections()
+    if (!list.length) return { state: 'unconfigured', refreshSeconds: settings.refreshSeconds }
+    return asReaders(list, () => readEstateOf(list, settings, force, started))
   }
 
-  async function readEstateOf(connection: ConnectionConfig, settings: PluginSettings, force: boolean | undefined, started: number): Promise<EstateResponse> {
+  /**
+   * One connection is read as before; several are read as one estate (composite.ts), where a
+   * connection without its secret becomes an unreachable remote rather than failing the rest.
+   */
+  async function readEstateOf(list: ConnectionConfig[], settings: PluginSettings, force: boolean | undefined, started: number): Promise<EstateResponse> {
     const refreshSeconds = settings.refreshSeconds
-    const secret = await readSecret(connection)
-    if (!secret) {
-      return {
-        state: 'error',
-        refreshSeconds,
-        error: {
-          kind: 'not-configured',
-          message: 'No token secret is stored for this connection.',
-          hint: 'Open Settings in this panel and enter the token secret.'
-        }
-      }
+    const noSecret: SourceError = { kind: 'not-configured', message: 'No token secret is stored for this connection.', hint: 'Open Settings in this panel and enter the token secret.' }
+    const parts: Part[] = []
+    const failed: FailedPart[] = []
+    for (const c of list) {
+      const secret = await readSecret(c)
+      if (secret) parts.push({ connection: c, source: createSource(c.kind, new ProxmoxClient({ connection: c, secret, transport, probe }), c) })
+      else failed.push({ connection: c, reason: noSecret.message })
     }
+    if (!parts.length) return { state: 'error', refreshSeconds, error: list.length > 1 ? { ...noSecret, message: 'No token secret is stored for these connections.' } : noSecret }
+    const single = list.length === 1
+    const connection: ConnectionConfig = single ? list[0] : { id: estateScope(list), kind: parts[0].source.kind, baseUrl: linksKey(list), tokenId: '', fingerprint: '' }
+    const source = single ? parts[0].source : new CompositeSource(parts, failed)
+    const pdmUrl = list.find((c) => c.kind === 'pdm')?.baseUrl
     try {
-      const client = new ProxmoxClient({ connection, secret, transport, probe })
-      const snapshot = await estate.get(createSource(connection.kind, client), connection, settings, {
+      const snapshot = await estate.get(source, connection, settings, {
         force,
         // Half the interval, so a panel polling on that interval always gets a fresh read.
         maxAgeMs: Math.max(5000, (refreshSeconds * 1000) / 2)
       })
-      let built: EstateSnapshot = { ...snapshot, pdmUrl: connection.baseUrl }
+      let built: EstateSnapshot = { ...snapshot, ...(pdmUrl ? { pdmUrl } : {}) }
       if (settings.orcaAwareness) {
-        const orcaAnswer = await orcaView.view(snapshot, await loadLinks(connection.baseUrl), force)
+        const orcaAnswer = await orcaView.view(snapshot, await loadLinks(linksKey(list)), force)
         if (orcaAnswer.error) log(`Orca inventory: ${orcaAnswer.error}`)
         built = { ...built, orca: orcaAnswer }
       }
@@ -606,12 +648,12 @@ export default function activate(orca: OrcaWorkerApi): void {
         return { state: 'error', refreshSeconds, error: { kind: 'unreachable', message: 'The connection changed during the refresh.' } }
       }
       const info = toSourceError(error)
-      log(`Refresh from ${connection.baseUrl} failed: ${info.kind}: ${info.message}`)
+      log(`Refresh from ${list.map((c) => c.baseUrl).join(', ')} failed: ${info.kind}: ${info.message}`)
       const lastGood = estate.lastGood
       return toJson<EstateResponse>({
         state: 'error',
         error: info,
-        lastGood: lastGood?.connectionId === connectionScope(connection) ? outboundSnapshot(lastGood, [...knownSecrets]) : undefined,
+        lastGood: lastGood?.connectionId === estateScope(list) ? outboundSnapshot(lastGood, [...knownSecrets]) : undefined,
         refreshSeconds
       })
     }
@@ -621,7 +663,7 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   orca.panels.handle('orca.terminal', async ({ hostKey, title, scope }) => {
     if (typeof hostKey !== 'string' || !hostKey) throw new InputError('hostKey is required')
-    requireScope(scope, await loadConnection())
+    requireScope(scope, await loadConnections())
     if (!latest) await loadEstate(false)
     // The target must come from the estate the panel showed, not one loaded since.
     if (latest?.connectionId !== scope) throw new InputError('The connection changed since this view was loaded; it is refreshed now, try again.')

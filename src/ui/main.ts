@@ -1,7 +1,7 @@
 // The Proxmox panel: an HTML panel (Orca's components panels cannot drag and drop). It never talks
 // to Proxmox: every call goes through the worker, which holds the token. It polls the worker on
 // the refresh interval while visible, and keeps the person's choices in plugin storage.
-import { connectionScope, type EstateResponse } from '../model'
+import { estateScope, type EstateResponse } from '../model'
 import { orcaByPlace } from '../presence'
 import { actions, app, failure, KEYS, type Tab } from './app'
 import { stackBar } from './charts'
@@ -213,7 +213,7 @@ async function refresh(force = false): Promise<void> {
   // A forced refresh (after saving the connection) does not wait for one still running.
   if (app.loading && !force) return
   const seq = ++refreshSeq
-  const scope = app.config?.connection ? connectionScope(app.config.connection) : null
+  const scope = app.config?.connections.length ? estateScope(app.config.connections) : null
   app.loading = true
   const label = document.getElementById('updated')
   if (label) label.textContent = updatedText()
@@ -352,7 +352,7 @@ const CONNECTIONS_KEY = 'connections'
 
 /** The connection was saved or removed, maybe in another panel: drop the old estate and its actions. */
 async function connectionChanged(): Promise<void> {
-  const scopeOf = () => (app.config?.connection ? connectionScope(app.config.connection) : null)
+  const scopeOf = () => (app.config?.connections.length ? estateScope(app.config.connections) : null)
   const before = scopeOf()
   await loadConfig()
   if (scopeOf() === before) return

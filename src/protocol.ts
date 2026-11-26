@@ -1,18 +1,23 @@
 // The panel <-> worker contract, declared once: src/panel.tsx and src/worker.ts both read it.
 // Nothing here ever carries the token secret back to the panel.
-import type { ConnectionView, EstateResponse, PluginSettings, SourceError } from './model'
+import type { ConnectionView, EstateResponse, PluginSettings, SourceError, SourceKind } from './model'
 
 export type ConnectionInput = {
+  /** Which connection: an existing id to change it, `new` to add one; absent means the first (or a new one). */
+  id?: string
+  /** PDM (default), or a Proxmox VE or Backup Server reached directly. */
+  kind?: SourceKind
+  /** A direct connection's name in the estate (letters, digits, `.`, `_`, `-`); else the server's own. */
+  name?: string
   baseUrl: string
   tokenId: string
   fingerprint: string
-  /** A new secret; empty keeps the stored one (only while the base URL's origin is unchanged). */
+  /** A new secret; empty keeps the stored one (only for the same URL, token and pin). */
   secret?: string
 }
 
 export type SecretsProtection = 'os-keyring' | 'unavailable' | 'unknown'
 
-/** The last import from the import file: when, whether it worked, and why not. Never its content. */
 /**
  * The last import from the import file: when, whether it worked and why not (`message`, capped),
  * and what became of the file (`file`, never cut: it names any path where the secret may remain).
@@ -20,6 +25,9 @@ export type SecretsProtection = 'os-keyring' | 'unavailable' | 'unknown'
 export type ImportStatus = { at: number; ok: boolean; message: string; file?: string }
 
 export type ConfigAnswer = {
+  /** Every saved connection (PDM, PVE, PBS), without secrets. */
+  connections: ConnectionView[]
+  /** The first of them, for older callers. */
   connection: ConnectionView | null
   secretsProtection: SecretsProtection
   settings: PluginSettings
@@ -29,7 +37,7 @@ export type ConfigAnswer = {
 }
 
 export type TestAnswer =
-  | { ok: true; version: string; remotes: number }
+  | { ok: true; version: string; remotes: number; unit?: 'nodes' | 'datastores' }
   | { ok: false; error: SourceError }
 
 declare module 'orca' {
@@ -38,8 +46,8 @@ declare module 'orca' {
     'config.get': { output: ConfigAnswer }
     /** Validates and saves the connection; the secret goes to Orca's encrypted secrets. */
     'config.save': { input: ConnectionInput; output: ConfigAnswer }
-    /** Removes the connection and its stored secret. */
-    'config.clear': { output: ConfigAnswer }
+    /** Removes one connection (`id`) and its stored secret, or all of them. */
+    'config.clear': { input: { id?: string }; output: ConfigAnswer }
     /** Imports the import file now, if there is one. */
     'config.import': { output: ConfigAnswer & { found: boolean } }
     /** Tries the given (unsaved) connection: PDM version and how many remotes the token sees. */

@@ -31,7 +31,7 @@ export function importFile(): string {
 }
 
 /** What the file holds: the Settings form's fields. */
-export type ImportedConnection = { baseUrl: string; tokenId: string; fingerprint: string; secret: string }
+export type ImportedConnection = { baseUrl: string; tokenId: string; fingerprint: string; secret: string; kind?: string; name?: string }
 
 /**
  * The file's final state. `untouched`: never taken, still under the public name at `path`.
@@ -53,7 +53,7 @@ export const MAX_BYTES = 16 * 1024
 /** Wiped in pieces of this size, up to WIPE_LIMIT; a larger file is only wiped in part. */
 const WIPE_CHUNK = 64 * 1024
 const WIPE_LIMIT = 64 * 1024 * 1024
-const FIELDS = new Set(['baseUrl', 'tokenId', 'fingerprint', 'secret'])
+const FIELDS = new Set(['baseUrl', 'tokenId', 'fingerprint', 'secret', 'kind', 'name'])
 
 type Env = { platform: NodeJS.Platform; uid: number | undefined }
 const here = (): Env => ({ platform: process.platform, uid: typeof process.getuid === 'function' ? process.getuid() : undefined })
@@ -258,8 +258,8 @@ async function consume(claimed: string, env: Env, track: (handle: FileHandle, id
     !Array.isArray(raw) &&
     Object.keys(raw).every((k) => FIELDS.has(k)) &&
     ['baseUrl', 'tokenId', 'secret'].every((k) => typeof (raw as Record<string, unknown>)[k] === 'string') &&
-    ['undefined', 'string'].includes(typeof (raw as Record<string, unknown>).fingerprint)
-  if (!ok) return refuse('The import file must be a JSON object with baseUrl, tokenId, secret and optionally fingerprint, all strings.', cleanup)
+    ['fingerprint', 'kind', 'name'].every((k) => ['undefined', 'string'].includes(typeof (raw as Record<string, unknown>)[k]))
+  if (!ok) return refuse('The import file must be a JSON object with baseUrl, tokenId, secret and optionally fingerprint, kind and name, all strings.', cleanup)
   const r = raw as Record<string, string>
-  return { state: 'imported', connection: { baseUrl: r.baseUrl, tokenId: r.tokenId, fingerprint: r.fingerprint ?? '', secret: r.secret }, cleanup }
+  return { state: 'imported', connection: { baseUrl: r.baseUrl, tokenId: r.tokenId, fingerprint: r.fingerprint ?? '', secret: r.secret, ...(r.kind !== undefined ? { kind: r.kind } : {}), ...(r.name !== undefined ? { name: r.name } : {}) }, cleanup }
 }

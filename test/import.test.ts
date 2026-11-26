@@ -52,7 +52,7 @@ test('a private import file is tested, saved sealed and bound, then wiped and de
   assert.equal(config.connection?.baseUrl, GOOD.baseUrl)
   assert.equal(config.connection?.hasSecret, true)
   assert.equal(config.importStatus?.ok, true)
-  assert.match(config.importStatus!.message, /Imported the connection to https:\/\/pdm\.example\.test:8443 as monitor@pdm!orca, pinned \((start|panel)\)\. Connection test: PDM 1\.0\.2, 4 remotes visible\.$/)
+  assert.match(config.importStatus!.message, /Imported the PDM connection to https:\/\/pdm\.example\.test:8443 as monitor@pdm!orca, pinned \((start|panel)\)\. Connection test: PDM 1\.0\.2, 4 remotes visible\.$/)
   assert.equal(config.importStatus!.file, 'The file was wiped and deleted.')
   assert.deepEqual(await leftovers(path), [], 'nothing left, claimed copy included')
   const stored = Object.entries(host.data().secrets).filter(([k]) => k.startsWith('token-secret:'))
