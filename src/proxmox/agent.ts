@@ -47,7 +47,8 @@ export function unknownReason(error: unknown): DiskUnknown {
   return 'not-read'
 }
 
-export type DiskEntry = { at: number; used?: number; total?: number; unknown?: DiskUnknown }
+/** `source`: the API that measured it (agentScope); a value from another source is never shown. */
+export type DiskEntry = { at: number; used?: number; total?: number; unknown?: DiskUnknown; source?: string }
 
 /** Agent reads per refresh at most, and at once; usage is refreshed every DISK_EVERY_MS. */
 export const DISK_PER_REFRESH = 24
@@ -80,7 +81,7 @@ export async function refreshGuestDisks(
     .filter((g) => !((blocked.get(scopeOf(g))?.until ?? 0) > now))
     .filter((g) => {
       const entry = cache.get(g.key)
-      return !entry || now - entry.at >= (entry.unknown === 'no-permission' ? DISK_BACKOFF_MS : DISK_EVERY_MS)
+      return !entry || entry.source !== scopeOf(g) || now - entry.at >= (entry.unknown === 'no-permission' ? DISK_BACKOFF_MS : DISK_EVERY_MS)
     })
     .sort((a, b) => (cache.get(a.key)?.at ?? -Infinity) - (cache.get(b.key)?.at ?? -Infinity))
     .slice(0, DISK_PER_REFRESH)
@@ -88,11 +89,11 @@ export async function refreshGuestDisks(
     if ((blocked.get(scopeOf(guest))?.until ?? 0) > now || clock() - started > DISK_BUDGET_MS) return
     try {
       const usage = fsUsage(await read(guest))
-      cache.set(guest.key, usage ? { at: now, ...usage } : { at: now, unknown: 'no-agent' })
+      cache.set(guest.key, usage ? { at: now, ...usage, source: scopeOf(guest) } : { at: now, unknown: 'no-agent', source: scopeOf(guest) })
     } catch (error) {
       if (error instanceof ApiError && (error.info.kind === 'auth' || error.info.kind === 'fingerprint-mismatch')) throw error
       const reason = unknownReason(error)
-      cache.set(guest.key, { at: now, unknown: reason })
+      cache.set(guest.key, { at: now, unknown: reason, source: scopeOf(guest) })
       if (reason === 'unsupported') blocked.set(scopeOf(guest), { until: now + DISK_BACKOFF_MS, reason })
     }
   })
@@ -109,7 +110,9 @@ export function withDiskUsage(guests: readonly Guest[], cache: Map<string, DiskE
     delete next.diskUsage
     delete next.diskUnknown
     const from = g.type === 'lxc' ? 'container' : 'agent'
-    const entry = cache?.get(g.key)
+    // Only what the source that answers for this guest now measured: never another cluster's figure.
+    const stored = cache?.get(g.key)
+    const entry = stored && (stored.source === undefined || stored.source === scopeOf(g)) ? stored : undefined
     if (g.status !== 'running') {
       next.diskUnknown = 'stopped'
       if (entry?.total) next.diskUsage = { used: entry.used ?? 0, total: entry.total, from, asOf: entry.at }
@@ -118,7 +121,7 @@ export function withDiskUsage(guests: readonly Guest[], cache: Map<string, DiskE
     if (g.type === 'lxc') {
       if (g.maxdisk > 0) {
         next.diskUsage = { used: g.disk, total: g.maxdisk, from }
-        cache?.set(g.key, { at: now, used: g.disk, total: g.maxdisk })
+        cache?.set(g.key, { at: now, used: g.disk, total: g.maxdisk, source: scopeOf(g) })
       } else next.diskUnknown = 'not-read'
       return next
     }

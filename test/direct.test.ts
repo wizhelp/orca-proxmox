@@ -399,7 +399,7 @@ test('enrich only: PDM stays the source; a direct PVE adds VM disk use, storage 
   // Unmapped names match nothing: a warning, still no duplicates.
   const unmapped = await read([{ connection: pdmC, source: pdmPart }, { connection: { ...enrich, nodeMap: undefined }, source: sourceOf({ ...enrich, nodeMap: undefined }, pveRoutes(NOW)).source }])
   assert.equal(unmapped.guests.length, 3)
-  assert.ok(unmapped.warnings.some((w) => /matched none of the estate's guests/.test(w)))
+  assert.ok(unmapped.warnings.some((w) => /matched none of PDM's guests/.test(w)))
   // Down (or without its secret): a warning, never an unreachable remote of its own.
   const down = await read([{ connection: pdmC, source: pdmPart }], [{ connection: enrich, reason: 'No token secret is stored for this connection.' }])
   assert.deepEqual(down.remotes.map((r) => r.id), ['pve-a'])
@@ -423,8 +423,61 @@ test('enrich only: a guest matching two of the estate\'s is left alone, and a ma
   const read = (c: ConnectionConfig) => new EstateService(() => NOW).get(new CompositeSource([{ connection: { ...pdm, id: 'p' }, source: pdmPart }, { connection: c, source: sourceOf(c, pveRoutes(NOW)).source }]), scope, DEFAULT_SETTINGS, { maxAgeMs: 0 })
   const ambiguous = await read(enrich)
   assert.ok(ambiguous.guests.every((g) => g.diskUsage === undefined))
-  assert.ok(ambiguous.warnings.some((w) => /matched more than one guest/.test(w)))
+  assert.ok(ambiguous.warnings.some((w) => /matched more than one of PDM's guests/.test(w)))
   const mapped = await read({ ...enrich, nodeMap: { 'pve-x1': 'pve-b/pve-x1' } })
   assert.equal(mapped.guests.find((g) => g.remote === 'pve-b')!.diskUsage?.from, 'agent')
   assert.equal(mapped.guests.find((g) => g.remote === 'pve-a')!.diskUsage, undefined)
+})
+
+test('enrich only touches PDM\'s guests: never a cluster reached directly, competing claims are left alone, cached use follows its source', async () => {
+  const GiB = 1024 ** 3
+  // PDM's cluster "pve-a" has node "pve-x1" with VM 501 and 502, like the separate direct cluster "lab".
+  const pdmInv: Inventory = { remotes: [{ id: 'pve-a', type: 'pve', online: true }], hosts: [], guests: [{ ...vm('pve-a', 501), node: 'pve-x1' }, { ...vm('pve-a', 502), node: 'pve-x1' }], datastores: [], warnings: [] }
+  let pdmUp = true
+  const pdmPart: EstateSource = {
+    ...stub('pdm', pdmInv, { records: [], available: false, complete: false, gaps: [], warnings: [] }),
+    fetchInventory: async () => (pdmUp ? structuredClone(pdmInv) : Promise.reject(new Error('refused'))),
+    readGuestFs: async () => {
+      throw new ApiError({ kind: 'http', status: 404, message: 'not found' })
+    }
+  }
+  const pdmC = { ...pdm, id: 'p' }
+  const lab = { ...pve, id: 'd1', name: 'lab' } // a cluster reached directly, not enrich only
+  const enrichA: ConnectionConfig = { ...pve, id: 'e1', name: 'agent-a', baseUrl: 'https://pve-a1.example.test:8006', enrichOnly: true }
+  const enrichB: ConnectionConfig = { ...pve, id: 'e2', name: 'agent-b', baseUrl: 'https://pve-a2.example.test:8006', enrichOnly: true }
+  const labSide = sourceOf(lab, pveRoutes(NOW))
+  const aSide = sourceOf(enrichA, pveRoutes(NOW))
+  const agentCalls = (t: ReturnType<typeof mockTransport>) => t.requests.filter((r) => r.url.pathname.includes('/agent/')).map((r) => r.url.pathname)
+  const scope = { id: 'enrich3', kind: 'pdm' as const, baseUrl: 'x', tokenId: '', fingerprint: '' }
+  const service = new EstateService(() => NOW)
+  const read = (parts: Part[]) => service.get(new CompositeSource(parts), scope, DEFAULT_SETTINGS, { maxAgeMs: 0, force: true })
+
+  const both = await read([{ connection: pdmC, source: pdmPart }, { connection: lab, source: labSide.source }, { connection: enrichA, source: aSide.source }])
+  const g = (s: typeof both, key: string) => s.guests.find((x) => x.key === key)!
+  // PDM's VM 501 is enriched; the direct cluster's 501 reads its own agent, never through agent-a.
+  assert.deepEqual(g(both, 'pve-a/501').diskUsage, { used: 21 * GiB, total: 60 * GiB, from: 'agent' })
+  assert.ok(agentCalls(aSide.transport).length > 0)
+  assert.ok(!both.warnings.some((w) => /more than one/.test(w)), 'the direct cluster is no rival for PDM\'s guests')
+  // PDM down: the direct cluster's guests are not taken over by the enrich-only connection.
+  pdmUp = false
+  aSide.transport.requests.length = 0
+  const down = await read([{ connection: pdmC, source: pdmPart }, { connection: lab, source: labSide.source }, { connection: enrichA, source: aSide.source }])
+  assert.deepEqual(agentCalls(aSide.transport), [])
+  assert.ok(g(down, 'lab (direct)/501'))
+  pdmUp = true
+
+  // Two enrich-only connections matching the same guest of PDM's: neither is used, and it is said.
+  const contested = await new EstateService(() => NOW).get(
+    new CompositeSource([{ connection: pdmC, source: pdmPart }, { connection: enrichA, source: sourceOf(enrichA, pveRoutes(NOW)).source }, { connection: enrichB, source: sourceOf(enrichB, pveRoutes(NOW)).source }]),
+    { ...scope, id: 'enrich4' },
+    DEFAULT_SETTINGS,
+    { maxAgeMs: 0 }
+  )
+  assert.equal(g(contested, 'pve-a/501').diskUsage, undefined)
+  assert.ok(contested.warnings.some((w) => /agent-a and agent-b \(enrich only\) both match/.test(w)), contested.warnings.join(' | '))
+
+  // The enrich-only connection removed: its earlier figure is not shown as PDM's.
+  const without = await read([{ connection: pdmC, source: pdmPart }, { connection: lab, source: labSide.source }])
+  assert.equal(g(without, 'pve-a/501').diskUsage, undefined)
+  assert.equal(g(without, 'pve-a/501').diskUnknown, 'unsupported')
 })

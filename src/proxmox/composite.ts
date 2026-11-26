@@ -163,40 +163,70 @@ export class CompositeSource implements EstateSource {
       if (f.connection.enrichOnly) merged.warnings.push(`${connectionLabel(f.connection)} (enrich only) could not be used: ${f.reason}`)
       else this.addUnreachable(merged, f.connection, f.reason)
     }
-    for (const i of enrichers) this.enrich(merged, i, this.enrichNative.get(i)!)
+    if (enrichers.length) this.enrich(merged, enrichers)
     return merged
   }
 
   /**
-   * Matches an enrich-only part's nodes and guests to the estate's, by node name (or its mapping,
-   * `node` or `remote/node`) and VMID; only a single match counts. Nothing of it is added to the
-   * estate: its guests' agents answer for the matched guests, its storages' content types fill
-   * the matched nodes' where missing, its pending updates the nodes' that have none.
+   * Matches the enrich-only parts' nodes and guests to PDM's (never to a cluster reached directly),
+   * by node name (or its mapping, `node` or `remote/node`), VMID and type. A target counts only
+   * when exactly one of its candidates matches it and no other enrich-only connection claims it
+   * too; competing claims leave it alone, with a warning. Nothing of these parts is added to the
+   * estate: their guests' agents answer for the matched guests, their storages' content types
+   * fill the matched nodes' where missing, their pending updates the nodes' that have none.
    */
-  private enrich(merged: Inventory, index: number, own: Inventory): void {
-    const connection = this.parts[index].connection
-    const label = connectionLabel(connection)
-    const where = (node: string) => {
-      const [a, b] = (connection.nodeMap?.[node] ?? node).split('/')
-      return b === undefined ? { node: a } : { remote: a, node: b }
+  private enrich(merged: Inventory, enrichers: number[]): void {
+    const fromPdm = (remote: string) => this.parts[this.owner.get(remote) ?? -1]?.connection.kind === 'pdm'
+    const pdmGuests = merged.guests.filter((g) => fromPdm(g.remote))
+    const pdmHosts = merged.hosts.filter((h) => h.remoteType === 'pve' && fromPdm(h.remote))
+    const guestClaims = new Map<string, { part: number; guest: Guest }[]>()
+    const hostClaims = new Map<string, { part: number; host: Host }[]>()
+    const claim = <T>(map: Map<string, T[]>, key: string, value: T) => map.set(key, [...(map.get(key) ?? []), value])
+    for (const index of enrichers) {
+      const own = this.enrichNative.get(index)!
+      const connection = this.parts[index].connection
+      const label = connectionLabel(connection)
+      const where = (node: string) => {
+        const [a, b] = (connection.nodeMap?.[node] ?? node).split('/')
+        return b === undefined ? { node: a } : { remote: a, node: b }
+      }
+      const fits = (x: { remote: string; node: string }, w: { remote?: string; node: string }) => x.node === w.node && (w.remote === undefined || x.remote === w.remote)
+      let matched = 0
+      let ambiguous = 0
+      for (const g of own.guests) {
+        const w = where(g.node)
+        const found = pdmGuests.filter((x) => x.vmid === g.vmid && x.type === g.type && fits(x, w))
+        if (found.length === 1) {
+          claim(guestClaims, found[0].key, { part: index, guest: g })
+          matched += 1
+        } else if (found.length > 1) ambiguous += 1
+      }
+      for (const h of own.hosts) {
+        const found = pdmHosts.filter((x) => fits(x, where(h.node)))
+        if (found.length === 1) claim(hostClaims, found[0].key, { part: index, host: h })
+      }
+      if (own.guests.length && !matched) merged.warnings.push(`${label} (enrich only) matched none of PDM's guests: its node names must be PDM's, or be mapped in Settings.`)
+      if (ambiguous) merged.warnings.push(`${label} (enrich only): ${ambiguous} guest(s) matched more than one of PDM's guests and were left alone; map their node as remote/node.`)
     }
-    const fits = (x: { remote: string; node: string }, w: { remote?: string; node: string }) => x.node === w.node && (w.remote === undefined || x.remote === w.remote)
-    let matched = 0
-    let ambiguous = 0
-    for (const g of own.guests) {
-      const w = where(g.node)
-      const found = merged.guests.filter((x) => x.vmid === g.vmid && x.type === g.type && fits(x, w))
-      if (found.length === 1 && !this.enrichGuests.has(found[0].key)) {
-        this.enrichGuests.set(found[0].key, { part: index, guest: g })
-        matched += 1
-      } else if (found.length > 1) ambiguous += 1
+    const names = (claims: { part: number }[]) => claims.map((c) => connectionLabel(this.parts[c.part].connection)).join(' and ')
+    let contested = 0
+    let contestedBy = ''
+    for (const [key, claims] of guestClaims) {
+      if (claims.length === 1) this.enrichGuests.set(key, claims[0])
+      else {
+        contested += 1
+        contestedBy ||= names(claims)
+      }
     }
-    for (const h of own.hosts) {
-      const w = where(h.node)
-      const found = merged.hosts.filter((x) => x.remoteType === 'pve' && fits(x, w))
-      if (found.length !== 1 || this.enrichHosts.has(found[0].key)) continue
-      const target = found[0]
-      this.enrichHosts.set(target.key, { part: index, host: h })
+    if (contested) merged.warnings.push(`${contestedBy} (enrich only) both match ${contested} of PDM's guests, which were left alone: map their nodes so that only one connection matches each.`)
+    for (const [key, claims] of hostClaims) {
+      if (claims.length !== 1) {
+        merged.warnings.push(`${names(claims)} (enrich only) both match PDM's node ${key}, which was left alone: map the nodes so that only one connection matches it.`)
+        continue
+      }
+      const target = pdmHosts.find((h) => h.key === key)!
+      const h = claims[0].host
+      this.enrichHosts.set(key, claims[0])
       if (target.storages && h.storages) {
         target.storages = target.storages.map((s) => {
           const theirs = h.storages!.find((o) => o.name === s.name)
@@ -204,13 +234,12 @@ export class CompositeSource implements EstateSource {
         })
       }
     }
-    if (own.guests.length && !matched) merged.warnings.push(`${label} (enrich only) matched none of the estate's guests: its node names must be PDM's, or be mapped in Settings.`)
-    if (ambiguous) merged.warnings.push(`${label} (enrich only): ${ambiguous} guest(s) matched more than one guest of the estate and were left alone; map their node as remote/node.`)
   }
 
+  /** The API that answers a guest's agent call: an enrich-only connection (by its id), else its remote's. */
   agentScope(guest: Guest): string {
     const e = this.enrichGuests.get(guest.key)
-    return e ? `enrich:${e.part}` : guest.remote
+    return e ? `enrich:${this.parts[e.part].connection.id}` : guest.remote
   }
 
   /** The estate id a connection's remote has, or would have: for PDM its label (it has no single remote). */
