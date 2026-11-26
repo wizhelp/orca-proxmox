@@ -11,7 +11,7 @@ import { BACKUP_LABEL, BACKUP_TONE, guestKind, guestName, hostLabel, orcaKindLab
 import { button, callout, chip, dot, emptyState, guestDetails, segmented, select } from './parts'
 import { makeSortable, recentlyDragged } from './sortable'
 import { hostActions } from './actions'
-import { plannerBlock, warningsBlock } from './view-insights'
+import { warningsBlock } from './view-insights'
 import { versionDrift } from '../features/insights'
 
 function saveLevel(keys: string[]): void {
@@ -367,7 +367,6 @@ export function hostsView(snap: EstateSnapshot): HTMLElement {
       ? 'Guests are sorted; choose “my order” to drag them. Remotes and nodes still drag.'
       : 'Drag to reorder, within the same level only. Alt+↑/↓ moves the focused item.'),
     warningsBlock(snap),
-    plannerBlock(snap),
     snap.hosts.length === 0
       ? snap.remotes.length === 0
         ? emptyState('database', 'No remotes', 'PDM lists no remotes for this token: none are added in PDM yet, or the token may not see them (it needs the Auditor role on /resource).')

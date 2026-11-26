@@ -693,6 +693,37 @@
       .toast.bad {
         border-color: var(--bad);
       }
+      /* The tools row: icon buttons whose label opens out on hover, on keyboard focus and while
+         the tool is open. */
+      .tools {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+      }
+      .btn.tool {
+        gap: 0;
+      }
+      .tool .tool-label {
+        display: inline-block;
+        max-width: 0;
+        margin-left: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        opacity: 0;
+        transition: max-width 0.18s ease, margin-left 0.18s ease, opacity 0.18s ease;
+      }
+      .tool:hover .tool-label,
+      .tool:focus-visible .tool-label,
+      .tool.active .tool-label,
+      details[open] > .tool .tool-label {
+        max-width: 10em;
+        margin-left: 5px;
+        opacity: 1;
+      }
+      .tool.active,
+      details[open] > .tool {
+        background: color-mix(in srgb, var(--orca-muted) 60%, transparent);
+      }
       details.menu {
         position: relative;
       }
@@ -815,11 +846,6 @@
         white-space: pre-wrap;
         word-break: break-word;
       }
-      @container (max-width: 420px) {
-        .menu-label {
-          display: none;
-        }
-      }
 
       /* tasks */
       .task-list {
@@ -894,6 +920,12 @@
         border: 1px solid var(--orca-input, var(--line));
         border-radius: 6px;
         padding: 3px 6px;
+      }
+      .planner .card-head > .btn {
+        margin-left: auto;
+      }
+      .planner > .stack-sm {
+        margin-top: 6px;
       }
       .plan-list {
         list-style: none;

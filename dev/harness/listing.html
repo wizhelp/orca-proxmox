@@ -82,10 +82,7 @@
         if (scene === 'tree') { tab('Hosts'); await wait(150); btn(/^\s*Tree/) }
         if (scene === 'planner') {
           tab('Hosts'); await wait(150)
-          const d = [...doc.querySelectorAll('details')].find((x) => /new VM go/.test(x.textContent || ''))
-          d?.querySelector('summary')?.click()
-          await wait(150)
-          if (d && !d.open) d.open = true
+          doc.querySelector('button[aria-controls=planner]')?.click()
         }
         if (scene === 'guests') {
           tab('Guests'); await wait(250)

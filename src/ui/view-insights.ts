@@ -1,11 +1,12 @@
-// Blocks on the Hosts tab: disk warnings (with "full in ~N days") and the placement planner.
+// Disk warnings (with "full in ~N days") on the Hosts tab, and the placement planner: a tool in
+// the header's tools row that opens it as a panel.
 import { formatBytes, formatPercent, type EstateSnapshot } from '../model'
 import { diskWarnings, placeVm } from '../features/capacity'
 import { actions, app } from './app'
 import { meter } from './charts'
 import { cx, h } from './dom'
 import { icon } from './icons'
-import { callout, chip } from './parts'
+import { button, callout, chip } from './parts'
 
 export function warningsBlock(snap: EstateSnapshot): HTMLElement | null {
   const warnings = diskWarnings(snap)
@@ -49,7 +50,31 @@ function numberField(id: string, label: string, value: number, unit: string, onC
   )
 }
 
-export function plannerBlock(snap: EstateSnapshot): HTMLElement {
+export const PLANNER_TITLE = 'Where should a new VM go?'
+
+/** The tools-row button: an icon whose label opens out on hover and focus; it shows or hides the planner. */
+export function plannerTool(): HTMLElement {
+  return h(
+    'button',
+    {
+      type: 'button',
+      class: cx('btn ghost tool', app.planOpen && 'active'),
+      title: PLANNER_TITLE,
+      'aria-label': PLANNER_TITLE,
+      'aria-expanded': String(app.planOpen),
+      'aria-controls': 'planner',
+      onClick: () => {
+        app.planOpen = !app.planOpen
+        actions.render()
+      }
+    },
+    icon('target', 14),
+    h('span', { class: 'tool-label', 'aria-hidden': 'true' }, 'Place a VM')
+  )
+}
+
+export function plannerPanel(snap: EstateSnapshot): HTMLElement | null {
+  if (!app.planOpen) return null
   const req = app.plan
   const ranked = placeVm(snap, req)
   const set = (patch: Partial<typeof app.plan>) => {
@@ -57,9 +82,15 @@ export function plannerBlock(snap: EstateSnapshot): HTMLElement {
     actions.render()
   }
   return h(
-    'details',
-    { class: 'fold', open: app.planOpen, onToggle: (e: Event) => (app.planOpen = (e.target as HTMLDetailsElement).open) },
-    h('summary', null, icon('target', 14), ' Where should a new VM go?'),
+    'section',
+    { class: 'card planner', id: 'planner', 'aria-label': PLANNER_TITLE },
+    h(
+      'header',
+      { class: 'card-head' },
+      icon('target', 16),
+      h('span', { class: 'card-title' }, PLANNER_TITLE),
+      button('Close', () => ((app.planOpen = false), actions.render()), { icon: 'x', variant: 'ghost', iconOnly: true, title: 'Close the planner' })
+    ),
     h(
       'div',
       { class: 'stack-sm' },
@@ -105,7 +136,7 @@ export function plannerBlock(snap: EstateSnapshot): HTMLElement {
               )
             )
           ),
-      h('div', { class: 'muted small' }, 'Free memory keeps 10 % for the host; disk counts the roomiest storage for guest disks on each node. PDM’s resource list does not say which storages hold VM disks: a storage chosen by its name is marked with "?" and "disk unverified", and only a node whose disk space is verified is called a best fit. An advisory estimate, not a provisioning check.')
+      h('div', { class: 'muted small' }, 'Free memory keeps 10 % for the host; disk counts the roomiest storage for guest disks on each node. PDM’s resource list does not say which storages hold VM disks: a storage chosen by its name is marked with "?" and "disk unverified", and nodes with verified disk space rank first (only those are called a best fit). Running guests that could already claim all memory lower a node. An advisory estimate, not a provisioning check.')
     )
   )
 }

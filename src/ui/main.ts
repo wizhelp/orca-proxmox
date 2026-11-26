@@ -9,6 +9,7 @@ import { h } from './dom'
 import { icon, type IconName } from './icons'
 import { ago } from './logic'
 import { button, chip, emptyState, errorCallout } from './parts'
+import { plannerPanel, plannerTool } from './view-insights'
 import { isDragging } from './sortable'
 import { backupsView } from './view-backups'
 import { guestsView } from './view-guests'
@@ -99,13 +100,14 @@ function render(): void {
         { class: 'title-row' },
         h('h1', null, icon('cloud', 18), 'Proxmox'),
         h('span', { class: 'updated muted small', id: 'updated' }, updatedText()),
-        app.snap ? aiMenu() : null,
+        app.snap ? h('div', { class: 'tools', role: 'toolbar', 'aria-label': 'Tools' }, plannerTool(), aiMenu()) : null,
         button('Refresh now', () => void actions.refresh(true), { icon: 'refresh', variant: 'ghost', iconOnly: true, disabled: app.loading || !app.config?.connection, id: 'refresh' })
       ),
       summary()
     ),
     app.workerError ? h('div', { class: 'callout bad', role: 'alert' }, icon('alert', 16, 'icon callout-icon'), h('div', { class: 'callout-body' }, h('div', { class: 'callout-title' }, 'The plugin worker failed'), app.workerError)) : null,
     aiPreviewPanel(),
+    app.snap ? plannerPanel(app.snap) : null,
     answer?.state === 'error' ? errorCallout(answer.error, { pin: pinFingerprint, openSettings: () => actions.setTab('settings') }) : null,
     app.snap?.warnings.length
       ? h('details', { class: 'fold' }, h('summary', null, icon('alert', 14), ` ${app.snap.warnings.length} warning${app.snap.warnings.length > 1 ? 's' : ''}`), app.snap.warnings.map((w) => h('div', { class: 'muted small' }, w)))
@@ -161,7 +163,12 @@ function aiMenu(): HTMLElement {
   return h(
     'details',
     { class: 'menu' },
-    h('summary', { class: 'btn ghost', title: 'Preview and copy a Markdown summary of the estate for an AI agent' }, icon('sparkles', 14), h('span', { class: 'menu-label' }, 'Copy for AI')),
+    h(
+      'summary',
+      { class: 'btn ghost tool', title: 'Copy for AI: preview and copy a Markdown summary of the estate for an AI agent', 'aria-label': 'Copy for AI' },
+      icon('sparkles', 14),
+      h('span', { class: 'tool-label', 'aria-hidden': 'true' }, 'Copy for AI')
+    ),
     h(
       'div',
       { class: 'menu-items', role: 'menu' },
