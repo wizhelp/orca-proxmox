@@ -18,7 +18,7 @@ Each way of connecting adds to the one before; all of them are read-only towards
 | --- | --- | --- |
 | **PDM** | A read-only PDM token (Auditor role), HTTPS to PDM (8443) | Every remote's hosts, guests and storages, containers' disk use, PBS datastores and backups, tasks, alerts, the planner, Copy for AI |
 | **PVE and PBS directly** (instead of PDM, or beside it) | A read-only token on each server (PVEAuditor, Audit), HTTPS to each (8006, 8007) | The same per connection; one connection shows one cluster or one standalone host |
-| **+ SSH tunnel, enrich only** | Per PVE: SSH to the node (22) with a forward-only key, and a read-only PVE token; nothing else opened | VM disk use from the QEMU guest agent and what PDM cannot give (storage content types, pending updates), added to the guests PDM shows |
+| **+ SSH tunnel, enrich only** | Per PVE: SSH to the node (22) as a dedicated account that may only forward to the API, a key just for it, and a read-only PVE token; nothing else opened | VM disk use from the QEMU guest agent and what PDM cannot give (storage content types, pending updates), added to the guests PDM shows |
 | **+ hosts connected to Orca over SSH** | The Proxmox nodes (or the guests Orca runs on) added to Orca as SSH targets or paired servers | Where Orca runs on the map (bots, workspaces, agents per node or guest), *Open Orca terminal here*, and the base for per-worktree VMs ([BACKLOG.md](BACKLOG.md)) |
 
 **Recommended:** PDM, plus the Proxmox hosts connected to Orca over SSH, plus SSH-tunnelled
@@ -296,43 +296,61 @@ checking the PVE certificate's pin. It restarts a tunnel that drops, with a grow
 it when the connection changes or Orca stops the plugin. Windows 10 and later include OpenSSH;
 on macOS and Linux it is `/usr/bin/ssh`.
 
-**On the PVE node** (as root), a user that can only forward to the API, and a read-only token:
+**On each host** (as root), a dedicated account that may only forward to the API, enforced twice:
+by the key's options and by an sshd rule for the account. Keep a backup of `sshd_config`:
 
 ```sh
 useradd --system --create-home --shell /usr/sbin/nologin orca-tunnel
+usermod -p '*' orca-tunnel                        # no password; key login only
 install -d -m 700 -o orca-tunnel -g orca-tunnel /home/orca-tunnel/.ssh
-# The public key from Orca's machine (below), allowed to forward to the API and nothing else.
-echo 'restrict,port-forwarding,permitopen="127.0.0.1:8006",command="/bin/false" ssh-ed25519 AAAA… orca-proxmox' \
+echo 'restrict,port-forwarding,permitopen="127.0.0.1:8006" ssh-ed25519 AAAA… orca-proxmox-tunnel' \
   > /home/orca-tunnel/.ssh/authorized_keys
 chown orca-tunnel:orca-tunnel /home/orca-tunnel/.ssh/authorized_keys; chmod 600 /home/orca-tunnel/.ssh/authorized_keys
-# A read-only token as in "Without PDM" (PVEAuditor on / for the user and the token).
+cp -a /etc/ssh/sshd_config /etc/ssh/sshd_config.orca-backup
+cat >> /etc/ssh/sshd_config <<'EOF'
+
+Match User orca-tunnel
+    AllowTcpForwarding local
+    AllowStreamLocalForwarding no
+    PermitListen none
+    PermitOpen 127.0.0.1:8006
+    PermitTTY no
+    X11Forwarding no
+    AllowAgentForwarding no
+    ForceCommand /bin/false
+EOF
+sshd -t && systemctl reload ssh
 ```
 
-`restrict` turns off everything (shell, agent and X11 forwarding, PTY), `port-forwarding` allows
-forwards again and `permitopen` limits them to the API. sshd's `AllowTcpForwarding` must not be
-`no` for this user. For PBS, use port 8007.
+The account then has local TCP forwarding to the API only: no shell, command or terminal, no
+reverse or Unix-socket forwards, no other destination. For PBS use port 8007. Then a read-only
+token as in "Without PDM" (`orca-monitor@pve!orca`, PVEAuditor on `/` for the user and the
+token). [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md#through-an-ssh-tunnel-enrich-only) has the full
+procedure, including how to check that a shell, a command, `-R` and other `-L` targets are refused.
 
-**On Orca's machine**, a key without a passphrase (the plugin cannot type one), readable by you only:
+**On Orca's machine**, a key only for the tunnel, without a passphrase (the plugin cannot type
+one), readable by you only:
 
 ```sh
-ssh-keygen -t ed25519 -N '' -C orca-proxmox -f ~/.ssh/orca-proxmox      # PowerShell: -N '""'
+ssh-keygen -t ed25519 -N '' -C orca-proxmox-tunnel -f ~/.ssh/orca-proxmox-tunnel      # PowerShell: -N '""'
 ```
 
 **In Settings**, add (or edit) the PVE connection: base URL `https://<node>:8006`, the token, the
 certificate fingerprint (read it on the node: `openssl x509 -in /etc/pve/local/pve-ssl.pem
 -noout -fingerprint -sha256`), then **Reach via SSH tunnel** with the SSH host, port, user
-(`orca-tunnel`), identity file (`~/.ssh/orca-proxmox` as an absolute path) and target
-(`127.0.0.1:8006`). Press **Test**: it connects once accepting the server's SSH host key and
+(`orca-tunnel`, the default), identity file (`~/.ssh/orca-proxmox-tunnel` as an absolute path) and
+target (`127.0.0.1:8006`). Press **Test**: it connects once accepting the server's SSH host key and
 shows its fingerprint. Compare it with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the
 node, press **It matches: pin this key**, then **Save**. From then on any other host key is
 refused.
 
-**Enrich only** (PVE, usually with PDM): the connection then adds nothing of its own to the
-estate. For each guest it shows with the same node name and VMID as a guest PDM shows, VM disk
-use is read from its guest agent; its nodes' storage content types and pending updates fill in
-what PDM does not report. Where the node is named differently in PDM, map it (`pve-x1=pve-a`, or
-`pve-x1=remote/node`). A guest that matches more than one of PDM's is left alone, and a connection
-that matches nothing says so in the warnings. PDM's own data always comes first.
+**Enrich only** (PVE, with PDM): the connection then adds nothing of its own to the estate. For
+each of **PDM's** guests with the same node name and VMID (never a cluster reached directly), VM
+disk use is read from its guest agent; its nodes' storage content types and pending updates fill
+in what PDM does not report. Where the node is named differently in PDM, map it (`pve-x1=pve-a`,
+or `pve-x1=remote/node`). A guest that matches more than one of PDM's, or that two enrich-only
+connections both match, is left alone with a warning, and a connection that matches nothing says
+so. A VM's disk use is shown only from the connection that measured it.
 
 ## How backups are matched
 
@@ -468,7 +486,9 @@ See [SECURITY.md](SECURITY.md) for the details and the residual risks. In short:
   the configured key, no password or prompt, and the server's host key pinned like the
   certificate (learnt only by a test you confirm, never silently); the TLS pin still applies
   through it. The tunnel's settings are bound to the sealed secret with the rest of the endpoint.
-  On the server, the key may only forward to the API (`restrict,port-forwarding,permitopen=…`).
+  On the server, a dedicated account may only forward to the API: the key's
+  `restrict,port-forwarding,permitopen=…` and an sshd `Match User` block (local TCP forwarding to
+  the API only, no reverse or Unix-socket forwards, no terminal, `ForceCommand /bin/false`).
 - Each connection (PDM, PVE or PBS) has its own sealed secret entry, bound to that connection's
   URL, token ID and pin; a secret carries over only to the same base URL (path included) and
   token ID, so a token is never sent to a server it was not entered for, not even by a refresh

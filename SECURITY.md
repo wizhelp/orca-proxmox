@@ -116,9 +116,26 @@ it and saves; an import must bring the key already verified. Every tunnel field 
 passed as separate arguments after `--` where it could be read as an option. The tunnel's fields
 are part of what the sealed secret is bound to. Through the tunnel the HTTP client still checks the
 PVE/PBS certificate pin (or CA and hostname) before sending the token. Tunnels stop when their
-connection changes or is removed, and when Orca stops the worker. The documented server side gives
-the key `restrict,port-forwarding,permitopen="127.0.0.1:8006",command="/bin/false"`: it can open
-that one forward and nothing else.
+connection changes or is removed, and when Orca stops the worker; every ssh process (a test's
+too) is tracked from the moment it is spawned, so none is left behind, and a failure to run ssh
+is an error, not a crash. A tunnel counts as ready only when that ssh process itself reports its
+forward listening (`-v`), never because something answers on the port; a port taken before ssh
+bound it makes ssh exit (`ExitOnForwardFailure`) and another is tried. File names reach ssh as
+one quoted, escaped value each (spaces, quotes, `%` tokens), as the real client's parser reads
+them back.
+
+**The documented server side** for a tunnel is a dedicated account (`orca-tunnel`, no shell, no
+password) whose key carries `restrict,port-forwarding,permitopen="127.0.0.1:8006"`, and an sshd
+`Match User orca-tunnel` block with `AllowTcpForwarding local`, `AllowStreamLocalForwarding no`,
+`PermitListen none`, `PermitOpen 127.0.0.1:8006`, `PermitTTY no`, X11 and agent forwarding off
+and `ForceCommand /bin/false`. The key options alone would leave reverse (`-R`) and Unix-socket
+forwards possible; the `Match` block makes the account's effective policy local TCP forwarding to
+the API only. docs/AGENT_SETUP.md checks this with `sshd -T` and by trying a shell, a command,
+`-R` and another `-L` target, which must all be refused.
+
+**Enrich only** connections add data only to guests and nodes that PDM shows, matched one to one;
+a cluster reached directly is never enriched, competing claims are left alone, and a VM's disk
+use is shown only while the connection that measured it still answers for it.
 
 ## Residual risks
 
@@ -150,6 +167,10 @@ that one forward and nothing else.
   meaning is the server's: treat it as untrusted.
 - **An SSH key without a passphrase** sits on Orca's machine for tunnels; anyone running as your
   user can use it, limited on the server to forwarding to the API (as documented). Use a dedicated
-  key and user per purpose.
+  key and account per purpose.
+- **A tunnel's local end is a loopback port**: other programs running on this machine can connect
+  to it while it is open (and reach the API's port through it, though not use the token). The
+  certificate pin (or CA and hostname check) decides before the token is sent; pin the
+  certificate of a tunnelled connection.
 - **The `orca` CLI** used for Orca awareness, the status-bar command and terminals runs with your
   account's rights, like Orca itself.
