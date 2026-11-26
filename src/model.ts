@@ -25,6 +25,29 @@ export type ConnectionConfig = {
   revision?: string
   /** A direct PVE or PBS connection's name in the estate; else the cluster's or server's own. */
   name?: string
+  /** A direct connection reached through an SSH tunnel (its API is closed to the network). */
+  tunnel?: SshTunnel
+  /**
+   * A direct PVE that only adds to what PDM shows (VM disk use, storage content types, pending
+   * updates) for the guests and nodes it matches by node name and VMID; it adds no remote.
+   */
+  enrichOnly?: boolean
+  /** For enrich only: this connection's node name -> the node (or `remote/node`) in PDM, where they differ. */
+  nodeMap?: Record<string, string>
+}
+
+/** An SSH tunnel to a direct connection's API: `ssh -N -L 127.0.0.1:<port>:<target> user@host`. */
+export type SshTunnel = {
+  /** The SSH server: a DNS name or IP address. */
+  host: string
+  port: number
+  user: string
+  /** The private key on this machine (absolute path). */
+  identityFile: string
+  /** The API as the SSH server reaches it, `host:port` (usually 127.0.0.1:8006 or :8007). */
+  target: string
+  /** The SSH server's pinned host key, `ssh-ed25519 AAAA…`; empty until a test in Settings showed it. */
+  hostKey: string
 }
 
 /** One saved configuration: what estates, caches, alerts and secrets are scoped to. */
