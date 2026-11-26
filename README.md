@@ -9,21 +9,61 @@ PVE hosts and PBS servers directly, each with its own read-only token; PDM and d
 can be combined, and every connection shows as part of one estate.
 
 It is **read-only**: it only sends `GET` requests, and the token it needs cannot change anything.
+The one exception is optional and explicit: [Connect via Orca](#connect-via-orca-easiest) runs a
+setup script that you review first, on a host Orca already reaches, to create that read-only token.
 
 ## Choose your setup
 
-Each way of connecting adds to the one before; all of them are read-only towards Proxmox.
+The first row sets up the direct and tunnel rows for you on hosts Orca already reaches; the others each add to the one before. All of them are read-only towards the Proxmox API.
 
 | Setup | What it needs | What it adds |
 | --- | --- | --- |
+| **Connect via Orca (easiest)** | The PVE or PBS host already connected to Orca (SSH target or paired server), where Orca's shell is root or may use `sudo` without a password | One click per host instead of the manual steps below: the read-only token, optionally the SSH tunnel account, both fingerprints pinned, the connection saved and tested (enrich only when PDM already shows the node); Undo per host |
 | **PDM** | A read-only PDM token (Auditor role), HTTPS to PDM (8443) | Every remote's hosts, guests and storages, containers' disk use, PBS datastores and backups, tasks, alerts, the planner, Copy for AI |
 | **PVE and PBS directly** (instead of PDM, or beside it) | A read-only token on each server (PVEAuditor, Audit), HTTPS to each (8006, 8007) | The same per connection; one connection shows one cluster or one standalone host |
 | **+ SSH tunnel, enrich only** | Per PVE: SSH to the node (22) as a dedicated account that may only forward to the API, a key just for it, and a read-only PVE token; nothing else opened | VM disk use from the QEMU guest agent and what PDM cannot give (storage content types, pending updates), added to the guests PDM shows |
 | **+ hosts connected to Orca over SSH** | The Proxmox nodes (or the guests Orca runs on) added to Orca as SSH targets or paired servers | Where Orca runs on the map (bots, workspaces, agents per node or guest), *Open Orca terminal here*, and the base for per-worktree VMs ([BACKLOG.md](BACKLOG.md)) |
 
 **Recommended:** PDM, plus the Proxmox hosts connected to Orca over SSH, plus SSH-tunnelled
-enrich-only connections if you want VM disk use. Each level is set up in
-[Setup](#setup), and an agent can do all of it with [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md).
+enrich-only connections if you want VM disk use. With the hosts connected to Orca,
+[Connect via Orca](#connect-via-orca-easiest) sets up each PVE and PBS for you; otherwise each
+level is set up in [Setup](#setup), and an agent can do all of it with
+[docs/AGENT_SETUP.md](docs/AGENT_SETUP.md).
+
+## Connect via Orca (easiest)
+
+For Proxmox VE and Backup Servers that Orca already connects to, as SSH targets or paired
+servers. What you do, per host, in the panel's **Settings → Connect via Orca**:
+
+1. **Check.** The plugin opens a terminal in one of that host's Orca workspaces, runs a read-only
+   check (which products are installed, whether Orca's shell there is root or may use
+   `sudo -n`, its host name, where Orca reached it), and closes the terminal. Nothing changes.
+2. **Connect…** Choose Proxmox VE or Backup Server, the address this machine reaches it at
+   (prefilled), the name in the estate, and whether the API should be reached through an SSH
+   tunnel. **Show the script** shows the exact script that will run, generated from the plugin's
+   fixed template (nothing is downloaded), and what it does.
+3. **Run.** Only this click runs it, once, within 10 minutes. On the host it creates the user
+   `orca-monitor@pve` (or `@pbs`) and its token `orca` with `PVEAuditor` (or `Audit`) on `/`
+   for both, with privilege separation; with a tunnel, also the account `orca-tunnel` that may
+   only forward to the local API, verifying sshd's effective rules before and after the reload
+   (and that root's are unchanged) before it installs the plugin's own key. It reads the API
+   certificate's fingerprint and the SSH host key on the server itself, so there is nothing to
+   compare by hand. The token secret is printed only encrypted to a one-time key that exists only
+   in the plugin's memory; the terminal never shows it.
+4. The plugin decrypts the secret, tests the connection (through the pinned tunnel, if any) and
+   saves it only if the test passes: **enrich only** when your PDM connection already shows that
+   node, else a direct connection. The result is shown under the host.
+5. **Undo…** shows and runs a script that reverses only what that setup reported creating (the
+   key file only while it holds exactly the plugin's key, the `Match` block only while
+   `sshd_config` is exactly the backup plus that block, the user only when it has no other
+   token), then removes the connection and the plugin's key.
+
+If a token `orca` exists already, the script stops without changing anything unless you tick
+**Replace** (the old token then stops working, and Undo cannot bring it back). A host running
+**PDM** is recognized, but PDM has no local command to create tokens, so its token is made with
+your PDM login, which the plugin never handles: follow the guide's
+[PDM steps](docs/AGENT_SETUP.md#1-log-in-to-pdms-api). How the secrets stay out of the terminal
+is in [SECURITY.md](SECURITY.md#connect-via-orca).
 
 ## Set it up with your agent
 
@@ -469,6 +509,12 @@ See [SECURITY.md](SECURITY.md) for the details and the residual risks. In short:
 - With a pinned fingerprint, the TLS handshake finishes and the certificate is compared **before**
   any HTTP is sent, so a mismatched server never sees the token. Without a pin, the system CAs
   and hostname checks apply. Only `https://` URLs are accepted.
+- Connect via Orca runs only scripts generated from the plugin's fixed template, shown in full
+  before you run them, in a terminal of that host's Orca workspace that is closed afterwards. They
+  print no secret: the token secret is encrypted on the server to a one-time key held in the
+  plugin's memory (and wiped after use), and the tunnel's private key never leaves this machine
+  (it is kept sealed like a token secret, and written to a private file for `ssh` only until it
+  has authenticated).
 - An SSH tunnel runs the system's `ssh` without a shell and without your SSH config, with only
   the configured key, no password or prompt, and the server's host key pinned like the
   certificate (learnt only by a test you confirm, never silently); the TLS pin still applies

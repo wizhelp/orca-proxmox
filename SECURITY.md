@@ -150,8 +150,73 @@ every PDM cluster is visible and kept), so an outage never moves one to another 
 reached directly is never enriched, competing claims are left alone, and a VM's disk use is shown
 only while the connection that measured it still answers for it.
 
+### Connect via Orca
+
+An optional one-click setup for a PVE or PBS host that Orca already reaches (an SSH target or a
+paired server), in place of the manual steps. It is the only time the plugin changes anything,
+and it does so only as a script on the host, never through the Proxmox API (towards the API the
+plugin still only sends `GET`).
+
+- **What runs.** The plugin generates each script from a fixed template in its own code (nothing
+  is downloaded), filling in only values it validates strictly: the product, a random run id,
+  the one-time public key (PEM), the plugin's tunnel public key (`ssh-ed25519 … orca-proxmox-tunnel`,
+  nothing else), an IP address for `sshd -T -C`, and, for Undo, a backup path of one exact form.
+  Anything else is refused before a script exists. The person sees the exact script and what it
+  does; it runs only when they press **Run**, once, within 10 minutes, on the host it was made
+  for. A read-only check (installed products, whether the shell is root or may use `sudo -n`,
+  host name, `SSH_CONNECTION`) runs first, on its own click.
+- **Where it runs.** In a terminal the plugin opens with the orca CLI in one of that host's Orca
+  workspaces, so the shell runs on the host over Orca's own connection, as Orca's user there: the
+  plugin never learns the host's address or credentials. The typed line carries the script
+  compressed (base64), runs it with `sh` as root or through `sudo -n` (never a password prompt),
+  and starts with a space to keep it out of most shells' history. The plugin reads the output with
+  `orca terminal read` and closes the terminal's tab afterwards, also when reading fails. One
+  script runs at a time.
+- **No secret in the terminal.** An Orca terminal's output is kept like any other terminal's, so
+  nothing secret may appear in it. The script holds only public values. The new token's secret is
+  kept in a shell variable on the host, encrypted there with `openssl pkeyutl` (RSA-OAEP, SHA-256)
+  to a one-time RSA-3072 key the worker made for this run, and only that ciphertext is printed;
+  the private half exists only in the worker's memory and is wiped after one use, or when the plan
+  expires. Decrypted, the secret is sealed like any other (it is also masked in every log and
+  answer). The tunnel's key pair is made in the worker; only its public half goes to the host.
+  Its private half is sealed in the plugin's secrets like a token secret (bound to its own
+  reference), and written for `ssh` only into the worker's private folder (owner-only; on
+  Windows the file's ACL is reduced to the user) when a tunnel starts, then removed as soon as
+  that ssh says it has authenticated, or ends.
+- **Answers.** The script answers in lines that carry the run's random id, so nothing else in the
+  terminal (the typed line included) can pass for an answer; values are cleaned and capped, and
+  each is used only in the strict form it must have (a SHA-256 fingerprint, one SSH public key, a
+  node name, an IP address, a version string).
+- **On the host.** The same rules as the guide: a user only for this (an existing one is reused
+  only when its comment says it was made for Orca), its token with privilege separation, the
+  read-only role on `/` for both; an existing token `orca` stops the script unless the person
+  chose **Replace**. The tunnel account is refused if anything of it exists already; its rules
+  are appended after a backup, checked with `sshd -t` and `sshd -T -C` for the account (exactly
+  local forwarding to the API) and for root (unchanged), before and after the reload, and only
+  then does the account get the key, in a file the run creates. The API certificate's
+  fingerprint is read from what the API presents on the host, and the SSH host key from the
+  host's own key file, so both pins come from the server itself; the connection is tested
+  through them before it is saved.
+- **Undo** works from what the host reported creating (kept in plugin storage, no secret), in the
+  guide's order, each step checked and stopping at the first that fails: the key file only while
+  it holds exactly the plugin's line, then that account's processes only, then the `Match` block
+  only while `sshd_config` is exactly the backup plus that block (an admin's later change stops
+  it), then the account, the token, and the user only when it has no other token left. What was
+  reversed is remembered even when a later step stops.
+- **PDM** is recognized but not set up: it has no root-only local command for tokens, and the
+  plugin does not handle an admin password.
+
 ## Residual risks
 
+- **Connect via Orca trusts Orca's connection to the host.** The script runs with root rights on
+  the host, as whatever Orca's shell there is; whoever controls that Orca connection or the
+  host already has those rights. The plugin's scripts print no secret, but the terminal shows
+  what they do (user and account names, the backup path). The record Undo works from is in plugin
+  storage, which the panel can rewrite; a rewritten record can only make Undo name the plugin's
+  own user, token and account, and the person still sees the Undo script before it runs.
+- **The tunnel key is a file for a moment.** `ssh` needs the private key as a file: it exists in
+  the worker's private folder from just before ssh starts until ssh has authenticated (normally
+  well under a second), readable by the user only.
 - **The panel can still reach the sealed value.** Any code running in the plugin's panel can read
   (and overwrite or delete) the sealed secret through `secrets:own`; it cannot open it without the
   worker's key, nor redirect it by rewriting the connection settings (see above). It can make the

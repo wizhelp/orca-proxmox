@@ -10,6 +10,16 @@ per PVE cluster (or standalone host) and per PBS: see
 [Without PDM: PVE and PBS directly](#without-pdm-pve-and-pbs-directly). Start with
 [Choose the setup with the person](#choose-the-setup-with-the-person).
 
+**First, the easiest way.** When the person's PVE and PBS hosts are already connected to Orca
+(SSH targets or paired servers) and Orca's shell there is root or may use `sudo` without a
+password, they do not need this guide for them: the panel's **Settings → Connect via Orca** checks
+each host, shows the exact setup script, runs it on their click, pins both fingerprints read on the
+server itself and saves the tested connection, with an Undo per host (see the README's
+[Connect via Orca](../README.md#connect-via-orca-easiest)). Point the person there, and let them
+press the buttons: never approve or run it on their behalf. Use this guide for PDM's own token
+(PDM has no local command for it), for hosts Orca does not reach, or when the person prefers to
+see each step done by hand.
+
 ## Rules for the agent
 
 - **Establish trust in PDM's certificate before any credential is sent** (step 0). Never use
@@ -31,11 +41,13 @@ per PVE cluster (or standalone host) and per PBS: see
 
 ## Choose the setup with the person
 
-Before anything else, explain the setups and ask which the person wants. Each adds to the one
-before, and all of them are read-only towards Proxmox:
+Before anything else, explain the setups and ask which the person wants. Row 0 sets B and C up
+from the panel on hosts Orca reaches; the others each add to the one before. All of them are
+read-only towards the Proxmox API:
 
 | Setup | Needs | Adds | Sections |
 | --- | --- | --- | --- |
+| **0. Connect via Orca** (PVE and PBS already connected to Orca) | Orca's shell on the host is root, or may use `sudo -n` | B and C for that host, in the panel, by the person | README [Connect via Orca](../README.md#connect-via-orca-easiest) |
 | **A. PDM** | A read-only PDM token, HTTPS to PDM | Every remote's hosts, guests, containers' disk use, PBS backups, tasks, alerts, planner, Copy for AI | [0–5](#0-trust-pdms-certificate-first) |
 | **B. PVE and PBS directly** (instead of A, or beside it) | A read-only token per server, HTTPS to each | The same per connection | [Without PDM](#without-pdm-pve-and-pbs-directly) |
 | **C. + SSH tunnel, enrich only** | Per PVE node: SSH, a forward-only key, a read-only token; nothing else opened | VM disk use from the guest agent, storage types and updates, added to PDM's guests | [Through an SSH tunnel](#through-an-ssh-tunnel-enrich-only) |
