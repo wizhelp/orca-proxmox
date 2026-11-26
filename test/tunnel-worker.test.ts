@@ -36,23 +36,30 @@ function fakeSsh() {
     const run = { args, killed: false }
     runs.push(run)
     const exit: ((code: number | null, signal: string | null) => void)[] = []
+    const say: ((chunk: string) => void)[] = []
     const opt = (name: string) => args.find((a, i) => args[i - 1] === '-o' && a.startsWith(`${name}=`))?.slice(name.length + 1)
+    const knownHosts = () => opt('UserKnownHostsFile')!.slice(1, -1).replace(/%%/g, '%').replace(/\\(["\\])/g, '$1')
     const port = Number(args[args.indexOf('-L') + 1].split(':')[1])
     const server = net.createServer((s) => s.destroy())
     setImmediate(() => {
-      if (opt('StrictHostKeyChecking') === 'accept-new') writeFileSync(opt('UserKnownHostsFile')!, `pve-x1.example.test ${HOST_KEY}\n`)
-      server.listen(port, '127.0.0.1')
+      if (opt('StrictHostKeyChecking') === 'accept-new') writeFileSync(knownHosts(), `pve-x1.example.test ${HOST_KEY}
+`)
+      // Like ssh -v: it binds the forward, then says so.
+      server.listen(port, '127.0.0.1', () => {
+        for (const l of say) l(`debug1: Local forwarding listening on 127.0.0.1 port ${port}.
+`)
+      })
     })
     return {
-      stderr: { on: () => undefined },
-      on: (_e: 'exit', l: (code: number | null, signal: string | null) => void) => exit.push(l),
+      stderr: { on: (_e: 'data', l: (chunk: string) => void) => say.push(l) },
+      on: (event: 'exit' | 'error', l: never) => (event === 'exit' ? exit.push(l) : 0),
       kill: () => {
         run.killed = true
         server.close()
         for (const l of exit.splice(0)) l(null, 'SIGTERM')
         return true
       }
-    }
+    } as TunnelChild
   }
   return { runs, spawn }
 }

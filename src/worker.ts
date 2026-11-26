@@ -23,7 +23,7 @@ import { CompositeSource, type FailedPart, type Part } from './proxmox/composite
 import type { ConfigAnswer, ConnectionInput, ImportStatus, SecretsProtection, SshHostKey, TestAnswer } from './protocol'
 import { ApiError, normalizeBaseUrl, ProxmoxClient } from './proxmox/client'
 import { nodeTransport, type ConnectTo, type Transport } from './proxmox/http'
-import { findSsh, freeLocalPort, hostKeyFingerprint, TunnelManager, waitForLocalPort, type SpawnSsh } from './proxmox/tunnel'
+import { findSsh, freeLocalPort, hostKeyFingerprint, TunnelManager, type SpawnSsh } from './proxmox/tunnel'
 import { safeTarget } from './features/targets'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -78,7 +78,7 @@ let sshPath: () => string | null = () => findSsh(process.platform, cliEnvironmen
 let tunnelDir: () => string = () => join(dirname(keyFile()), 'tunnels')
 let tunnelManager: TunnelManager | undefined
 const tunnels = () =>
-  (tunnelManager ??= new TunnelManager({ spawn: spawnSsh, sshPath: () => sshPath(), dir: tunnelDir(), freePort: freeLocalPort, waitForPort: waitForLocalPort, now: () => clock() }))
+  (tunnelManager ??= new TunnelManager({ spawn: spawnSsh, sshPath: () => sshPath(), dir: tunnelDir(), freePort: freeLocalPort, now: () => clock() }))
 let clock: () => number = Date.now
 let cliRunner: (() => CliRunner) | undefined
 let vault: Vault | undefined
