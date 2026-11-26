@@ -27,6 +27,9 @@ function edit(patch: Partial<ConnectionInput>): void {
 }
 
 const connections = (): ConnectionView[] => app.config?.connections ?? []
+/** SSH host keys -> their fingerprints, as the worker showed them (a test, a saved connection). */
+const sshFingerprints = new Map<string, string>()
+const DEFAULT_TARGET: Record<SourceKind, string> = { pdm: '', pve: '127.0.0.1:8006', pbs: '127.0.0.1:8007' }
 const editing = (): ConnectionView | undefined => connections().find((c) => c.id === app.form.id)
 
 /** Fills the form with a connection (by id), the first one, or a new one of `kind`. */
@@ -34,8 +37,20 @@ export function fillForm(id?: string, kind: SourceKind = 'pdm'): void {
   const list = connections()
   const c = id === 'new' ? undefined : (list.find((x) => x.id === (id ?? app.form.id)) ?? (id ? undefined : list[0]))
   app.form = c
-    ? { id: c.id, kind: c.kind, name: c.name ?? '', baseUrl: c.baseUrl, tokenId: c.tokenId, fingerprint: c.fingerprint, secret: '' }
+    ? {
+        id: c.id,
+        kind: c.kind,
+        name: c.name ?? '',
+        baseUrl: c.baseUrl,
+        tokenId: c.tokenId,
+        fingerprint: c.fingerprint,
+        secret: '',
+        ...(c.tunnel ? { tunnel: { ...c.tunnel } } : {}),
+        ...(c.enrichOnly ? { enrichOnly: true } : {}),
+        ...(c.nodeMap ? { nodeMap: { ...c.nodeMap } } : {})
+      }
     : { id: 'new', kind, name: '', baseUrl: '', tokenId: '', fingerprint: '', secret: '' }
+  if (c?.tunnel?.hostKey && c.sshFingerprint) sshFingerprints.set(c.tunnel.hostKey, c.sshFingerprint)
   app.formDirty = false
   app.testResult = null
 }
@@ -167,6 +182,8 @@ function connectionRow(c: ConnectionView, open: boolean): HTMLElement {
     h('span', { class: 'conn-kind' }, chip(KIND_SHORT[c.kind], c.kind === 'pdm' ? 'info' : 'plain')),
     h('span', { class: 'conn-name' }, h('strong', null, c.name || hostOf(c)), c.name ? h('span', { class: 'muted small' }, ` ${hostOf(c)}`) : null, h('div', { class: 'muted small' }, c.tokenId)),
     c.fingerprint ? chip('pinned', 'ok') : null,
+    c.tunnel ? chip('via SSH', 'plain', 'link', `Through SSH to ${c.tunnel.user}@${c.tunnel.host}:${c.tunnel.port}${c.sshFingerprint ? `, host key ${c.sshFingerprint}` : ''}`) : null,
+    c.enrichOnly ? chip('enrich only', 'plain', undefined, 'Adds VM disk use and more to the guests PDM shows; adds no hosts or guests of its own') : null,
     c.hasSecret ? null : chip('no secret', 'warn'),
     open ? null : button('Edit', () => openForm(c.id), { icon: 'settings', variant: 'ghost', disabled: app.busy !== null })
   )
@@ -203,6 +220,95 @@ function confirmRemove(c: ConnectionView): () => void {
     }
     void run('clear', revision ? { id: c.id, revision } : { id: c.id })
   }
+}
+
+function check(id: string, label: string, checked: boolean, onChange: (on: boolean) => void): HTMLElement {
+  return h('label', { class: 'check', for: id }, h('input', { id, type: 'checkbox', checked, onChange: (e: Event) => onChange((e.target as HTMLInputElement).checked) }), label)
+}
+
+/** "Reach via SSH tunnel": the SSH server, user, key and where the API is, and the pinned host key. */
+function tunnelFields(kind: SourceKind): HTMLElement {
+  const t = app.form.tunnel
+  const set = (patch: Partial<NonNullable<typeof t>>) => edit({ tunnel: { ...t!, ...patch } })
+  return h(
+    'div',
+    { class: 'conn-extra stack-sm' },
+    check('set-tunnel', 'Reach via SSH tunnel', !!t, (on) =>
+      edit({ tunnel: on ? { host: '', port: 22, user: '', identityFile: '', target: DEFAULT_TARGET[kind], hostKey: '' } : undefined })
+    ),
+    t
+      ? h(
+          'div',
+          { class: 'stack-sm' },
+          h('div', { class: 'muted small' }, 'For an API that only the server itself reaches (only SSH open): the plugin runs ssh -N -L with this key and talks to the API through it, still checking the certificate above.'),
+          field('set-ssh-host', 'SSH host', 'DNS name or IP address of the server.', text('set-ssh-host', t.host, 'pve.example.com', (v) => set({ host: v }))),
+          field('set-ssh-port', 'SSH port', '', text('set-ssh-port', String(t.port), '22', (v) => set({ port: Number(v) || 22 }))),
+          field('set-ssh-user', 'SSH user', 'A user whose key may only forward to the API (see the README).', text('set-ssh-user', t.user, 'orca-tunnel', (v) => set({ user: v }))),
+          field('set-ssh-key', 'Identity file', 'The private key on this machine, without a passphrase, readable by you only.', text('set-ssh-key', t.identityFile, '/home/you/.ssh/orca-proxmox', (v) => set({ identityFile: v }))),
+          field('set-ssh-target', 'API as the server reaches it', `Usually ${DEFAULT_TARGET[kind]}.`, text('set-ssh-target', t.target, DEFAULT_TARGET[kind], (v) => set({ target: v }))),
+          h(
+            'div',
+            { class: 'small' },
+            t.hostKey
+              ? [h('span', null, 'SSH host key pinned: '), h('code', null, sshFingerprints.get(t.hostKey) ?? t.hostKey.split(' ')[0]), ' ', button('Forget', () => set({ hostKey: '' }), { variant: 'ghost', title: 'Learn the key again with the next test' })]
+              : h('span', { class: 'warn-text' }, 'No SSH host key pinned yet: Test shows the server’s key to compare and pin.')
+          )
+        )
+      : null
+  )
+}
+
+/** "Enrich only", and node names that differ between this server and PDM. */
+function enrichFields(): HTMLElement {
+  const f = app.form
+  const lines = Object.entries(f.nodeMap ?? {}).map(([a, b]) => `${a}=${b}`).join('\n')
+  return h(
+    'div',
+    { class: 'conn-extra stack-sm' },
+    check('set-enrich', 'Enrich only: add to the guests PDM shows', !!f.enrichOnly, (on) => edit({ enrichOnly: on || undefined, ...(on ? {} : { nodeMap: undefined }) })),
+    f.enrichOnly
+      ? field(
+          'set-nodemap',
+          'Node names, where they differ',
+          'One per line: this server’s node=the node in PDM (or remote/node). VM disk use, storage types and updates go to the guest with the same node and VMID; nothing is added.',
+          h('textarea', {
+            id: 'set-nodemap',
+            rows: 2,
+            spellcheck: false,
+            placeholder: 'pve-x1=pve-a',
+            value: lines,
+            onChange: (e: Event) => {
+              const map: Record<string, string> = {}
+              for (const line of (e.target as HTMLTextAreaElement).value.split(/\r?\n/)) {
+                const [a, b] = line.split('=').map((x) => x.trim())
+                if (a && b) map[a] = b
+              }
+              edit({ nodeMap: Object.keys(map).length ? map : undefined })
+            }
+          })
+        )
+      : null
+  )
+}
+
+/** A host key the test saw (a first contact): shown to compare; pinned only on the person's click. */
+function hostKeyCallout(key: { key: string; fingerprint: string }): HTMLElement {
+  sshFingerprints.set(key.key, key.fingerprint)
+  const pinned = app.form.tunnel?.hostKey === key.key
+  return callout(
+    pinned ? 'ok' : 'warn',
+    pinned ? 'SSH host key ready to pin' : 'Compare the SSH host key',
+    h('div', null, 'The SSH server presented ', h('code', null, key.fingerprint), '. Compare it with ', h('code', null, 'ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub'), ' run on the server (or its console) before you pin it.'),
+    pinned
+      ? h('div', { class: 'small' }, 'Save to pin it: from then on any other key is refused.')
+      : h('div', { class: 'toolbar' }, button('It matches: pin this key', () => {
+          const t = app.form.tunnel
+          if (!t) return
+          app.form = { ...app.form, tunnel: { ...t, hostKey: key.key } }
+          app.formDirty = true
+          actions.render()
+        }, { icon: 'check', variant: 'primary' }))
+  )
 }
 
 /** The form for the connection in `app.form`: a saved one, or a new one. */
@@ -244,6 +350,8 @@ function connectionForm(list: ConnectionView[]): HTMLElement {
       text('set-secret', f.secret ?? '', hasSecret ? '•••••••• (stored)' : 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx', (v) => edit({ secret: v }), 'password')
     ),
     field('set-fp', 'Certificate fingerprint (SHA-256)', 'Optional: for a self-signed certificate.', text('set-fp', f.fingerprint, 'AA:BB:CC:…', (v) => edit({ fingerprint: v }))),
+    kind !== 'pdm' ? tunnelFields(kind) : null,
+    kind === 'pve' ? enrichFields() : null,
     app.config?.secretsProtection === 'unavailable'
       ? callout('bad', 'Orca cannot encrypt secrets on this machine', 'There is no OS keyring, so the token secret cannot be saved. This plugin will not store it in plain text.')
       : null,
@@ -267,6 +375,7 @@ function connectionForm(list: ConnectionView[]): HTMLElement {
           list.length ? button('Cancel', closeForm, { variant: 'ghost', disabled: busy !== null }) : null,
           current ? button('Remove…', () => askRemove(current), { icon: 'trash', variant: 'danger', disabled: busy !== null }) : null
         ),
+    test?.sshHostKey ? hostKeyCallout(test.sshHostKey) : null,
     test?.ok
       ? callout(
           'ok',

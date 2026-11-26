@@ -781,6 +781,28 @@
       .conn-row.editing {
         background: color-mix(in srgb, var(--orca-muted) 35%, transparent);
       }
+      .conn-extra {
+        border-top: 1px solid var(--line);
+        padding-top: 6px;
+      }
+      .conn-extra .check {
+        display: flex;
+        justify-content: flex-start;
+      }
+      .conn-extra .check input {
+        width: auto;
+        flex: none;
+        margin: 0;
+      }
+      .conn-extra textarea {
+        width: 100%;
+        font: 12px/1.4 var(--orca-font-mono, ui-monospace, monospace);
+        color: inherit;
+        background: var(--orca-background);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 4px 6px;
+      }
       .conn-edit {
         padding: 4px 2px 8px;
       }

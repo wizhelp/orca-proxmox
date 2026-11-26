@@ -24,7 +24,7 @@ const stub = `<script>
         const d = await data;
         if (name === 'estate.get') return d.estate;
         if (name === 'config.get') return d.config;
-        if (name === 'connection.test') return { ok: true, version: '1.1.10', remotes: 5 };
+        if (name === 'connection.test') return { ok: true, version: input?.kind === 'pve' ? '9.1.2' : '1.1.10', remotes: input?.kind === 'pve' ? 2 : 5, ...(input?.kind === 'pve' ? { unit: 'nodes' } : {}), ...(input?.tunnel && !input.tunnel.hostKey ? { sshHostKey: { key: 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g', fingerprint: 'SHA256:mKqU+0K8OhKmA8bBQi9Rz0Q5l7/g160hIP+rJYSTNj4' } } : {}) };
         if (name === 'config.save') return d.config;
         if (name === 'config.import') return { ...d.config, found: false };
         if (name === 'config.dismissImport') return { ...d.config, importStatus: null };

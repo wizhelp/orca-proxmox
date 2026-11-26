@@ -351,7 +351,8 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   async function view(connection: ConnectionConfig | null): Promise<ConnectionView | null> {
     if (!connection) return null
-    return { ...connection, hasSecret: (await readSecret(connection)) !== null }
+    const ssh = connection.tunnel?.hostKey ? hostKeyFingerprint(connection.tunnel.hostKey) : null
+    return { ...connection, hasSecret: (await readSecret(connection)) !== null, ...(ssh ? { sshFingerprint: ssh } : {}) }
   }
 
   async function configAnswer(): Promise<ConfigAnswer> {

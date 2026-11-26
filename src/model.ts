@@ -64,7 +64,7 @@ export function estateScope(connections: readonly Pick<ConnectionConfig, 'id' | 
 }
 
 /** A connection as the panel sees it: whether a secret is stored, never the secret. */
-export type ConnectionView = ConnectionConfig & { hasSecret: boolean }
+export type ConnectionView = ConnectionConfig & { hasSecret: boolean; /** The pinned SSH host key's SHA-256 fingerprint, to show. */ sshFingerprint?: string }
 
 export type ErrorKind =
   | 'not-configured'
