@@ -160,6 +160,23 @@ export function sshArgs(t: SshTunnel, localPort: number, knownHostsFile: string,
   ]
 }
 
+/**
+ * The same ssh, for one attempt the tunnel account must be refused: a forward the -L is replaced
+ * by (`-R …`), or a command run instead of none.
+ */
+export function scopeArgs(t: SshTunnel, knownHostsFile: string, identityFile: string, attempt: { forward: string[] } | { command: string }): string[] {
+  const base = sshArgs(t, 1, knownHostsFile, false, identityFile)
+  const head = base.slice(0, base.indexOf('-L')).filter((a) => a !== '-N')
+  return 'forward' in attempt ? ['-N', ...head, ...attempt.forward, '--', t.host] : [...head, '--', t.host, attempt.command]
+}
+
+/** What the tunnel account must refuse, checked live by scopeCheck. */
+export const SCOPE_ATTEMPTS: { what: string; attempt: (n: string) => { forward: string[] } | { command: string } }[] = [
+  { what: 'a reverse forward (-R) was accepted', attempt: () => ({ forward: ['-R', '127.0.0.1:0:127.0.0.1:9'] }) },
+  { what: 'a reverse Unix-socket forward was accepted', attempt: (n) => ({ forward: ['-R', `/tmp/orca-check-${n}.sock:127.0.0.1:9`] }) },
+  { what: 'a command ran successfully', attempt: () => ({ command: 'true' }) }
+]
+
 /** ssh's own words, without its debug lines. */
 const said = (stderr: string) => stderr.split(/\r?\n/).filter((l) => l.trim() && !/^debug\d?:/.test(l.trim())).join('\n')
 
@@ -311,6 +328,65 @@ export class TunnelManager {
       return true
     })
     return { connectTo: { host: '127.0.0.1', port: run.port }, hostKey, stop: () => this.end(run) }
+  }
+
+  /**
+   * Logs in as the tunnel account once per attempt in SCOPE_ATTEMPTS, with the pinned host key and
+   * the connection's key, and answers what was not refused. A login that does not get as far as
+   * authentication makes the check fail as a whole (it proves nothing).
+   */
+  async scopeCheck(t: SshTunnel, waitMs = 8000): Promise<string[]> {
+    if (this.closed) throw new ApiError({ kind: 'unreachable', message: 'The plugin is stopping; no SSH check is started' })
+    const ssh = this.deps.sshPath()
+    if (!ssh) throw new ApiError({ kind: 'invalid-config', message: 'No OpenSSH client (ssh) was found on this machine' })
+    if (!hostKeyFingerprint(t.hostKey)) throw new ApiError({ kind: 'invalid-config', message: `No SSH host key is pinned for ${t.host}` })
+    const open: string[] = []
+    for (const { what, attempt } of SCOPE_ATTEMPTS) {
+      const run: Run = { port: 0, file: '', stderr: '', ready: false, done: false }
+      this.probes.add(run)
+      try {
+        const dir = await this.folder()
+        const name = createHash('sha256').update(`${t.host}|scope|${this.deps.now()}|${Math.random()}`).digest('hex').slice(0, 16)
+        run.file = join(dir, `${name}.known_hosts`)
+        await writeFile(run.file, `${knownHostsName(t)} ${t.hostKey.trim()}
+`, { mode: 0o600 })
+        if (t.keyRef) {
+          const pem = await this.deps.identityKey?.(t.keyRef).catch(() => null)
+          if (!pem) throw new ApiError({ kind: 'invalid-config', message: 'The plugin’s own SSH key for this connection is missing' })
+          run.keyFile = join(dir, `${name}.key`)
+          await writeFile(run.keyFile, '', { mode: 0o600 })
+          await chmod(run.keyFile, 0o600).catch(() => undefined)
+          await this.deps.protectKeyFile?.(run.keyFile)
+          await writeFile(run.keyFile, pem, { mode: 0o600 })
+        }
+        if (this.closed || run.done) throw new ApiError({ kind: 'unreachable', message: 'The plugin is stopping; no SSH check is started' })
+        const child = this.deps.spawn(ssh, scopeArgs(t, run.file, run.keyFile ?? t.identityFile, attempt(name)))
+        run.child = child
+        const exit = await new Promise<{ code: number | null } | null>((resolve) => {
+          const timer = setTimeout(() => resolve(null), waitMs)
+          child.stderr?.on('data', (chunk) => {
+            run.stderr = (run.stderr + String(chunk)).slice(-16_000)
+            if (run.keyFile && /Authenticated to /.test(run.stderr)) dropKey(run)
+          })
+          child.on('error', () => {
+            clearTimeout(timer)
+            resolve({ code: -1 })
+          })
+          child.on('exit', (code) => {
+            clearTimeout(timer)
+            resolve({ code })
+          })
+        })
+        if (!/Authenticated to /.test(run.stderr)) {
+          throw exit ? sshFailure(t, run.stderr, { code: exit.code, signal: null }) : new ApiError({ kind: 'timeout', message: `The check of the tunnel account on ${t.host} did not get as far as logging in` })
+        }
+        // Still running, or ended well: not refused.
+        if (!exit || exit.code === 0) open.push(what)
+      } finally {
+        this.end(run)
+      }
+    }
+    return open
   }
 
   /** Only these keys may run (the current configuration): every other tunnel is stopped. */
