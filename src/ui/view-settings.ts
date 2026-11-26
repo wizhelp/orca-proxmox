@@ -114,7 +114,7 @@ const HELP: Record<SourceKind, [string, string][]> = {
   ],
   pve: [
     ['Create a token', 'In Proxmox VE: Datacenter → Permissions → API Tokens. Add one for a user, e.g. monitor@pve!orca, and copy the secret: PVE shows it once.'],
-    ['Make it read-only', 'Under Permissions, add the PVEAuditor role on / for the user and, with privilege separation on, for the token too. Disk use inside VMs also needs the guest agent privilege (see the README).'],
+    ['Make it read-only', 'Under Permissions, add the PVEAuditor role on / for the user and, with privilege separation on, for the token too. On PVE 9 that role also lets the plugin ask VMs’ guest agents for their disk use (turn “Disk use inside VMs” off in Orca’s plugin settings, or use a role without VM.GuestAgent.Audit, to keep it out).'],
     ['One cluster per connection', 'A PVE shows its own cluster (or node) only: add each standalone host as its own connection.'],
     ['Pin the certificate', 'Copy the SHA-256 fingerprint of the node’s certificate (System → Certificates) and paste it below.']
   ],
@@ -184,7 +184,7 @@ export function settingsView(): HTMLElement {
         )
       : null,
     kind !== 'pdm'
-      ? field('set-name', 'Name (optional)', `How this ${KIND_SHORT[kind]} appears in the estate; else its own cluster or host name. Letters, digits, ".", "_" and "-".`, text('set-name', f.name ?? '', kind === 'pve' ? 'lab' : 'backup', (v) => edit({ name: v })))
+      ? field('set-name', 'Name (optional)', `How this ${KIND_SHORT[kind]} appears in the estate; else the host name of its URL. Letters, digits, ".", "_" and "-".`, text('set-name', f.name ?? '', kind === 'pve' ? 'lab' : 'backup', (v) => edit({ name: v })))
       : null,
     field('set-url', 'Base URL', `${KIND_LABEL[kind]}, usually https://host:${ph.port}`, text('set-url', f.baseUrl, ph.url, (v) => edit({ baseUrl: v }))),
     field('set-token', 'API token ID', 'user@realm!tokenname', text('set-token', f.tokenId, ph.token, (v) => edit({ tokenId: v }))),

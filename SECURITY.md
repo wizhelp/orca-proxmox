@@ -95,10 +95,13 @@ text before it is copied.
 
 **The guest agent.** For VM disk use the worker asks PVE for the QEMU guest agent's `get-fsinfo`
 (a `GET`), and keeps only used and total bytes. On PVE 9 this needs `VM.GuestAgent.Audit`, which
-allows only the agent's informational calls; the documented setup grants it only if the person
-agrees. On PVE 8 the only privilege for it, `VM.Monitor`, also allows running commands in guests,
-so the documentation advises against granting it; VM disk use then stays unknown. A remote that
-refuses the call is not asked again for 6 hours.
+allows only the agent's informational calls and is **part of `PVEAuditor`**: a token with that
+role can make the call. To keep the agent out of it, turn off *Disk use inside VMs* in Orca's
+plugin settings (the worker then never asks) and, for the server to refuse it as well, use a copy
+of `PVEAuditor` without that privilege (docs/AGENT_SETUP.md). On PVE 8 the only privilege for it,
+`VM.Monitor`, also allows running commands in guests, so the documentation advises against
+granting it; VM disk use then stays unknown. A VM the token may not ask is not asked again for 6
+hours.
 
 ## Residual risks
 

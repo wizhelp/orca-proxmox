@@ -345,8 +345,9 @@ rules as above (trust the certificate first, secrets only in files, show each ch
 **Ask the person for** each server's URL as Orca's machine reaches it (`https://pve.example.com:8006`,
 `https://pbs.example.com:8007`), how you may make changes there (an admin login such as `root@pam`
 typed into a prompt, or SSH to the host and `pveum`/`proxmox-backup-manager` there), an optional
-short name for each connection (letters, digits, `.`, `_`, `-`), and, for PVE 9, whether VMs'
-disk use may be read through the guest agent (below).
+short name for each connection (letters, digits, `.`, `_`, `-`; without one, the panel names it
+after the URL's host), and, for PVE 9, whether the plugin may ask VMs' guest agents for their disk
+use (below: the read-only role allows it unless you leave that privilege out).
 
 ### Certificate
 
@@ -383,22 +384,38 @@ Through the API with an admin login instead, step 1's login works against PVE's
 `/api2/json/access/ticket` (the cookie is `PVEAuthCookie`), then `POST /access/users` with
 `userid=monitor@pve`, `POST /access/users/monitor@pve/token/orca` with `privsep=1` (the secret is
 in `data.value`), and `PUT /access/acl` with `path=/`, `roles=PVEAuditor` and `users=monitor@pve`,
-then again with `tokens=monitor@pve!orca`.
+then again with `tokens=monitor@pve!orca` (for the role without guest-agent access below: first
+`POST /access/roles` with `roleid=OrcaAuditor` and `privs=…`, then `roles=OrcaAuditor`).
 
-**VM disk use (optional).** `PVEAuditor` does not include the QEMU guest agent, so a VM's disk use
-stays *unknown* and the plugin shows its allocated size. On **PVE 9**, the privilege
-`VM.GuestAgent.Audit` allows only the agent's informational calls (the plugin uses
-`get-fsinfo`); if the person agrees, grant it on `/vms` to the user and the token:
+**VM disk use through the guest agent.** The plugin reads a running VM's filesystem use from its
+QEMU guest agent (`GET …/qemu/{vmid}/agent/get-fsinfo`; it keeps only used and total bytes).
+What the token may do there depends on the PVE version:
 
-```sh
-pveum role add OrcaGuestAgent --privs VM.GuestAgent.Audit
-pveum acl modify /vms --users monitor@pve --roles OrcaGuestAgent
-pveum acl modify /vms --tokens 'monitor@pve!orca' --roles OrcaGuestAgent
-```
+- **PVE 9**: `PVEAuditor` **includes** `VM.GuestAgent.Audit`, which allows the agent's
+  informational calls only (file systems, network interfaces, OS info, users and the like;
+  running commands or reading files needs other privileges). So the role above already lets the
+  plugin read VM disk use. **Ask the person before you hand the connection over**: if they do not
+  want the guest agent asked, use a role without that privilege instead of `PVEAuditor`, so the
+  server itself refuses it, and tell them to turn off **Disk use inside VMs** in Orca
+  **Settings → Plugins → Proxmox** (then the plugin never asks):
 
-On **PVE 8** the only privilege for it is `VM.Monitor`, which also lets the token run commands
-inside guests through the agent: do not grant it for this plugin. Either way the agent must be
-enabled in the VM's options and running in the guest.
+  ```sh
+  # PVEAuditor's privileges without VM.GuestAgent.Audit.
+  pveum role add OrcaAuditor --privs 'VM.Audit,Sys.Audit,Datastore.Audit,SDN.Audit,Pool.Audit,Mapping.Audit'
+  pveum acl modify / --users monitor@pve --roles OrcaAuditor
+  pveum acl modify / --tokens 'monitor@pve!orca' --roles OrcaAuditor
+  pveum acl delete / --users monitor@pve --roles PVEAuditor
+  pveum acl delete / --tokens 'monitor@pve!orca' --roles PVEAuditor
+  ```
+
+- **PVE 8**: `PVEAuditor` has no guest-agent privilege; the only one for `get-fsinfo` is
+  `VM.Monitor`, which also lets the token run commands inside guests through the agent. Do not
+  grant it for this plugin: VM disk use then shows as unknown, with the allocated size.
+
+For a VM's use to be readable, the person also has to **enable the guest agent** in the VM's
+**Options → QEMU Guest Agent** (it takes effect after the VM is shut down and started again) and
+**install and run** `qemu-guest-agent` inside the guest (on Windows, from the VirtIO drivers ISO).
+Otherwise the panel says "unknown (no guest agent)".
 
 Verify with the token itself from Orca's machine, with `PVE_URL` the address Orca uses and
 `curl.cfg` pinned to that server's certificate as in step 0 (the PVE header has `=` between

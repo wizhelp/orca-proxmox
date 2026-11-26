@@ -81,10 +81,12 @@ follow [Setup](#setup).
   *Reset order* goes back to PDM's. The tree can also order guests by name, status, CPU, memory
   or backup age.
 - **Guests**: every VM and container with status, a CPU sparkline, a memory bar, disk use, uptime
-  and backup state. Disk use is used of size with a bar: from Proxmox for containers, from the
-  QEMU guest agent for VMs where it can be read, else the VM's allocated size with its use marked
-  *unknown* and why (no guest agent, no permission, not offered through PDM), never 0 %. Search by name, VMID, tag, host or address; filter by type, status and host; sort
-  any column; select a row for its charts and details.
+  and backup state. Disk use is used of size with a bar: from Proxmox for running containers,
+  from the QEMU guest agent for VMs where it can be read, else the allocated size with its use
+  marked *unknown* and why (no guest agent, no permission, not offered through PDM, turned off),
+  never 0 %. A stopped guest shows the last use measured while it ran, marked as such. Search by
+  name, VMID, tag, host or address; filter by type, status and host; sort any column; select a
+  row for its charts and details.
 - **Backups**: PBS datastore usage with its last day as a chart, and each guest's newest PBS
   snapshot as a bar against the age limit. A guest with no snapshot in the last 26 hours
   (configurable) is flagged; templates are listed but never flagged; snapshots whose guest is gone
@@ -225,12 +227,21 @@ does the same through the API.
    path `/`, for **both** the token `monitor@pve!orca` and the user `monitor@pve`. A separated
    token has only the permissions given to it, capped by its user's.
 
-`PVEAuditor` reads everything and changes nothing. It does not include the guest agent, so a VM's
-disk use stays *unknown* (its allocated size is shown). To read it, optionally add a role with
-**`VM.GuestAgent.Audit`** (PVE 9; it allows the agent's informational calls only) on `/vms`, for
-the token and the user. On PVE 8 the only privilege for it is `VM.Monitor`, which also lets the
-token run commands inside the guest through the agent: the plugin does not ask for it, and without
-it VM disk use stays unknown. The guest agent must be enabled in the VM's options and running in it.
+`PVEAuditor` reads everything and changes nothing. **VM disk use** comes from each VM's QEMU guest
+agent (`get-fsinfo`):
+
+- On **PVE 9**, `PVEAuditor` includes `VM.GuestAgent.Audit` (the agent's informational calls
+  only: no commands, no files), so the plugin reads it. To keep the agent out of it, turn off
+  **Disk use inside VMs** in Orca **Settings → Plugins → Proxmox** (the plugin then never asks),
+  and, to have the server refuse it too, give the user and token a copy of `PVEAuditor` without
+  that privilege ([docs/AGENT_SETUP.md](docs/AGENT_SETUP.md#pve-a-read-only-user-and-token) shows
+  the `OrcaAuditor` role).
+- On **PVE 8**, `PVEAuditor` has no guest-agent privilege. The only one that allows the call is
+  `VM.Monitor`, which also lets the token run commands inside guests: do not grant it for this
+  plugin. VM disk use then shows as unknown.
+
+In each VM, the agent must be enabled under **Options → QEMU Guest Agent** (it applies after the VM
+is stopped and started) and `qemu-guest-agent` installed and running in the guest.
 
 **PBS** (web interface on port 8007, **Configuration → Access Control**):
 
@@ -245,9 +256,11 @@ with the node's **System → Certificates** (PVE) or the dashboard's **Show Fing
 
 **Connect**: **Settings → Add a connection**, choose **PVE** or **PBS**, then the base URL
 (`https://pve.example.com:8006`, `https://pbs.example.com:8007`), the token ID, the secret and the
-fingerprint, and optionally a **name** for it in the panel (else the cluster's name, a standalone
-node's name, or the host name of the URL). Test, then Save. Each URL can be added once. A cluster
-added both through PDM and directly is shown twice.
+fingerprint, and optionally a **name** for it in the panel (else the host name of its URL). Test,
+then Save. Each URL can be added once, and there is one PDM connection at most. Beside a PDM, a
+direct connection's remote is labelled, e.g. `lab (direct)`, so it never takes the name of one
+of PDM's remotes: a cluster added both through PDM and directly shows twice, once under each
+name, with its guests, alerts and counts twice too.
 
 The direct connections use these endpoints, all `GET`:
 
@@ -337,10 +350,14 @@ through PDM, on the backup scan's cadence; the Auditor role covers both.
   allocated size. PDM 1.1 does not pass the agent call on, so through PDM a VM shows its allocated
   size and *unknown* use; a direct PVE connection reads it where the agent runs and the token may
   ask it (see [Without PDM](#without-pdm-pve-and-pbs-directly)). Each VM is read every 10 minutes
-  at most, 24 per refresh and two at a time; a remote that refuses the call is not asked again
-  for 6 hours.
-- **Several connections** are read side by side; their remotes, guests and tasks are merged. Two
-  remotes of the same name are kept apart by a `-2` suffix on the later one.
+  at most, 24 per refresh and two at a time, and no new read starts after 20 seconds in one
+  refresh; a remote whose API has no agent call is not asked again for 6 hours, nor is a VM that
+  the token may not ask.
+- **Several connections** are read side by side; their remotes, guests and tasks are merged.
+  Remote names come from the configuration (see [Without PDM](#without-pdm-pve-and-pbs-directly)),
+  so they stay the same whichever connections answer. Two direct connections of the same name are
+  told apart by `-2`. Backups count as complete only when every PBS, direct or through PDM, was
+  read: with one of them unreachable, a guest without a backup found is *unknown*, not *never*.
 - **Opening the panel** from the status bar and **opening terminals** go through the `orca` CLI,
   as the plugin API has no call for either yet (see [Orca awareness](#orca-awareness)). A terminal
   on a paired server starts in the background, so the plugin then switches Orca to it; when Orca
