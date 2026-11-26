@@ -165,6 +165,15 @@ test('a Windows key path with backslashes is accepted; one that lost them says w
   }
   await assert.rejects(
     worker!.request('config.save', { ...PVE, tunnel: { ...TUNNEL, hostKey: HOST_KEY, identityFile: 'C:Usersexample.sshorca_proxmox_tunnel' } }),
-    /given as "C:Usersexample\.sshorca_proxmox_tunnel" \(backslashes lost/
+    /backslashes lost on the way \(in a shell\) make a path relative/
   )
+  // What was typed is never repeated: a secret pasted into the path field stays out of the error.
+  const pasted = '0b9e6c2a-5d1f-4c3e-9a7b-2f8e1d6c4b3a'
+  const tested = await worker!.request('connection.test', { ...PVE, tunnel: { ...TUNNEL, identityFile: pasted } })
+  assert.ok(!tested.ok && !JSON.stringify(tested).includes(pasted) && !JSON.stringify(tested).includes('0b9e6c2a'))
+  const saved = await worker!.request('config.save', { ...PVE, tunnel: { ...TUNNEL, hostKey: HOST_KEY, identityFile: pasted } }).then(
+    () => 'saved',
+    (e: Error) => e.message
+  )
+  assert.ok(!saved.includes('0b9e6c2a'), saved)
 })

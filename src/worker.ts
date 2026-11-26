@@ -211,7 +211,7 @@ function validTunnel(raw: Partial<Record<keyof SshTunnel, unknown>>, kind: Sourc
   const user = text(raw.user)
   if (!SSH_USER.test(user)) throw new InputError('The SSH user must be a plain user name.')
   const identityFile = text(raw.identityFile)
-  if (!isAbsolute(identityFile) || identityFile.startsWith('-') || /[\0\r\n]/.test(identityFile)) throw new InputError(`The identity file must be the absolute path of a private key on this machine; it was given as ${JSON.stringify(identityFile)} (backslashes lost on the way, e.g. in a shell, make a Windows path relative: write it from PowerShell or use forward slashes).`)
+  if (!isAbsolute(identityFile) || identityFile.startsWith('-') || /[\0\r\n]/.test(identityFile)) throw new InputError('The identity file must be the absolute path of a private key on this machine, e.g. C:\\Users\\you\\.ssh\\key or C:/Users/you/.ssh/key. On Windows, backslashes lost on the way (in a shell) make a path relative: write it from PowerShell or use forward slashes.')
   const target = text(raw.target) || (kind === 'pbs' ? '127.0.0.1:8007' : '127.0.0.1:8006')
   const t = /^([^:\s]+):(\d{1,5})$/.exec(target)
   if (!t || safeTarget(t[1]) !== t[1] || Number(t[2]) < 1 || Number(t[2]) > 65535) throw new InputError('The tunnel target must be host:port as the SSH server reaches the API, e.g. 127.0.0.1:8006.')
@@ -666,7 +666,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     try {
       next = validate(input, current?.id ?? 'new')
     } catch (error) {
-      return { ok: false, error: { kind: 'invalid-config', message: (error as Error).message } }
+      return { ok: false, error: { kind: 'invalid-config', message: scrubLine((error as Error).message, knownSecrets) } }
     }
     const secret = await secretFor(next, current, input)
     if (!secret) {

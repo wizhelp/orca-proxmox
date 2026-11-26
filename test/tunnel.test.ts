@@ -324,7 +324,7 @@ test('no ssh on the machine is a clear error; ssh’s own words become the reaso
   await assert.rejects(m.ensure('c-1@r1', TUNNEL), /No OpenSSH client \(ssh\) was found/)
   assert.equal(sshFailure(TUNNEL, 'Host key verification failed.').info.kind, 'fingerprint-mismatch')
   assert.match(sshFailure(TUNNEL, 'channel 2: open failed: administratively prohibited: open failed').message, /would not forward to 127.0.0.1:8006/)
-  assert.match(sshFailure(TUNNEL, 'debug1: Connecting to pve-x1.example.test\r\nssh: Could not resolve hostname pve-x1.example.test').message, /did not come up: ssh: Could not resolve/)
+  assert.match(sshFailure(TUNNEL, 'debug1: Connecting to pve-x1.example.test\r\nssh: Could not resolve hostname pve-x1.example.test').message, /did not come up: the name pve-x1.example.test could not be resolved$/)
   assert.equal(findSsh('win32', { SystemRoot: 'C:\\Windows' }, (p) => p === 'C:\\Windows\\System32\\OpenSSH\\ssh.exe'), 'C:\\Windows\\System32\\OpenSSH\\ssh.exe')
   assert.equal(findSsh('linux', {}, (p) => p === '/usr/bin/ssh'), '/usr/bin/ssh')
   assert.equal(findSsh('darwin', {}, () => false), null)
@@ -347,6 +347,20 @@ test('Windows OpenSSH gets the environment it needs; a silent exit says its code
   // ssh that exits without a word: the error says how it exited.
   const { m } = manager((_args, child) => child.exit(255))
   await assert.rejects(m.ensure('c-1@r1', TUNNEL), /did not come up: ssh exited with code 255 and said nothing/)
-  // Its last words otherwise, without debug lines.
-  assert.match(sshFailure(TUNNEL, 'debug1: x\r\nkex_exchange_identification: read: Connection reset\r\nConnection reset by 203.0.113.9 port 22\r\n').message, /kex_exchange_identification: read: Connection reset \/ Connection reset by 203\.0\.113\.9 port 22/)
+  // Otherwise what its words amount to, from a fixed list.
+  assert.match(sshFailure(TUNNEL, 'debug1: x\r\nkex_exchange_identification: read: Connection reset\r\nConnection reset by 203.0.113.9 port 22\r\n').message, /did not come up: the server closed the connection$/)
+  assert.match(sshFailure(TUNNEL, 'ssh: connect to host pve-x1.example.test port 2222: Connection refused\r\n').message, /port 2222 refused the connection$/)
+})
+
+test('ssh output never reaches an error: a banner or anything credential-shaped stays out', () => {
+  // A server's login banner (ssh prints it on stderr) carrying credential-like text, then a failure.
+  const stderr = [
+    'Welcome! Temporary password: hunter2-example',
+    'PVEAPIToken=orca-monitor@pve!orca=0b9e6c2a-5d1f-4c3e-9a7b-2f8e1d6c4b3a',
+    'Authorization: PVEAPIToken=x',
+    'some unrecognised failure 0b9e6c2a-5d1f-4c3e-9a7b-2f8e1d6c4b3a'
+  ].join('\r\n')
+  const message = sshFailure(TUNNEL, stderr, { code: 255, signal: null }).message
+  assert.equal(message, 'The SSH tunnel to orca-tunnel@pve-x1.example.test:2222 did not come up: ssh exited with code 255')
+  for (const leak of ['hunter2', '0b9e6c2a', 'PVEAPIToken', 'Authorization', 'unrecognised']) assert.ok(!message.includes(leak), leak)
 })

@@ -124,7 +124,9 @@ is an error, not a crash; a stop while a tunnel is being set up is checked right
 spawned, so none starts after it. A tunnel counts as ready only when that ssh process itself
 reports taking a connection on its forward (`-v`: "Connection to port N forwarding to …", after a
 test connection the worker makes), never because something answers on the port; a port taken
-before ssh bound it makes ssh exit (`ExitOnForwardFailure`) and another is tried. File names reach ssh as
+before ssh bound it makes ssh exit (`ExitOnForwardFailure`) and another is tried. ssh's own output (which can
+carry a server's login banner) never reaches a message: a failure is reported from a fixed list
+of outcomes and its exit code, and a rejected setting is never repeated back. File names reach ssh as
 one quoted, escaped value each (spaces, quotes, `%` tokens), as the real client's parser reads
 them back.
 

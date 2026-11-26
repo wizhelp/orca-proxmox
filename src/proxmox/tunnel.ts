@@ -171,7 +171,7 @@ export function forwardListening(stderr: string, port: number): boolean {
 }
 
 /** An ssh failure, from its last words on stderr, as an error the panel can explain. */
-export function sshFailure(t: SshTunnel, stderr: string): ApiError {
+export function sshFailure(t: SshTunnel, stderr: string, exit?: { code: number | null; signal: string | null }): ApiError {
   const words = said(stderr)
   const at = `${t.user}@${t.host}:${t.port}`
   if (/host key verification failed|remote host identification has changed|host key for .* has changed/i.test(words)) {
@@ -186,9 +186,22 @@ export function sshFailure(t: SshTunnel, stderr: string): ApiError {
   if (/forwarding failed|open failed|administratively prohibited|port forwarding is disabled|could not request local forwarding/i.test(words)) {
     return new ApiError({ kind: 'unreachable', message: `SSH on ${t.host} would not forward to ${t.target}`, hint: 'The account’s forwarding rules (permitopen= on the key, PermitOpen in sshd’s Match block) must allow exactly this target.' })
   }
-  // ssh's last words (not its debug lines), so the reason is visible.
-  const last = words.split('\n').slice(-3).join(' / ')
-  return new ApiError({ kind: 'unreachable', message: `The SSH tunnel to ${at} did not come up${last ? `: ${last.slice(0, 300)}` : ''}`, hint: 'Check the SSH host, port and that this machine can reach it.' })
+  // Never ssh's own text: it can carry a server's login banner, or anything else. Only what it
+  // amounts to, from a fixed list, and how ssh exited.
+  const reason = /could not resolve hostname|name or service not known|no such host/i.test(words)
+    ? `the name ${t.host} could not be resolved`
+    : /connection refused/i.test(words)
+      ? `port ${t.port} refused the connection`
+      : /timed out|timeout/i.test(words)
+        ? 'the connection timed out'
+        : /no route to host|network is unreachable|host is unreachable/i.test(words)
+          ? 'there is no route to the host'
+          : /connection (reset|closed)|kex_exchange_identification|broken pipe|connection lost/i.test(words)
+            ? 'the server closed the connection'
+            : exit
+              ? `ssh exited with ${exit.code !== null ? `code ${exit.code}` : `signal ${exit.signal}`}${words.trim() ? '' : ' and said nothing'}`
+              : 'ssh exited'
+  return new ApiError({ kind: 'unreachable', message: `The SSH tunnel to ${at} did not come up: ${reason}`, hint: 'Check the SSH host, port and that this machine can reach it.' })
 }
 
 /** One ssh process: tracked from spawn to its end. */
@@ -197,6 +210,8 @@ type Run = {
   port: number
   file: string
   stderr: string
+  /** How it exited, once it did. */
+  exit?: { code: number | null; signal: string | null }
   ready: boolean
   done: boolean
   /** Called once if it ends by itself after it was ready. */
@@ -256,7 +271,7 @@ export class TunnelManager {
           if (current.run !== run) return
           current.run = undefined
           // Gone while in use: the next request starts it again, after a pause that grows.
-          this.failed(current, sshFailure(tunnel, run.stderr || 'ssh exited'))
+          this.failed(current, sshFailure(tunnel, run.stderr, run.exit))
         }
         current.failures = 0
         current.lastError = undefined
@@ -381,7 +396,7 @@ export class TunnelManager {
       const result = await this.waitReady(run, child, t)
       if (result === 'ready') {
         const hostKey = learn ? (firstHostKey(await readFile(run.file, 'utf8').catch(() => '')) ?? '') : t.hostKey
-        if (run.done) throw sshFailure(t, run.stderr || 'ssh exited')
+        if (run.done) throw sshFailure(t, run.stderr, run.exit)
         return { run, hostKey }
       }
       this.end(run)
@@ -443,7 +458,8 @@ export class TunnelManager {
         run.done = true
         this.probes.delete(run)
         if (run.file) void rm(run.file, { force: true }).catch(() => undefined)
-        if (!run.ready) settle(portTaken(run.stderr, run.port) ? 'port-taken' : sshFailure(t, run.stderr.trim() ? run.stderr : `ssh exited with ${code !== null ? `code ${code}` : `signal ${signal}`} and said nothing`))
+        run.exit = { code, signal }
+        if (!run.ready) settle(portTaken(run.stderr, run.port) ? 'port-taken' : sshFailure(t, run.stderr, run.exit))
         else if (!wasDone) run.onLost?.()
       })
     })
