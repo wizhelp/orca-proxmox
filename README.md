@@ -199,13 +199,13 @@ first connection starts as one), and enter:
 - **API token secret**
 - **Pinned certificate fingerprint** (optional): `AA:BB:…` (colons and case don't matter)
 
-Press **Test connection**, then **Save**.
+Press **Test**, then **Save**; the form closes and the connection is listed. **Edit** opens it again; **Remove…** asks before it deletes the connection and its stored secret.
 
 Without the panel (an agent or a script): write the same four fields as JSON to the plugin's
 import file (readable by you only, written to a temporary name and renamed into place); the
 plugin tests the connection, imports it only if the test passes, then deletes the file; see
 [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md#4-hand-the-connection-to-the-plugin). The path is shown under
-Settings → *Set up from a file*, with an *Import now* button.
+Settings → *Import from a file*, with an *Import now* button.
 
 Under Orca **Settings → Plugins → Proxmox** you can change the refresh interval (default 30 s),
 the backup age warning (default 26 h) and how often PBS snapshot lists are read (default 5 min;

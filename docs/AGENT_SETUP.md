@@ -320,14 +320,14 @@ connection file*, or on *Import now* in Settings. From a terminal:
 ```sh
 orca plugin restart "$KEY"                    # stop the worker…
 orca plugin open "$KEY" --panel=proxmox       # …opening the panel starts it, and it imports
-sleep 5; orca plugin logs "$KEY" | grep 'Import:' | tail -1
+sleep 5; orca plugin logs "$KEY" | grep -E 'Import( file)?:' | tail -2
 ```
 
-The plugin tests the connection **before** it replaces anything. The log line says either
-`Import: Imported the PDM connection to … Connection test: PDM x.y.z, N remotes visible. The file
-was overwritten and deleted.` (for PVE: `N nodes visible`, for PBS: `N datastores visible`) or
-why not, with the current connections kept. If it says the file could
-**not** be deleted, delete it by hand: it holds the secret. The log (and the panel) show the PDM
+The plugin tests the connection **before** it replaces anything. Two log lines tell the outcome:
+`Import: …` says either `Imported the PDM connection to … Connection test: PDM x.y.z, N remotes
+visible.` (for PVE: `N nodes visible`, for PBS: `N datastores visible`) or why not, with the
+current connections kept; `Import file: …` says what became of the file. Read both. If the file
+could **not** be deleted, delete it by hand: it holds the secret. The log (and the panel) show the PDM
 URL, the token ID and the file's path, never the secret.
 
 ## 5. Check
@@ -432,7 +432,8 @@ code=$(curl -K "$WORK/curl.cfg" -H @"$WORK/auth.hdr" -o "$WORK/list.json" -w '%{
   "$PVE_URL/api2/json/cluster/resources?type=node")
 rm -f "$WORK/auth.hdr"
 [ "$code" = 200 ] || { echo "The token cannot read the cluster (HTTP $code): stop."; exit 1; }
-python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["data"]), "nodes visible")' "$WORK/list.json"
+python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["data"]), "nodes visible")' "$WORK/list.json" ||
+  { echo "Unexpected answer from PVE: stop."; exit 1; }
 rm -f "$WORK/list.json"
 ```
 
@@ -462,9 +463,27 @@ proxmox-backup-manager acl update / Audit --auth-id 'monitor@pbs!orca'
 `Audit` on `/` reads the server's status, datastores, snapshots and tasks and changes nothing.
 `DatastoreAudit` on `/datastore` is enough for datastores and backups only. Through the API:
 `POST /access/users`, `POST /access/users/monitor@pbs/token/orca` and `PUT /access/acl` with
-`path=/`, `role=Audit` and `auth-id`, once for the user and once for the token. Verify with the
-header `Authorization: PBSAPIToken=monitor@pbs!orca:<secret>` against
-`/api2/json/admin/datastore` (`N datastores visible`).
+`path=/`, `role=Audit` and `auth-id`, once for the user and once for the token.
+
+Verify from Orca's machine the same way as for PVE, with `PBS_URL` the address Orca uses,
+`curl.cfg` pinned to the PBS certificate (step 0 against port 8007) and the PBS header (`:`
+between token ID and secret):
+
+```sh
+python3 - "$WORK" <<'PY'
+import os, sys
+work = sys.argv[1]
+secret = open(os.path.join(work, "secret")).read().strip()
+open(os.path.join(work, "auth.hdr"), "w").write("Authorization: PBSAPIToken=monitor@pbs!orca:" + secret + "\n")
+PY
+code=$(curl -K "$WORK/curl.cfg" -H @"$WORK/auth.hdr" -o "$WORK/list.json" -w '%{http_code}' \
+  "$PBS_URL/api2/json/admin/datastore")
+rm -f "$WORK/auth.hdr"
+[ "$code" = 200 ] || { echo "The token cannot read the datastores (HTTP $code): stop."; exit 1; }
+python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["data"]), "datastores visible")' "$WORK/list.json" ||
+  { echo "Unexpected answer from PBS: stop."; exit 1; }
+rm -f "$WORK/list.json"
+```
 
 ### Hand each connection to the plugin
 
