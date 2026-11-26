@@ -189,7 +189,8 @@ presented and offers to put it in the form, so you can compare it and save.
 
 ### 3. Connect
 
-Open the **Proxmox** panel in Orca's right sidebar, go to **Settings**, choose the kind **PDM** (the first connection starts as one), and enter:
+Open the **Proxmox** panel in Orca's right sidebar, go to **Settings**, keep the kind **PDM** (the
+first connection starts as one), and enter:
 
 - **Base URL**: `https://pdm.example.com:8443`
 - **API token ID**: `monitor@pdm!orca`
