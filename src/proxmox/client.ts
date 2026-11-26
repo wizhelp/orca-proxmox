@@ -1,7 +1,7 @@
 // A read-only Proxmox API client: token auth, `{ data }` unwrapping and error mapping. The same
 // client serves PDM, PVE and PBS; only the Authorization scheme differs between them.
 import type { ConnectionConfig, SourceError, SourceKind } from '../model'
-import { probeFingerprint, TransportError, type Transport } from './http'
+import { probeFingerprint, TransportError, type ConnectTo, type Transport } from './http'
 
 /**
  * Token header per product. PVE separates token id and secret with `=`; PBS and PDM with `:`.
@@ -26,7 +26,9 @@ export type ClientOptions = {
   transport: Transport
   timeoutMs?: number
   /** Probe the presented certificate on TLS errors (off in tests that use a fake transport). */
-  probe?: (url: URL) => Promise<string | null>
+  probe?: (url: URL, connectTo?: ConnectTo) => Promise<string | null>
+  /** Where to connect for each request (an SSH tunnel's local end); absent: the URL's host. */
+  route?: () => Promise<ConnectTo>
 }
 
 export type Query = Record<string, string | number | boolean | undefined>
@@ -86,17 +88,21 @@ export class ProxmoxClient {
       if (value !== undefined) url.searchParams.set(key, String(value))
     }
     let response
+    let connectTo: ConnectTo | undefined
     try {
+      connectTo = this.options.route ? await this.options.route() : undefined
       response = await this.options.transport({
         method: 'GET',
         url,
         headers: { Authorization: this.authorization, Accept: 'application/json' },
         fingerprint: this.options.connection.fingerprint || undefined,
         timeoutMs: this.options.timeoutMs ?? 15000,
-        signal
+        signal,
+        ...(connectTo ? { connectTo } : {})
       })
     } catch (error) {
-      throw await this.transportFailure(error, url)
+      if (error instanceof ApiError) throw error
+      throw await this.transportFailure(error, url, connectTo)
     }
     if (response.status === 401) {
       throw new ApiError({
@@ -127,7 +133,7 @@ export class ProxmoxClient {
     return parseData<T>(response.body, response.contentType, path)
   }
 
-  private async transportFailure(error: unknown, url: URL): Promise<ApiError> {
+  private async transportFailure(error: unknown, url: URL, connectTo?: ConnectTo): Promise<ApiError> {
     if (!(error instanceof TransportError)) {
       return new ApiError({ kind: 'unreachable', message: error instanceof Error ? error.message : String(error) })
     }
@@ -137,8 +143,8 @@ export class ProxmoxClient {
       info.hint =
         'The server presented a different certificate. If it was renewed on purpose, compare the new fingerprint with the one shown in Proxmox and pin it; otherwise do not connect.'
     } else if (error.kind === 'tls') {
-      const probe = this.options.probe ?? probeFingerprint
-      info.presentedFingerprint = (await probe(url).catch(() => null)) ?? undefined
+      const probe = this.options.probe ?? ((u: URL, c?: ConnectTo) => probeFingerprint(u, 5000, c))
+      info.presentedFingerprint = (await probe(url, connectTo).catch(() => null)) ?? undefined
       info.hint =
         'Proxmox uses a self-signed certificate by default. Pin its SHA-256 fingerprint (shown under Certificates in Proxmox) after checking it matches.'
     } else if (error.kind === 'unreachable' || error.kind === 'timeout') {

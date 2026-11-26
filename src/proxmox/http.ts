@@ -4,6 +4,9 @@
 // With a pin, the TLS handshake completes and the fingerprint is compared BEFORE any HTTP bytes
 // (and so the Authorization header) are written: the request is sent over the already-verified
 // socket. Without a pin, Node's normal CA and hostname checks apply.
+//
+// `connectTo` sends the bytes elsewhere (the local end of an SSH tunnel) while everything about
+// the server's identity (SNI, hostname check, pin) stays that of the URL.
 import * as http from 'node:http'
 import * as net from 'node:net'
 import * as tls from 'node:tls'
@@ -17,7 +20,11 @@ export type HttpRequest = {
   fingerprint?: string
   timeoutMs: number
   signal?: AbortSignal
+  /** Connect here instead of the URL's host and port (an SSH tunnel's local end). */
+  connectTo?: ConnectTo
 }
+
+export type ConnectTo = { host: string; port: number }
 
 export type HttpResponse = {
   status: number
@@ -63,21 +70,23 @@ function mapSocketError(error: NodeJS.ErrnoException, url: URL): TransportError 
   return new TransportError('unreachable', `Cannot reach ${url.host}: ${code || error.message}`)
 }
 
-function connectOptions(url: URL): tls.ConnectionOptions {
+function connectOptions(url: URL, connectTo?: ConnectTo): tls.ConnectionOptions {
   const host = url.hostname.replace(/^\[|\]$/g, '')
   return {
-    host,
-    port: Number(url.port || 443),
+    host: connectTo?.host ?? host,
+    port: connectTo?.port ?? Number(url.port || 443),
     // SNI must not be an IP address.
     servername: net.isIP(host) ? undefined : host,
-    ALPNProtocols: ['http/1.1']
+    ALPNProtocols: ['http/1.1'],
+    // Through a tunnel the socket goes to 127.0.0.1, but the certificate must still name the URL's host.
+    ...(connectTo ? { checkServerIdentity: (_name: string, cert: tls.PeerCertificate) => tls.checkServerIdentity(host, cert) } : {})
   }
 }
 
 /** Opens a TLS socket and resolves once it is verified: by the pin when given, else by CAs. */
-function connect(url: URL, pin: string | null, signal: AbortSignal): Promise<tls.TLSSocket> {
+function connect(url: URL, pin: string | null, signal: AbortSignal, connectTo?: ConnectTo): Promise<tls.TLSSocket> {
   return new Promise((resolve, reject) => {
-    const socket = tls.connect({ ...connectOptions(url), rejectUnauthorized: pin === null })
+    const socket = tls.connect({ ...connectOptions(url, connectTo), rejectUnauthorized: pin === null })
     const fail = (error: TransportError) => {
       socket.destroy()
       reject(error)
@@ -112,9 +121,9 @@ function connect(url: URL, pin: string | null, signal: AbortSignal): Promise<tls
  * Reads the fingerprint a server presents without verifying or sending anything, so a TLS error
  * can show the person what to compare and pin. Null when it cannot be read.
  */
-export function probeFingerprint(url: URL, timeoutMs = 5000): Promise<string | null> {
+export function probeFingerprint(url: URL, timeoutMs = 5000, connectTo?: ConnectTo): Promise<string | null> {
   return new Promise((resolve) => {
-    const socket = tls.connect({ ...connectOptions(url), rejectUnauthorized: false })
+    const socket = tls.connect({ ...connectOptions(url, connectTo), rejectUnauthorized: false })
     const done = (value: string | null) => {
       clearTimeout(timer)
       socket.destroy()
@@ -147,7 +156,7 @@ export const nodeTransport: Transport = async (request) => {
   const onOuterAbort = () => controller.abort()
   request.signal?.addEventListener('abort', onOuterAbort, { once: true })
   try {
-    const socket = await connect(url, pin, controller.signal)
+    const socket = await connect(url, pin, controller.signal, request.connectTo)
     // An agent that hands out only the verified socket. (`agent: false` with a `createConnection`
     // option is not enough: Node then builds its own agent, which opens a fresh plain TCP socket.)
     const agent = new http.Agent({ keepAlive: false, maxSockets: 1 })

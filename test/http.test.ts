@@ -101,3 +101,22 @@ test('a closed port is unreachable', async () => {
   )
   assert.equal(error.kind, 'unreachable')
 })
+
+test('through a tunnel: bytes go to the local port, the pin and the name are the server URL\'s', async () => {
+  const port = Number(new URL(base).port)
+  seen.length = 0
+  // The URL names a host that is not even resolvable; only connectTo is dialled.
+  const via = (url: string, pin?: string) =>
+    nodeTransport({ method: 'GET', url: new URL(url), headers: { Authorization: 'PVEAPIToken=t@pve!t=s' }, fingerprint: pin, timeoutMs: 5000, connectTo: { host: '127.0.0.1', port } })
+  const ok = await via('https://pve.invalid:8006/api2/json/version', fingerprint)
+  assert.equal(ok.status, 200)
+  assert.equal(seen.length, 1)
+  // A wrong pin still fails before any byte of HTTP.
+  const bad = await rejection(via('https://pve.invalid:8006/api2/json/version', WRONG))
+  assert.equal(bad.kind, 'fingerprint-mismatch')
+  assert.equal(seen.length, 1)
+  // Without a pin, the certificate must name the URL's host, not 127.0.0.1: "pve.invalid" is refused.
+  assert.equal((await rejection(via('https://pve.invalid:8006/api2/json/version'))).kind, 'tls')
+  // The presented fingerprint is probed through the tunnel too.
+  assert.equal(await probeFingerprint(new URL('https://pve.invalid:8006'), 3000, { host: '127.0.0.1', port }), fingerprint)
+})
