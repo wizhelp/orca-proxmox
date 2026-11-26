@@ -7,6 +7,7 @@ import type { ConnectionInput } from '../protocol'
 import { actions, app, failure } from './app'
 import { h } from './dom'
 import { icon } from './icons'
+import { ask, CONFIRM_MS, connectionTarget, mayAct, pending } from './confirm'
 import { button, callout, chip, errorCallout, select } from './parts'
 
 const KIND_LABEL: Record<SourceKind, string> = { pdm: 'Proxmox Datacenter Manager', pve: 'Proxmox VE', pbs: 'Proxmox Backup Server' }
@@ -55,7 +56,8 @@ function closeForm(): void {
   actions.render()
 }
 
-async function run(kind: 'test' | 'save' | 'clear' | 'import' | 'dismiss'): Promise<void> {
+/** `target`: for 'clear', the connection (id and revision) the removal was confirmed for. */
+async function run(kind: 'test' | 'save' | 'clear' | 'import' | 'dismiss', target?: { id: string; revision?: string }): Promise<void> {
   app.busy = kind
   app.confirm = null
   app.settingsMessage = null
@@ -95,8 +97,9 @@ async function run(kind: 'test' | 'save' | 'clear' | 'import' | 'dismiss'): Prom
         await actions.refresh(true)
       }
     } else {
-      const id = app.form.id && app.form.id !== 'new' ? app.form.id : undefined
-      app.config = await orca.plugin.request('config.clear', id ? { id } : {})
+      // Exactly the confirmed connection, never whatever the form shows now.
+      if (!target) throw new Error('No connection was confirmed for removal; nothing was removed.')
+      app.config = await orca.plugin.request('config.clear', target.revision ? { id: target.id, revision: target.revision } : { id: target.id })
       actions.discardRefresh()
       fillForm()
       app.formOpen = false
@@ -169,6 +172,39 @@ function connectionRow(c: ConnectionView, open: boolean): HTMLElement {
   )
 }
 
+function isRemoveAsked(c: ConnectionView): boolean {
+  const live = pending(app.confirm, Date.now())
+  return live?.action === 'remove' && live.target === connectionTarget(c)
+}
+
+function askRemove(c: ConnectionView): void {
+  app.confirm = ask('remove', connectionTarget(c), Date.now())
+  // Gone when it expires, even if nothing else re-renders.
+  setTimeout(() => actions.render(), CONFIRM_MS + 50)
+  actions.render()
+}
+
+/**
+ * The confirm button's action, bound now to this confirmation and this connection revision:
+ * later, repeated or replayed, or after the connection changed, it removes nothing.
+ */
+function confirmRemove(c: ConnectionView): () => void {
+  const nonce = app.confirm?.nonce ?? -1
+  const target = connectionTarget(c)
+  const revision = c.revision
+  return () => {
+    const now = connections().find((x) => x.id === c.id)
+    const ok = app.busy === null && mayAct(app.confirm, nonce, 'remove', target, now && connectionTarget(now), Date.now())
+    app.confirm = null
+    if (!ok) {
+      app.settingsMessage = { tone: 'off', text: 'That confirmation no longer applies; nothing was removed.' }
+      actions.render()
+      return
+    }
+    void run('clear', revision ? { id: c.id, revision } : { id: c.id })
+  }
+}
+
 /** The form for the connection in `app.form`: a saved one, or a new one. */
 function connectionForm(list: ConnectionView[]): HTMLElement {
   const f = app.form
@@ -211,7 +247,7 @@ function connectionForm(list: ConnectionView[]): HTMLElement {
     app.config?.secretsProtection === 'unavailable'
       ? callout('bad', 'Orca cannot encrypt secrets on this machine', 'There is no OS keyring, so the token secret cannot be saved. This plugin will not store it in plain text.')
       : null,
-    current && app.confirm === `remove:${current.id}`
+    current && isRemoveAsked(current)
       ? h(
           'div',
           { class: 'confirm', role: 'alertdialog', 'aria-label': 'Confirm removal' },
@@ -219,7 +255,7 @@ function connectionForm(list: ConnectionView[]): HTMLElement {
           h(
             'div',
             { class: 'toolbar' },
-            button(busy === 'clear' ? 'Removing…' : 'Remove', () => void run('clear'), { icon: 'trash', variant: 'danger', disabled: busy !== null, id: 'confirm-remove' }),
+            button(busy === 'clear' ? 'Removing…' : 'Remove', confirmRemove(current), { icon: 'trash', variant: 'danger', disabled: busy !== null, id: 'confirm-remove' }),
             button('Keep it', () => ((app.confirm = null), actions.render()), { variant: 'ghost', disabled: busy !== null })
           )
         )
@@ -229,7 +265,7 @@ function connectionForm(list: ConnectionView[]): HTMLElement {
           button(busy === 'save' ? 'Saving…' : 'Save', () => void run('save'), { icon: 'check', variant: 'primary', disabled: busy !== null }),
           button(busy === 'test' ? 'Testing…' : 'Test', () => void run('test'), { icon: 'plug', disabled: busy !== null }),
           list.length ? button('Cancel', closeForm, { variant: 'ghost', disabled: busy !== null }) : null,
-          current ? button('Remove…', () => ((app.confirm = `remove:${current.id}`), actions.render()), { icon: 'trash', variant: 'danger', disabled: busy !== null }) : null
+          current ? button('Remove…', () => askRemove(current), { icon: 'trash', variant: 'danger', disabled: busy !== null }) : null
         ),
     test?.ok
       ? callout(

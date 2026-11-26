@@ -12,6 +12,7 @@ import { button, callout, chip, dot, emptyState, guestDetails, segmented, select
 import { makeSortable, recentlyDragged } from './sortable'
 import { hostActions } from './actions'
 import { warningsBlock } from './view-insights'
+import { ask, CONFIRM_MS, mayAct, orderTarget, pending } from './confirm'
 import { versionDrift } from '../features/insights'
 
 function saveLevel(keys: string[]): void {
@@ -314,6 +315,30 @@ function treeView(snap: EstateSnapshot): HTMLElement {
 
 // ---- the tab ----
 
+/** A reset of the order waiting for its confirmation, for the order as it is now. */
+function resetAsked(): boolean {
+  const live = pending(app.confirm, Date.now())
+  return live?.action === 'reset-order' && live.target === orderTarget(app.order)
+}
+
+function askReset(): void {
+  app.confirm = ask('reset-order', orderTarget(app.order), Date.now())
+  setTimeout(() => actions.render(), CONFIRM_MS + 50)
+  actions.render()
+}
+
+/** Bound to this confirmation and this order: a late or repeated click, or a changed order, resets nothing. */
+function confirmReset(): () => void {
+  const nonce = app.confirm?.nonce ?? -1
+  const target = orderTarget(app.order)
+  return () => {
+    const ok = mayAct(app.confirm, nonce, 'reset-order', target, orderTarget(app.order), Date.now())
+    app.confirm = null
+    if (ok) void actions.saveOrder([])
+    else actions.render()
+  }
+}
+
 export function hostsView(snap: EstateSnapshot): HTMLElement {
   const down = snap.remotes.filter((r) => !r.online)
   const offline = snap.hosts.filter((x) => x.node && !x.online)
@@ -348,9 +373,9 @@ export function hostsView(snap: EstateSnapshot): HTMLElement {
             actions.render()
           })
         : null,
-      app.order.length && app.confirm !== 'reset-order' ? button('Reset order…', () => ((app.confirm = 'reset-order'), actions.render()), { icon: 'undo', variant: 'ghost', title: "Go back to PDM's order" }) : null
+      app.order.length && !resetAsked() ? button('Reset order…', askReset, { icon: 'undo', variant: 'ghost', title: "Go back to PDM's order" }) : null
     ),
-    app.confirm === 'reset-order'
+    resetAsked()
       ? h(
           'div',
           { class: 'confirm', role: 'alertdialog', 'aria-label': 'Confirm reset' },
@@ -358,7 +383,7 @@ export function hostsView(snap: EstateSnapshot): HTMLElement {
           h(
             'div',
             { class: 'toolbar' },
-            button('Reset', () => ((app.confirm = null), actions.saveOrder([])), { icon: 'undo', variant: 'danger', id: 'confirm-reset' }),
+            button('Reset', confirmReset(), { icon: 'undo', variant: 'danger', id: 'confirm-reset' }),
             button('Keep it', () => ((app.confirm = null), actions.render()), { variant: 'ghost' })
           )
         )

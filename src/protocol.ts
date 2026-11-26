@@ -46,8 +46,11 @@ declare module 'orca' {
     'config.get': { output: ConfigAnswer }
     /** Validates and saves the connection; the secret goes to Orca's encrypted secrets. */
     'config.save': { input: ConnectionInput; output: ConfigAnswer }
-    /** Removes one connection (`id`) and its stored secret, or all of them. */
-    'config.clear': { input: { id?: string }; output: ConfigAnswer }
+    /**
+     * Removes one connection and its stored secret: `id` names it and `revision` must be its
+     * current one, so a confirmation given for an earlier configuration removes nothing.
+     */
+    'config.clear': { input: { id: string; revision?: string }; output: ConfigAnswer }
     /** Forgets the last import's outcome (the panel's dismiss button). */
     'config.dismissImport': { output: ConfigAnswer }
     /** Imports the import file now, if there is one. */

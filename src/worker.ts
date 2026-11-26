@@ -510,17 +510,22 @@ export default function activate(orca: OrcaWorkerApi): void {
   void importConnection('start')
 
   orca.panels.handle('config.clear', async (input) => {
-    const raw = (input as { id?: unknown } | undefined)?.id
-    const id = typeof raw === 'string' ? raw : undefined
+    const raw = input as { id?: unknown; revision?: unknown } | undefined
+    const id = typeof raw?.id === 'string' ? raw.id : ''
+    const revision = typeof raw?.revision === 'string' ? raw.revision : undefined
+    // Always one named connection, as it was when the removal was confirmed; never "all".
+    if (!id) throw new InputError('Name the connection to remove; nothing was removed.')
     await withConfigLock(async () => {
-      configEpoch += 1
       const list = await loadConnections()
-      const gone = id ? list.filter((c) => c.id === id) : list
-      await orca.storage.set(CONNECTIONS_KEY, toJson(list.filter((c) => !gone.includes(c))) as unknown as JsonValue)
+      const target = list.find((c) => c.id === id)
+      if (!target) throw new InputError('That connection no longer exists; nothing was removed.')
+      if (target.revision !== revision) throw new InputError('That connection was changed since you confirmed; nothing was removed. Review it and confirm again.')
+      configEpoch += 1
+      await orca.storage.set(CONNECTIONS_KEY, toJson(list.filter((c) => c !== target)) as unknown as JsonValue)
       await orca.storage.set(IMPORT_STATUS_KEY, null).catch(() => undefined)
-      await switched(gone)
+      await switched([target])
     })
-    log(id ? 'Removed a connection and its secret' : 'Removed the connections and their secrets')
+    log('Removed a connection and its secret')
     return configAnswer()
   })
 

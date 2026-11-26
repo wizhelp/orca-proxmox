@@ -73,7 +73,13 @@ test('PDM plus a direct PVE and PBS: each tested and saved with its own secret, 
 
   // Removing one keeps the others and their secrets.
   const pveId = config.connections.find((c) => c.kind === 'pve')!.id
-  const after = await worker!.request('config.clear', { id: pveId })
+  const pveRevision = config.connections.find((c) => c.kind === 'pve')!.revision
+  // Removal names one connection as it was confirmed: never all, never a changed one.
+  await assert.rejects(worker!.request('config.clear', {} as never), /Name the connection to remove/)
+  await assert.rejects(worker!.request('config.clear', { id: pveId, revision: 'an-older-revision' }), /changed since you confirmed/)
+  await assert.rejects(worker!.request('config.clear', { id: 'c-gone', revision: pveRevision }), /no longer exists/)
+  assert.equal((await worker!.request('config.get', undefined as never)).connections.length, 3, 'nothing was removed')
+  const after = await worker!.request('config.clear', { id: pveId, revision: pveRevision })
   assert.deepEqual(after.connections.map((c) => c.kind), ['pdm', 'pbs'])
   assert.equal(Object.keys(host.data().secrets).filter((k) => k.startsWith('token-secret:')).length, 2)
   assert.ok(after.connections.every((c) => c.hasSecret))

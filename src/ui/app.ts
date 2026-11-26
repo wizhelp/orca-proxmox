@@ -3,6 +3,7 @@ import { ORDER_KEY } from '../arrange'
 import type { EstateResponse, EstateSnapshot } from '../model'
 import type { ConfigAnswer, ConnectionInput, TestAnswer } from '../protocol'
 import type { ExportMode } from '../features/insights'
+import type { Confirmation } from './confirm'
 import { NO_FILTER, type GuestFilter, type GuestSort, type Tone } from './logic'
 
 export type Tab = 'hosts' | 'guests' | 'backups' | 'tasks' | 'orca' | 'settings'
@@ -48,8 +49,8 @@ export const app = {
   formDirty: false,
   /** The connection form is shown: after Edit or Add, or while there is no connection yet. */
   formOpen: false,
-  /** A destructive action waiting for its in-panel confirmation: `remove:<connection id>`, `reset-order`. */
-  confirm: null as string | null,
+  /** A destructive action waiting for its in-panel confirmation (confirm.ts). */
+  confirm: null as Confirmation | null,
   testResult: null as TestAnswer | null,
   settingsMessage: null as { tone: Tone; text: string } | null,
   busy: null as 'test' | 'save' | 'clear' | 'import' | 'dismiss' | null

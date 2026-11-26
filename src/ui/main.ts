@@ -248,6 +248,8 @@ async function refresh(force = false): Promise<void> {
 async function loadConfig(): Promise<void> {
   try {
     app.config = await orca.plugin.request('config.get')
+    // Whatever a pending confirmation was for may have changed with the configuration.
+    app.confirm = null
     if (!app.formDirty) fillForm()
     if (!app.config.connection) app.tab = 'settings'
   } catch (error) {
@@ -262,6 +264,7 @@ function remember(key: string, value: unknown): void {
 async function readOrder(): Promise<void> {
   const stored = await orca.storage.get(KEYS.order).catch(() => null)
   app.order = Array.isArray(stored) ? stored.filter((k): k is string => typeof k === 'string') : []
+  if (app.confirm?.action === 'reset-order') app.confirm = null
 }
 
 /** A refresh in flight is answered for a connection that is gone: its answer is not applied. */
