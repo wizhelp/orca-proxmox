@@ -77,7 +77,26 @@ export function filterGuests(guests: readonly Guest[], f: GuestFilter): Guest[] 
   })
 }
 
-export type GuestSort = { column: 'name' | 'status' | 'cpu' | 'mem' | 'uptime' | 'node' | 'backup'; direction: 'asc' | 'desc' }
+export type GuestSort = { column: 'name' | 'status' | 'cpu' | 'mem' | 'disk' | 'uptime' | 'node' | 'backup'; direction: 'asc' | 'desc' }
+
+/** A guest's disk use as a share, or undefined when unknown (a VM without guest agent data). */
+export function diskShare(g: Guest): number | undefined {
+  if (g.type === 'lxc') return g.maxdisk ? g.disk / g.maxdisk : undefined
+  return g.diskUsage && g.diskUsage.total ? g.diskUsage.used / g.diskUsage.total : undefined
+}
+
+const DISK_UNKNOWN_TEXT: Record<NonNullable<Guest['diskUnknown']>, string> = {
+  'no-agent': 'unknown (no guest agent)',
+  'no-permission': 'unknown (the token may not ask the guest agent)',
+  unsupported: 'unknown (the API offers no guest agent call)',
+  stopped: 'unknown (stopped)',
+  'not-read': 'unknown (not read yet)'
+}
+
+/** Why a guest's disk use is unknown, in words. */
+export function diskUnknownText(g: Guest): string {
+  return DISK_UNKNOWN_TEXT[g.diskUnknown ?? 'no-agent']
+}
 
 function sortValue(g: Guest, column: GuestSort['column']): string | number {
   switch (column) {
@@ -87,6 +106,9 @@ function sortValue(g: Guest, column: GuestSort['column']): string | number {
       return g.cpu
     case 'mem':
       return g.maxmem ? g.mem / g.maxmem : 0
+    case 'disk':
+      // Unknown use sorts below any known one, by allocated size.
+      return diskShare(g) ?? -1 + g.maxdisk / 1e18
     case 'uptime':
       return g.uptime
     case 'node':

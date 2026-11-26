@@ -49,9 +49,10 @@ export function datastoreForecast(store: Datastore): number | undefined {
 export function diskWarnings(snap: EstateSnapshot): DiskWarning[] {
   const out: DiskWarning[] = []
   for (const g of snap.guests) {
-    // Only containers report disk use; a VM's disk is opaque to Proxmox without its agent.
-    if (!g.maxdisk || !g.disk) continue
-    const usage = g.disk / g.maxdisk
+    // Containers report their use; a VM only through its guest agent (diskUsage), else it is unknown.
+    const known = g.type === 'lxc' ? (g.maxdisk && g.disk ? { used: g.disk, total: g.maxdisk } : undefined) : g.diskUsage
+    if (!known || !known.total) continue
+    const usage = known.used / known.total
     if (usage > GUEST_DISK_LIMIT) out.push({ key: `guest|${g.key}`, kind: 'guest', label: `${g.type === 'qemu' ? 'VM' : 'CT'} ${g.name} (${g.vmid})`, usage, limit: GUEST_DISK_LIMIT })
   }
   for (const d of snap.datastores) {

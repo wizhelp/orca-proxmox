@@ -4,8 +4,9 @@
 //
 // Everything is scoped to one saved configuration (connectionScope): a refresh still running for
 // a configuration that was replaced is aborted, and whatever it returns is never cached.
-import { connectionScope, type ConnectionConfig, type EstateSnapshot, type PluginSettings, type Task } from './model'
+import { connectionScope, type ConnectionConfig, type DiskUnknown, type EstateSnapshot, type PluginSettings, type Task } from './model'
 import { attachBackups } from './proxmox/backups'
+import { refreshGuestDisks, withDiskUsage, type DiskEntry } from './proxmox/agent'
 import type { BackupScan, EstateSource, MetricsScan, NetworkScan } from './proxmox/source'
 
 type BackupCache = { scope: string; fetchedAt: number; scan?: BackupScan; error?: string }
@@ -30,6 +31,8 @@ export class EstateService {
   private updates: UpdatesCache | undefined
   private inflight: { scope: string; promise: Promise<EstateSnapshot> } | undefined
   private last: EstateSnapshot | undefined
+  /** VM disk use from guest agents, per guest, and remotes that cannot answer: for one scope. */
+  private disks: { scope: string; cache: Map<string, DiskEntry>; blocked: Map<string, { until: number; reason: DiskUnknown }> } | undefined
   /** Bumped by reset(): a build started under an older generation keeps nothing. */
   private generation = 0
   private abort = new AbortController()
@@ -72,6 +75,7 @@ export class EstateService {
     this.network = undefined
     this.metrics = undefined
     this.updates = undefined
+    this.disks = undefined
     this.last = undefined
     this.inflight = undefined
   }
@@ -191,6 +195,18 @@ export class EstateService {
     // Some datastore or namespace was not read: a guest without a backup found may have one there.
     const complete = backups.scan?.complete ?? false
     const offlineRemotes = inventory.remotes.filter((r) => !r.online).map((r) => r.id)
+    // VM disk use from guest agents: a few VMs per refresh, each every few minutes (agent.ts).
+    if (this.disks?.scope !== scope) this.disks = { scope, cache: new Map(), blocked: new Map() }
+    const disks = this.disks
+    if (source.readGuestFs) {
+      try {
+        await refreshGuestDisks(inventory.guests, disks.cache, (g) => source.readGuestFs!(g, signal), this.now(), disks.blocked)
+      } catch (error) {
+        warnings.push(`Disk use inside VMs could not be read: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      live()
+    }
+    inventory.guests = withDiskUsage(inventory.guests, disks.cache, disks.blocked, this.now())
     const { guests, missing, orphans } = attachBackups(inventory.guests, backups.scan?.records ?? [], {
       now,
       staleHours: settings.backupStaleHours,

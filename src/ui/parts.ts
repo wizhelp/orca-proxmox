@@ -6,7 +6,7 @@ import { guestActions } from './actions'
 import { GUEST_DISK_LIMIT } from '../features/capacity'
 import { h, type Child } from './dom'
 import { icon, type IconName } from './icons'
-import { ago, BACKUP_LABEL, BACKUP_TONE, guestKind, guestName, orcaHostLabel, orcaKindLabel, orcaTone, statusTone, type Tone } from './logic'
+import { ago, BACKUP_LABEL, BACKUP_TONE, diskShare, diskUnknownText, guestKind, guestName, orcaHostLabel, orcaKindLabel, orcaTone, statusTone, type Tone } from './logic'
 
 export function dot(tone: Tone, label?: string): HTMLElement {
   return h('span', { class: `dot ${tone}`, title: label, 'aria-hidden': label ? undefined : 'true' })
@@ -159,10 +159,17 @@ export function guestDetails(guest: Guest, snap: EstateSnapshot, presence: OrcaP
     guest.tags.length ? h('div', { class: 'chips' }, guest.tags.map((t) => chip(t, 'plain', 'tag'))) : null,
     guest.notes ? h('div', { class: 'notes', title: 'Proxmox notes' }, icon('note', 13), h('span', null, guest.notes)) : null,
     guest.status === 'running' ? metricsBlock(guest.metrics, guest) : null,
-    guest.maxdisk && guest.disk / guest.maxdisk > GUEST_DISK_LIMIT ? h('div', { class: 'warn-text' }, `Disk ${formatPercent(guest.disk / guest.maxdisk)} full.`) : null,
+    (diskShare(guest) ?? 0) > GUEST_DISK_LIMIT ? h('div', { class: 'warn-text' }, `Disk ${formatPercent(diskShare(guest)!)} full.`) : null,
     keyValue([
       ['Host', `${guest.remote}/${guest.node}`],
-      ['Disk', guest.disk ? formatUsage(guest.disk, guest.maxdisk) : `${formatBytes(guest.maxdisk)} allocated`],
+      [
+        'Disk',
+        guest.type === 'lxc' && guest.maxdisk
+          ? formatUsage(guest.disk, guest.maxdisk)
+          : guest.diskUsage
+            ? `${formatUsage(guest.diskUsage.used, guest.diskUsage.total)} (guest agent; ${formatBytes(guest.maxdisk)} allocated)`
+            : `${formatBytes(guest.maxdisk)} allocated; use ${diskUnknownText(guest)}`
+      ],
       ['Uptime', formatUptime(guest.uptime)],
       ...(guest.hostname ? ([['Hostname', guest.hostname]] as [string, Child][]) : []),
       ...(guest.addresses?.length ? ([['Addresses', h('code', null, guest.addresses.join(', '))]] as [string, Child][]) : []),

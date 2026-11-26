@@ -1,12 +1,13 @@
 // Guests: search, filters, a sortable table with a CPU sparkline and memory bar per row, details
 // below the row it belongs to.
-import { formatPercent, formatUptime, type EstateSnapshot } from '../model'
+import { formatBytes, formatPercent, formatUptime, type EstateSnapshot, type Guest } from '../model'
+import { GUEST_DISK_LIMIT } from '../features/capacity'
 import { guestRef, orcaByPlace } from '../presence'
 import { actions, app, KEYS } from './app'
 import { meter, sparkline } from './charts'
 import { cx, h } from './dom'
 import { icon } from './icons'
-import { allTags, BACKUP_LABEL, BACKUP_TONE, filterGuests, guestKind, guestName, nextSort, placeOptions, sortGuests, statusTone, type GuestSort } from './logic'
+import { allTags, BACKUP_LABEL, BACKUP_TONE, diskShare, diskUnknownText, filterGuests, guestKind, guestName, nextSort, placeOptions, sortGuests, statusTone, type GuestSort } from './logic'
 import { chip, dot, guestDetails, select } from './parts'
 
 const COLUMNS: { key: GuestSort['column']; label: string; className?: string }[] = [
@@ -14,10 +15,27 @@ const COLUMNS: { key: GuestSort['column']; label: string; className?: string }[]
   { key: 'status', label: 'Status', className: 'col-status' },
   { key: 'cpu', label: 'CPU' },
   { key: 'mem', label: 'RAM', className: 'col-mem' },
+  { key: 'disk', label: 'Disk', className: 'col-disk' },
   { key: 'uptime', label: 'Uptime', className: 'col-uptime' },
   { key: 'node', label: 'Host', className: 'col-host' },
   { key: 'backup', label: 'Backup' }
 ]
+
+/** Used / size with a bar where use is known; else the allocated size and why use is unknown. */
+function diskCell(g: Guest): HTMLElement {
+  const share = diskShare(g)
+  if (share === undefined) {
+    return h('td', { class: 'col-disk cell-disk muted', title: `${formatBytes(g.maxdisk)} allocated; use ${diskUnknownText(g)}` }, h('span', null, `${formatBytes(g.maxdisk)}`), h('span', { class: 'small' }, ' ?'))
+  }
+  const used = g.type === 'lxc' ? g.disk : g.diskUsage!.used
+  const total = g.type === 'lxc' ? g.maxdisk : g.diskUsage!.total
+  return h(
+    'td',
+    { class: cx('col-disk cell-disk', share > GUEST_DISK_LIMIT && 'warn-text'), title: `${formatBytes(used)} of ${formatBytes(total)} used${g.type === 'qemu' ? ' (guest agent)' : ''}` },
+    meter(share, `Disk ${formatPercent(share)}`, 40),
+    h('span', null, formatPercent(share))
+  )
+}
 
 function setFilter(patch: Partial<typeof app.guestFilter>): void {
   app.guestFilter = { ...app.guestFilter, ...patch }
@@ -104,6 +122,7 @@ export function guestsView(snap: EstateSnapshot): HTMLElement {
         g.status === 'running' && g.metrics ? sparkline(g.metrics.mem, { label: `Memory of ${g.name} over the last hour`, tone: 'mem', width: 44, height: 14 }) : meter(g.maxmem ? g.mem / g.maxmem : 0, `Memory ${formatPercent(g.maxmem ? g.mem / g.maxmem : 0)}`, 40),
         h('span', null, g.status === 'running' && g.maxmem ? formatPercent(g.mem / g.maxmem) : '-')
       ),
+      diskCell(g),
       h('td', { class: 'col-uptime muted' }, formatUptime(g.uptime)),
       h('td', { class: 'col-host muted' }, `${g.remote}/${g.node}`),
       h('td', null, g.template ? '-' : chip(BACKUP_LABEL[g.backupState] + (g.backupAmbiguous ? '?' : ''), BACKUP_TONE[g.backupState]))

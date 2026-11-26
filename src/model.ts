@@ -177,7 +177,20 @@ export type Guest = {
   notes?: string
   /** The last hour, one point a minute, for sparklines. */
   metrics?: Metrics
+  /**
+   * Filesystem use inside the guest: from Proxmox for a container, from the QEMU guest agent for a
+   * VM. Absent when unknown; then `diskUnknown` says why (and `maxdisk` is the allocated size).
+   */
+  diskUsage?: { used: number; total: number; from: 'container' | 'agent' }
+  diskUnknown?: DiskUnknown
 }
+
+/**
+ * Why a VM's disk use is unknown: no guest agent (disabled, not installed or not running), the
+ * token may not ask the agent, the API offers no agent call (PDM), the VM is stopped, or not read
+ * yet (it is read every few minutes, a few VMs at a time).
+ */
+export type DiskUnknown = 'no-agent' | 'no-permission' | 'unsupported' | 'stopped' | 'not-read'
 
 export type Datastore = {
   key: string

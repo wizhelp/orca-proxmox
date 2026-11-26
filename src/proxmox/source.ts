@@ -64,6 +64,11 @@ export interface EstateSource {
   fetchMetrics(inventory: Inventory, signal?: AbortSignal): Promise<MetricsScan>
   /** The newest tasks of all remotes, newest first. */
   fetchTasks(signal?: AbortSignal): Promise<Task[]>
+  /**
+   * A running VM's filesystems from its QEMU guest agent (`get-fsinfo`), where the API offers it;
+   * absent on sources without guests.
+   */
+  readGuestFs?(guest: Guest, signal?: AbortSignal): Promise<unknown>
   /** Pending package updates per host key, where PDM has checked. */
   fetchUpdates(inventory: Inventory, signal?: AbortSignal): Promise<{ hosts: Record<string, number>; warnings: string[] }>
 }

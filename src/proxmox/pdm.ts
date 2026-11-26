@@ -404,6 +404,11 @@ export class PdmSource implements EstateSource {
       .sort((a, b) => b.start - a.start)
   }
 
+  /** PDM proxies PVE's guest-agent call when it supports it; else it answers 404 and the plugin stops asking. */
+  readGuestFs(guest: Guest, signal?: AbortSignal): Promise<unknown> {
+    return this.client.get<unknown>(`/pve/remotes/${seg(guest.remote)}/qemu/${guest.vmid}/agent/get-fsinfo`, {}, signal)
+  }
+
   async fetchUpdates(inventory: Inventory, signal?: AbortSignal): Promise<{ hosts: Record<string, number>; warnings: string[] }> {
     const hosts: Record<string, number> = {}
     const failures: string[] = []
