@@ -265,3 +265,28 @@ test('a backup hint shared by two remotes with the same VMID proves neither: unk
   const solo = attachBackups([vm('lab (direct)', 501), vm('pve-z', 501)], [record(501, 'lab')], options).guests
   assert.deepEqual(solo.map((g) => g.backupState), ['ok', 'none'])
 })
+
+test('a PBS that goes down between scans: no "never" from the cached scan, the scan time kept', async () => {
+  const cluster: Inventory = { remotes: [{ id: 'pve-y', type: 'pve', online: true }], hosts: [], guests: [vm('pve-y', 700), vm('pve-y', 701)], datastores: [], warnings: [] }
+  let pbsUp = true
+  const pbsPart: EstateSource = {
+    ...stub('pbs', pbsInventory('pbs1'), fullScan('pbs1', [700])),
+    fetchInventory: async () => (pbsUp ? pbsInventory('pbs1') : Promise.reject(new Error('refused')))
+  }
+  const pbs1 = { ...pbs, id: 'b1', name: 'pbs-1', baseUrl: 'https://pbs1.example.test:8007' }
+  const pveY = { ...pve, id: 'v', name: 'pve-y' }
+  let now = NOW
+  const service = new EstateService(() => now)
+  const composite = () => new CompositeSource([{ connection: pveY, source: stub('pve', cluster, fullScan('x', [])) }, { connection: pbs1, source: pbsPart }])
+  const scope = { id: 'mix2', kind: 'pve' as const, baseUrl: 'x', tokenId: '', fingerprint: '' }
+  const first = await service.get(composite(), scope, DEFAULT_SETTINGS, { maxAgeMs: 0 })
+  assert.equal(first.guests.find((g) => g.vmid === 701)!.backupState, 'none')
+  // 30 s later the PBS is down; the snapshot scan (every 5 min) is not due yet.
+  pbsUp = false
+  now += 30_000
+  const second = await service.get(composite(), scope, DEFAULT_SETTINGS, { maxAgeMs: 0 })
+  assert.equal(second.guests.find((g) => g.vmid === 701)!.backupState, 'unknown')
+  assert.equal(second.guests.find((g) => g.vmid === 700)!.backupState, 'ok', 'a backup seen stays known')
+  assert.match(second.backups.incomplete ?? '', /pbs-1 is unreachable now/)
+  assert.equal(second.backups.fetchedAt, NOW, 'the time of the last successful scan')
+})

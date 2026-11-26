@@ -83,6 +83,8 @@ export type Remote = {
   nodePort?: number
   /** Not one of PDM's remotes (reached directly, or a connection that could not be read): PDM has no page for it. */
   direct?: boolean
+  /** A connection that holds backups (PDM or PBS) and could not be read: backup coverage is unknown. */
+  backupSource?: boolean
   /** The name its own server uses (a cluster, node or host name), where the id differs from it. */
   alias?: string
 }

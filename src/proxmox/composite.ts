@@ -151,7 +151,7 @@ export class CompositeSource implements EstateSource {
     const id = this.idOf(connection)
     if (merged.remotes.some((r) => r.id === id)) return
     const type = connection.kind === 'pbs' ? 'pbs' : 'pve'
-    merged.remotes.push({ id, type, online: false, error: reason, direct: true })
+    merged.remotes.push({ id, type, online: false, error: reason, direct: true, ...(connection.kind !== 'pve' ? { backupSource: true } : {}) })
     merged.hosts.push(unreachableHost(id, type, reason))
     merged.warnings.push(`The connection ${connectionLabel(connection)} could not be read: ${reason}`)
   }

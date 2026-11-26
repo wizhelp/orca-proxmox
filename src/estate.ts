@@ -9,7 +9,8 @@ import { attachBackups } from './proxmox/backups'
 import { refreshGuestDisks, withDiskUsage, type DiskEntry } from './proxmox/agent'
 import type { BackupScan, EstateSource, MetricsScan, NetworkScan } from './proxmox/source'
 
-type BackupCache = { scope: string; fetchedAt: number; scan?: BackupScan; error?: string }
+/** `fetchedAt`: the last attempt (paces the next); `scannedAt`: when `scan` was read. */
+type BackupCache = { scope: string; fetchedAt: number; scannedAt?: number; scan?: BackupScan; error?: string }
 type NetworkCache = { scope: string; fetchedAt: number; scan?: NetworkScan }
 type MetricsCache = { scope: string; fetchedAt: number; scan?: MetricsScan; tasks?: Task[] }
 type UpdatesCache = { scope: string; fetchedAt: number; hosts: Record<string, number> }
@@ -104,11 +105,11 @@ export class EstateService {
       try {
         const scan = await source.fetchBackups(inventory, signal)
         live()
-        backups = { scope, fetchedAt: this.now(), scan }
+        backups = { scope, fetchedAt: this.now(), scannedAt: this.now(), scan }
       } catch (error) {
         live()
         // Keep the previous scan on a failure: an old answer beats none.
-        backups = { scope, fetchedAt: this.now(), scan: cached?.scan, error: error instanceof Error ? error.message : String(error) }
+        backups = { scope, fetchedAt: this.now(), scannedAt: cached?.scannedAt, scan: cached?.scan, error: error instanceof Error ? error.message : String(error) }
       }
       this.backups = backups
     }
@@ -193,7 +194,11 @@ export class EstateService {
     const now = this.now()
     const available = backups.scan?.available ?? false
     // Some datastore or namespace was not read: a guest without a backup found may have one there.
-    const complete = backups.scan?.complete ?? false
+    // Coverage follows what is reachable now, not only what the (cached) scan could read: a PBS,
+    // or a PDM that may hold PBS remotes, that is down now may hold the only backup of a guest.
+    const downNow = inventory.remotes.filter((r) => !r.online && (r.type === 'pbs' || r.backupSource)).map((r) => `${r.id} is unreachable now`)
+    const gaps = [...new Set([...(backups.scan?.gaps ?? []), ...(backups.error ? ['the last snapshot scan failed'] : []), ...downNow])]
+    const complete = (backups.scan?.complete ?? false) && !backups.error && downNow.length === 0
     const offlineRemotes = inventory.remotes.filter((r) => !r.online).map((r) => r.id)
     // VM disk use from guest agents: a few VMs per refresh, each every few minutes (agent.ts).
     if (this.disks?.scope !== scope) this.disks = { scope, cache: new Map(), blocked: new Map() }
@@ -228,7 +233,7 @@ export class EstateService {
       guests,
       datastores: inventory.datastores,
       backups: {
-        fetchedAt: backups.scan ? backups.fetchedAt : undefined,
+        fetchedAt: backups.scan ? (backups.scannedAt ?? backups.fetchedAt) : undefined,
         error:
           backups.error ??
           (pbsRemotes.length === 0
@@ -244,7 +249,7 @@ export class EstateService {
       tasks: this.metrics?.tasks ?? []
     }
     if (available && !complete) {
-      snapshot.backups.incomplete = `Not every PBS datastore or namespace could be read${backups.scan?.gaps?.length ? ` (${backups.scan.gaps.slice(0, 3).join('; ')}${backups.scan.gaps.length > 3 ? '; …' : ''})` : ''}, so a guest without a backup found there is shown as unknown, not as never backed up.`
+      snapshot.backups.incomplete = `Not every PBS datastore or namespace could be read${gaps.length ? ` (${gaps.slice(0, 3).join('; ')}${gaps.length > 3 ? '; …' : ''})` : ''}, so a guest without a backup found there is shown as unknown, not as never backed up.`
     }
     this.last = snapshot
     return snapshot
