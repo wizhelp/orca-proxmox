@@ -1107,11 +1107,15 @@
       @container (max-width: 560px) {
         .col-host,
         .col-uptime,
-        .cell-name .tag {
+        .cell-name .tag,
+        .col-status .status-text,
+        .cell-cpu > .spark,
+        .cell-mem > .spark,
+        .cell-mem > .meter {
           display: none;
         }
         .cell-name {
-          max-width: 170px;
+          max-width: 130px;
         }
       }
       @container (max-width: 430px) {

@@ -109,7 +109,7 @@ export function guestsView(snap: EstateSnapshot): HTMLElement {
           presence ? h('span', { class: 'orca-mark', title: 'Orca runs here' }, icon('bot', 12)) : null
         )
       ),
-      h('td', { class: 'col-status' }, dot(statusTone(g.status), g.status), h('span', { class: 'muted' }, ` ${g.status}`)),
+      h('td', { class: 'col-status' }, dot(statusTone(g.status), g.status), h('span', { class: 'muted status-text' }, ` ${g.status}`)),
       h(
         'td',
         { class: 'cell-cpu' },
