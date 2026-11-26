@@ -296,45 +296,19 @@ checking the PVE certificate's pin. It restarts a tunnel that drops, with a grow
 it when the connection changes or Orca stops the plugin. Windows 10 and later include OpenSSH;
 on macOS and Linux it is `/usr/bin/ssh`.
 
-**On each host** (as root), a dedicated account that may only forward to the API, enforced twice:
-by an sshd rule for the account and by the key's options. Keep the root session open, keep a
-backup, and enable the key only once the account's effective policy is verified:
-
-```sh
-BACKUP=/etc/ssh/sshd_config.orca-backup.$(date +%Y%m%d-%H%M%S); cp -a /etc/ssh/sshd_config "$BACKUP"
-useradd --system --create-home --shell /usr/sbin/nologin orca-tunnel
-usermod -p '*' orca-tunnel                        # no password; key login only
-install -d -m 700 -o orca-tunnel -g orca-tunnel /home/orca-tunnel/.ssh
-cat >> /etc/ssh/sshd_config <<'EOF'
-
-Match User orca-tunnel
-    AllowTcpForwarding local
-    AllowStreamLocalForwarding no
-    PermitListen none
-    PermitOpen 127.0.0.1:8006
-    PermitTTY no
-    X11Forwarding no
-    AllowAgentForwarding no
-    ForceCommand /bin/false
-EOF
-# Before reloading: what sshd would apply to this account from Orca's machine (192.0.2.10).
-sshd -t && sshd -T -C user=orca-tunnel,host=orca-client,addr=192.0.2.10 |
-  grep -Ei '^(allowtcpforwarding|allowstreamlocalforwarding|permitlisten|permitopen|permittty|forcecommand) '
-systemctl reload ssh       # only if every value above is as in the Match block; else restore "$BACKUP"
-# Then, with a fresh admin login checked, the key (never overwriting an existing file):
-install -m 600 -o orca-tunnel -g orca-tunnel /dev/null /home/orca-tunnel/.ssh/authorized_keys
-echo 'restrict,port-forwarding,permitopen="127.0.0.1:8006" ssh-ed25519 AAAA… orca-proxmox-tunnel' \
-  >> /home/orca-tunnel/.ssh/authorized_keys
-```
-
-sshd uses the first value it finds for each keyword, so an earlier `Match` block (by group,
-address, …) that also matches this account can override these rules; the `sshd -T` check shows
-it. The account then has local TCP forwarding to the API only: no shell, command or terminal, no
-reverse or Unix-socket forwards, no other destination. For PBS use port 8007. Then a read-only
-token as in "Without PDM" (`orca-monitor@pve!orca`, PVEAuditor on `/` for the user and the
-token). [docs/AGENT_SETUP.md](docs/AGENT_SETUP.md#through-an-ssh-tunnel-enrich-only) has the full
-procedure, with the way back and bounded checks that a shell, a command, `-R` and other `-L`
-targets are refused.
+**On each host** (as root), a dedicated account `orca-tunnel` (no shell, no password) that may
+only forward to the API, enforced twice: by an sshd `Match User orca-tunnel` block
+(`AllowTcpForwarding local`, `AllowStreamLocalForwarding no`, `PermitListen none`,
+`PermitOpen 127.0.0.1:8006`, `PermitTTY no`, X11 and agent forwarding off,
+`ForceCommand /bin/false`) and by the key's `restrict,port-forwarding,permitopen="127.0.0.1:8006"`.
+Set it up with the staged procedure in
+[docs/AGENT_SETUP.md](docs/AGENT_SETUP.md#t2-on-each-host-the-tunnel-account-verified-before-it-can-be-used),
+which stops at each gate instead of running as one block: write the policy, check what sshd would
+apply to this account (`sshd -T -C user=orca-tunnel,…`; an earlier `Match` block can win), reload,
+check again and check a fresh admin login, and only then install the key. Its way back removes the
+key and ends the account's sessions before it restores the previous policy. It then checks that a
+shell, a command, `-R` and other `-L` targets are refused. For PBS use port 8007. Then a read-only
+token as in "Without PDM" (`orca-monitor@pve!orca`, PVEAuditor on `/` for the user and the token).
 
 **On Orca's machine**, a key only for the tunnel, without a passphrase (the plugin cannot type
 one), readable by you only:

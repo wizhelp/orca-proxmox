@@ -135,8 +135,9 @@ password) whose key carries `restrict,port-forwarding,permitopen="127.0.0.1:8006
 and `ForceCommand /bin/false`. The key options alone would leave reverse (`-R`) and Unix-socket
 forwards possible; the `Match` block makes the account's effective policy local TCP forwarding to
 the API only. docs/AGENT_SETUP.md checks the effective policy with `sshd -T -C user=orca-tunnel,…`
-(and looks for earlier `Match` blocks, which would win) before reloading sshd, checks a fresh admin
-login, installs the key only then, and finally tries a shell, a command, `-R`, a socket forward
+(and looks for earlier `Match` blocks, which would win) before reloading sshd and again after,
+checks a fresh admin login (connection sharing off), installs the key only then (its way back
+disables the key and ends the account's sessions before restoring a previous policy), and finally tries a shell, a command, `-R`, a socket forward
 and another `-L` target with time limits, an isolated client configuration and the pinned host
 key, which must all be refused. Every session that handles a secret creates its own private
 temporary folder first.

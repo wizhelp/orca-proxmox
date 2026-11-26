@@ -635,31 +635,50 @@ Expected, every line: `allowtcpforwarding local`, `allowstreamlocalforwarding no
 `allowagentforwarding no`, `forcecommand /bin/false`. Any other value means an earlier rule wins
 (T2b): restore with `cp -a "$BACKUP" /etc/ssh/sshd_config` and stop.
 
-**T2e. Reload, then check a fresh admin login** (keep this session open):
+**T2e. Reload, verify again, then check a fresh admin login** (keep this session open):
 
 ```sh
-systemctl reload ssh || systemctl reload sshd
+systemctl reload ssh || systemctl reload sshd || { echo "reload failed: use the way back"; exit 1; }
+sshd -T -C user=orca-tunnel,host=orca-client,addr=192.0.2.10,laddr=192.0.2.20,lport=22 |
+  grep -Ei '^(allowtcpforwarding|allowstreamlocalforwarding|permitlisten|permitopen|permittty|x11forwarding|allowagentforwarding|forcecommand) '
 ```
 
-Then, from Orca's machine in a **new** terminal, log in as the admin again (`ssh root@pve-a.example.com
-true`). If the reload failed or that login fails, restore from the open session:
-`cp -a "$BACKUP" /etc/ssh/sshd_config && systemctl reload ssh`, and stop.
+The values must be exactly those of T2d; otherwise use the way back and stop. Then, from Orca's
+machine in a **new** terminal, open a **new** authenticated admin connection, with connection
+sharing off so an existing one cannot stand in for it:
 
-**T2f. Only now, the key.** Never overwrite an existing `authorized_keys`:
+```sh
+ssh -o ControlMaster=no -o ControlPath=none root@pve-a.example.com true && echo "fresh admin login works"
+```
+
+If it fails, use the way back from the open session and stop.
+
+**T2f. Only now, the key.** Never overwrite an existing `authorized_keys`; each step stops on
+failure:
 
 ```sh
 F=/home/orca-tunnel/.ssh/authorized_keys
 [ -e "$F" ] && { echo "$F exists: show it to the person, do not overwrite"; exit 1; }
-install -m 600 -o orca-tunnel -g orca-tunnel /dev/null "$F"
-printf '%s\n' 'restrict,port-forwarding,permitopen="127.0.0.1:8006" <contents of orca-proxmox-tunnel.pub>' >> "$F"
+install -m 600 -o orca-tunnel -g orca-tunnel /dev/null "$F" || { echo "could not create $F: stop"; exit 1; }
+printf '%s\n' 'restrict,port-forwarding,permitopen="127.0.0.1:8006" <contents of orca-proxmox-tunnel.pub>' >> "$F" ||
+  { rm -f "$F"; echo "could not write $F: stop"; exit 1; }
 ```
 
 `restrict` turns off every forwarding, PTY and agent feature for the key, `port-forwarding` allows
 forwards again and `permitopen` limits local forwards to the API; the `Match` block makes the
 account's effective policy local TCP forwarding to the API only, whatever key is used.
 
-**The way back** at any point: `cp -a "$BACKUP" /etc/ssh/sshd_config && systemctl reload ssh`,
-then `pkill -u orca-tunnel; userdel -r orca-tunnel` if the account should go too.
+**The way back**, at any point and in this order, so the key is never left enabled under a weaker
+policy: first disable the key and end the account's sessions, then restore the policy, then reload.
+Each step checks its result and stops on failure:
+
+```sh
+rm -f /home/orca-tunnel/.ssh/authorized_keys || { echo "could not remove the key: stop"; exit 1; }
+pkill -u orca-tunnel; sleep 1; pgrep -u orca-tunnel >/dev/null && { echo "orca-tunnel sessions still running: stop"; exit 1; }
+cp -a "$BACKUP" /etc/ssh/sshd_config && sshd -t || { echo "could not restore $BACKUP: stop"; exit 1; }
+systemctl reload ssh || systemctl reload sshd || { echo "reload failed: stop"; exit 1; }
+userdel -r orca-tunnel                            # if the account should go too
+```
 
 ### T3. Pin both keys
 
