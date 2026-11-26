@@ -6,7 +6,7 @@ import { DEFAULT_SETTINGS, estateScope, type ConnectionConfig, type Guest } from
 import { attachBackups } from '../src/proxmox/backups'
 import { ApiError } from '../src/proxmox/client'
 import { ProxmoxClient } from '../src/proxmox/client'
-import { CompositeSource, directRemoteIds, type FailedPart, type Part } from '../src/proxmox/composite'
+import { CompositeSource, directRemoteIds, type EnrichBindings, type FailedPart, type Part } from '../src/proxmox/composite'
 import { createSource, type BackupScan, type EstateSource, type Inventory } from '../src/proxmox/source'
 import { pbsRoutes, pveRoutes } from './fixtures/direct'
 import { mockTransport, pdmRoutes } from './fixtures/pdm'
@@ -423,7 +423,7 @@ test('enrich only: a guest matching two of the estate\'s is left alone, and a ma
   const read = (c: ConnectionConfig) => new EstateService(() => NOW).get(new CompositeSource([{ connection: { ...pdm, id: 'p' }, source: pdmPart }, { connection: c, source: sourceOf(c, pveRoutes(NOW)).source }]), scope, DEFAULT_SETTINGS, { maxAgeMs: 0 })
   const ambiguous = await read(enrich)
   assert.ok(ambiguous.guests.every((g) => g.diskUsage === undefined))
-  assert.ok(ambiguous.warnings.some((w) => /matched more than one of PDM's guests/.test(w)))
+  assert.ok(ambiguous.warnings.some((w) => /more than one PDM cluster/.test(w)))
   const mapped = await read({ ...enrich, nodeMap: { 'pve-x1': 'pve-b/pve-x1' } })
   assert.equal(mapped.guests.find((g) => g.remote === 'pve-b')!.diskUsage?.from, 'agent')
   assert.equal(mapped.guests.find((g) => g.remote === 'pve-a')!.diskUsage, undefined)
@@ -480,4 +480,50 @@ test('enrich only touches PDM\'s guests: never a cluster reached directly, compe
   const without = await read([{ connection: pdmC, source: pdmPart }, { connection: lab, source: labSide.source }])
   assert.equal(g(without, 'pve-a/501').diskUsage, undefined)
   assert.equal(g(without, 'pve-a/501').diskUnknown, 'unsupported')
+})
+
+test('enrich only is bound to one PDM cluster: an outage never moves it to another cluster with the same node and VMID', async () => {
+  const GiB = 1024 ** 3
+  // PDM's clusters A and B both have a node "pve-x1" with VM 501; the enrich-only server is A's.
+  const inv = (aOnline: boolean): Inventory => ({
+    remotes: [{ id: 'cluster-a', type: 'pve', online: aOnline }, { id: 'cluster-b', type: 'pve', online: true }],
+    hosts: [],
+    guests: [...(aOnline ? [{ ...vm('cluster-a', 501), node: 'pve-x1' }] : []), { ...vm('cluster-b', 501), node: 'pve-x1' }],
+    datastores: [],
+    warnings: []
+  })
+  let aOnline = true
+  const pdmPart: EstateSource = { ...stub('pdm', inv(true), { records: [], available: false, complete: false, gaps: [], warnings: [] }), fetchInventory: async () => inv(aOnline) }
+  const pdmC = { ...pdm, id: 'p' }
+  const scope = { id: 'bind', kind: 'pdm' as const, baseUrl: 'x', tokenId: '', fingerprint: '' }
+  const b501 = (s: Awaited<ReturnType<EstateService['get']>>) => s.guests.find((g) => g.key === 'cluster-b/501')!
+  const run = async (enrich: ConnectionConfig, bindings: EnrichBindings) => {
+    const service = new EstateService(() => NOW)
+    const read = () => service.get(new CompositeSource([{ connection: pdmC, source: pdmPart }, { connection: enrich, source: sourceOf(enrich, pveRoutes(NOW)).source }], [], bindings), scope, DEFAULT_SETTINGS, { maxAgeMs: 0, force: true })
+    aOnline = true
+    const up = await read()
+    aOnline = false
+    const down = await read()
+    return { up, down }
+  }
+  // Mapped to A explicitly: A's VM is enriched; with A gone, B's VM is not taken over.
+  const mapped = await run({ ...pve, id: 'e1', name: 'a-agent', enrichOnly: true, nodeMap: { 'pve-x1': 'cluster-a/pve-x1' } }, new Map())
+  assert.deepEqual(mapped.up.guests.find((g) => g.key === 'cluster-a/501')!.diskUsage, { used: 21 * GiB, total: 60 * GiB, from: 'agent' })
+  assert.equal(b501(mapped.up).diskUsage, undefined)
+  assert.equal(b501(mapped.down).diskUsage, undefined)
+  // Not mapped: both clusters have its node name, so it is ambiguous, and stays so when A is gone.
+  const bindings: EnrichBindings = new Map()
+  const unmapped = await run({ ...pve, id: 'e2', name: 'a-agent', enrichOnly: true }, bindings)
+  assert.equal(b501(unmapped.up).diskUsage, undefined)
+  assert.equal(b501(unmapped.down).diskUsage, undefined)
+  assert.ok(unmapped.down.warnings.some((w) => /more than one PDM cluster/.test(w)))
+  assert.equal([...bindings.values()][0], 'ambiguous')
+  // First seen while A is down: nothing is bound (A might have the names), so B is not enriched either.
+  aOnline = false
+  const fresh: EnrichBindings = new Map()
+  const enrich = { ...pve, id: 'e3', name: 'a-agent', enrichOnly: true }
+  const first = await new EstateService(() => NOW).get(new CompositeSource([{ connection: pdmC, source: pdmPart }, { connection: enrich, source: sourceOf(enrich, pveRoutes(NOW)).source }], [], fresh), { ...scope, id: 'bind2' }, DEFAULT_SETTINGS, { maxAgeMs: 0 })
+  assert.equal(b501(first).diskUsage, undefined)
+  assert.equal(fresh.size, 0)
+  assert.ok(first.warnings.some((w) => /PDM cluster is not known yet/.test(w)))
 })

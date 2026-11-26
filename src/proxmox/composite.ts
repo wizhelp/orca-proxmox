@@ -12,12 +12,18 @@
 //
 // A part that fails becomes an unreachable remote under the same id, with a warning; only when
 // every part fails does the refresh fail as a whole (with the first part's error).
-import type { ConnectionConfig, Guest, Host, Datastore, Remote, SourceKind, Task } from '../model'
+import { connectionScope, type ConnectionConfig, type Guest, type Host, type Datastore, type Remote, type SourceKind, type Task } from '../model'
 import type { AccessCheck, BackupScan, EstateSource, Inventory, MetricsScan, NetworkScan } from './source'
 import { ApiError } from './client'
 import { message, unreachableHost } from './pdm'
 
 export type Part = { connection: ConnectionConfig; source: EstateSource }
+/**
+ * Which PDM cluster each enrich-only connection (by its scope, id@revision) adds to, once known:
+ * a remote id, or 'ambiguous' when its node names were seen in several. Kept by the worker for
+ * the life of a configuration, so an outage cannot point a connection at another cluster.
+ */
+export type EnrichBindings = Map<string, string>
 /** A connection that could not even be set up (no secret, say), with why. */
 export type FailedPart = { connection: ConnectionConfig; reason: string }
 
@@ -85,7 +91,8 @@ export class CompositeSource implements EstateSource {
 
   constructor(
     private readonly parts: Part[],
-    private readonly failed: FailedPart[] = []
+    private readonly failed: FailedPart[] = [],
+    private readonly bindings: EnrichBindings = new Map()
   ) {
     this.kind = parts.some((p) => p.source.kind === 'pdm') ? 'pdm' : (parts[0]?.source.kind ?? 'pdm')
     this.ids = directRemoteIds([...parts.map((p) => p.connection), ...failed.map((f) => f.connection)])
@@ -179,6 +186,8 @@ export class CompositeSource implements EstateSource {
     const fromPdm = (remote: string) => this.parts[this.owner.get(remote) ?? -1]?.connection.kind === 'pdm'
     const pdmGuests = merged.guests.filter((g) => fromPdm(g.remote))
     const pdmHosts = merged.hosts.filter((h) => h.remoteType === 'pve' && fromPdm(h.remote))
+    const pdmRemotes = merged.remotes.filter((r) => fromPdm(r.id) && r.type === 'pve')
+    const allVisible = pdmRemotes.length > 0 && pdmRemotes.every((r) => r.online)
     const guestClaims = new Map<string, { part: number; guest: Guest }[]>()
     const hostClaims = new Map<string, { part: number; host: Host }[]>()
     const claim = <T>(map: Map<string, T[]>, key: string, value: T) => map.set(key, [...(map.get(key) ?? []), value])
@@ -186,11 +195,27 @@ export class CompositeSource implements EstateSource {
       const own = this.enrichNative.get(index)!
       const connection = this.parts[index].connection
       const label = connectionLabel(connection)
-      const where = (node: string) => {
-        const [a, b] = (connection.nodeMap?.[node] ?? node).split('/')
-        return b === undefined ? { node: a } : { remote: a, node: b }
+      // The PDM cluster it adds to: named by a remote/node mapping, else learnt once, while every
+      // PDM cluster is visible, as the only one with its node names, and kept.
+      const scope = connectionScope(connection)
+      const mapped = (node: string) => connection.nodeMap?.[node] ?? node
+      if (!this.bindings.has(scope)) {
+        const names = new Set(own.hosts.map((h) => mapped(h.node)).concat(own.guests.map((g) => mapped(g.node))).filter((n) => !n.includes('/')))
+        const clusters = new Set([...pdmHosts.filter((h) => names.has(h.node)).map((h) => h.remote), ...pdmGuests.filter((g) => names.has(g.node)).map((g) => g.remote)])
+        if (clusters.size > 1) this.bindings.set(scope, 'ambiguous')
+        else if (clusters.size === 1 && allVisible) this.bindings.set(scope, [...clusters][0])
       }
-      const fits = (x: { remote: string; node: string }, w: { remote?: string; node: string }) => x.node === w.node && (w.remote === undefined || x.remote === w.remote)
+      const bound = this.bindings.get(scope)
+      const where = (node: string) => {
+        const [a, b] = mapped(node).split('/')
+        if (b !== undefined) return { remote: a, node: b }
+        return bound && bound !== 'ambiguous' ? { remote: bound, node: a } : undefined
+      }
+      if (bound === 'ambiguous') merged.warnings.push(`${label} (enrich only): its node names are in more than one PDM cluster; map its nodes as remote/node to say which.`)
+      else if (!bound && !Object.values(connection.nodeMap ?? {}).some((v) => v.includes('/'))) {
+        merged.warnings.push(allVisible ? `${label} (enrich only) matched none of PDM's guests: its node names must be PDM's, or be mapped in Settings.` : `${label} (enrich only): its PDM cluster is not known yet (a PDM cluster is unreachable); it is matched once every PDM cluster is visible, or map its nodes as remote/node.`)
+      }
+      const fits = (x: { remote: string; node: string }, w: { remote: string; node: string } | undefined) => !!w && x.node === w.node && x.remote === w.remote
       let matched = 0
       let ambiguous = 0
       for (const g of own.guests) {
@@ -205,7 +230,7 @@ export class CompositeSource implements EstateSource {
         const found = pdmHosts.filter((x) => fits(x, where(h.node)))
         if (found.length === 1) claim(hostClaims, found[0].key, { part: index, host: h })
       }
-      if (own.guests.length && !matched) merged.warnings.push(`${label} (enrich only) matched none of PDM's guests: its node names must be PDM's, or be mapped in Settings.`)
+      if (own.guests.length && !matched && bound && bound !== 'ambiguous' && merged.remotes.find((r) => r.id === bound)?.online) merged.warnings.push(`${label} (enrich only) matched none of PDM's guests: its node names must be PDM's, or be mapped in Settings.`)
       if (ambiguous) merged.warnings.push(`${label} (enrich only): ${ambiguous} guest(s) matched more than one of PDM's guests and were left alone; map their node as remote/node.`)
     }
     const names = (claims: { part: number }[]) => claims.map((c) => connectionLabel(this.parts[c.part].connection)).join(' and ')

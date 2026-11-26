@@ -19,7 +19,7 @@ import {
   type SourceKind,
   type SshTunnel
 } from './model'
-import { CompositeSource, type FailedPart, type Part } from './proxmox/composite'
+import { CompositeSource, type EnrichBindings, type FailedPart, type Part } from './proxmox/composite'
 import type { ConfigAnswer, ConnectionInput, ImportStatus, SecretsProtection, SshHostKey, TestAnswer } from './protocol'
 import { ApiError, normalizeBaseUrl, ProxmoxClient } from './proxmox/client'
 import { nodeTransport, type ConnectTo, type Transport } from './proxmox/http'
@@ -233,6 +233,8 @@ function validNodeMap(raw: unknown): Record<string, string> {
 }
 
 export default function activate(orca: OrcaWorkerApi): void {
+  /** Which PDM cluster each enrich-only connection adds to, for the current configuration. */
+  const enrichBindings: EnrichBindings = new Map()
   const estate = new EstateService(() => clock())
   const orcaView = new OrcaService(() => (cliRunner ?? nodeCliRunner)(), () => clock())
 
@@ -311,6 +313,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   /** After a save or a clear: nothing of the previous configuration is used any more. */
   async function switched(previous: readonly ConnectionConfig[]): Promise<void> {
     generation += 1
+    enrichBindings.clear()
     estate.reset()
     latest = undefined
     loop?.reset()
@@ -772,7 +775,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     // An enrich-only connection alone adds to nothing: it still goes through the composite, which says so.
     const single = list.length === 1 && !list[0].enrichOnly
     const connection: ConnectionConfig = single ? list[0] : { id: estateScope(list), kind: parts[0].source.kind, baseUrl: linksKey(list), tokenId: '', fingerprint: '' }
-    const source = single ? parts[0].source : new CompositeSource(parts, failed)
+    const source = single ? parts[0].source : new CompositeSource(parts, failed, enrichBindings)
     const pdmUrl = list.find((c) => c.kind === 'pdm')?.baseUrl
     try {
       const snapshot = await estate.get(source, connection, settings, {
