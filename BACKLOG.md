@@ -39,13 +39,11 @@ Start, shutdown and reboot a guest from its details card, behind an explicit con
 names the guest and node. Uses a separate token with `VM.PowerMgmt` on the guests it may act on;
 the read-only token stays as it is. Shows the PVE task and its result.
 
-## Direct PVE and PBS hosts
+## VM disk use through PDM
 
-Connect to a single PVE host or PBS server without PDM, with the same connection model (base URL,
-token ID, secret in Orca's secrets, pinned fingerprint). The auth header schemes for `pve` and
-`pbs` exist in `src/proxmox/client.ts`; this needs an `EstateSource` for each (PVE's
-`/cluster/resources`, `/nodes/{node}/status`; PBS's `/status`, `/admin/datastore`), and more than
-one connection in the settings.
+PDM 1.1 answers the guest agent's `get-fsinfo` with 404, so through PDM a VM shows only its
+allocated size. When PDM passes the call on, the plugin reads it as it does for a direct PVE (the
+code already asks, and stops for 6 hours on a refusal).
 
 ## Orca plugin API
 

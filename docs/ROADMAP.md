@@ -53,8 +53,10 @@ README sections and screenshots from the example estate.
 | 5 | Tasks feed | Done: PDM's merged task list, failures in red. |
 | 6 | Tags and notes | Done, with a tag filter and notes in search. |
 | 7 | Alerts | Done, through `notifications:show`, mutable per kind. |
-| 8 | Disk-full warnings | Done for containers, datastores, storages and root disks. Limited for VMs: Proxmox does not see inside a VM's disk. |
+| 8 | Disk-full warnings | Done for containers, datastores, storages and root disks, and for VMs whose QEMU guest agent reports their use (direct PVE connections; PDM 1.1 does not pass the agent call on). |
 | 9 | Needs updates | Limited: the count shows where PDM has checked; a read-only token cannot ask for a check (403 on the summary and on `apt/update`). Version drift always works. |
 | 10 | Copy estate for AI | Done, with or without addresses. |
 | 11 | Open Orca terminal here | Done through the `orca` CLI (the plugin API's `terminal.create` needs a workspace id the API cannot map to a host). |
 | 12 | Where should this go? | Done: free memory, disk and CPU per node, ranked. |
+| 13 | Guest disk use (0.3.0) | Done: a sortable Disk column and a line in the details, used of size with a bar. Containers from Proxmox; VMs from the QEMU guest agent where it can be read (cached per guest, every 10 min, 24 per refresh, two at a time), else the allocated size with the reason use is unknown. |
+| 14 | Direct PVE and PBS connections (0.3.0) | Done: PVE clusters or hosts and PBS servers without PDM, alone or beside a PDM, each with its own token, pin and sealed secret; merged into one estate. Pending updates on a direct PVE come from each node's `apt/update` list (`Sys.Audit`, in `PVEAuditor`). |

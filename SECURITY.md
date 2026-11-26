@@ -7,8 +7,8 @@ Please report a vulnerability privately through GitHub's security advisories for
 
 ## What the plugin protects, and how
 
-**Read-only towards Proxmox.** The worker only sends `GET` requests to PDM, over HTTPS, and follows
-no redirects. With a pinned SHA-256 fingerprint the certificate is compared after the TLS
+**Read-only towards Proxmox.** The worker only sends `GET` requests to PDM and to PVE and PBS
+servers connected directly, over HTTPS, and follows no redirects. With a pinned SHA-256 fingerprint the certificate is compared after the TLS
 handshake and before any HTTP is sent, so a server with another certificate never receives the
 token. Without a pin, Node's certificate and hostname checks apply.
 
@@ -31,6 +31,11 @@ token. Without a pin, Node's certificate and hostname checks apply.
   worker asks for it again instead of sending it anywhere. A secret stored by a version before
   this binding is not migrated (its settings could have been changed meanwhile): it must be
   entered once more.
+- **Several connections** (one PDM, PVE clusters and hosts, PBS servers) each have their own id,
+  revision, sealed secret and keyring entry, bound as above to that connection's endpoint; each
+  server is only ever sent its own token, in its own header form (`PDMAPIToken`, `PVEAPIToken`,
+  `PBSAPIToken`). Removing one connection deletes only its secret. A base URL can belong to one
+  connection only.
 - Each saved configuration gets its own revision and its own keyring entry. A secret is carried
   over to a new configuration only for the very same base URL (path included), token ID and pin;
   any change to them needs the secret entered again. A refresh that read the old configuration
@@ -59,7 +64,7 @@ token. Without a pin, Node's certificate and hostname checks apply.
   one**; on failure the current connection stays. A save or removal in Settings at any time during
   an import, reading the file included, wins: the import then changes neither the connection nor
   the status beyond saying it was dropped. Nothing of the content is logged.
-- **What the logs and the panel show**: the PDM URL, the token ID and the import file's path
+- **What the logs and the panel show**: each connection's URL, the token ID and the import file's path
   (which contains your account's folder name), as connection metadata. Never the secret.
 
 **What leaves the worker.** HTTP errors are described by the plugin itself (path and status),
@@ -88,6 +93,13 @@ tags are escaped plain text, which keeps out markup and links, but their words s
 agent: a name or tag that reads like an instruction is pasted as such. The panel shows the exact
 text before it is copied.
 
+**The guest agent.** For VM disk use the worker asks PVE for the QEMU guest agent's `get-fsinfo`
+(a `GET`), and keeps only used and total bytes. On PVE 9 this needs `VM.GuestAgent.Audit`, which
+allows only the agent's informational calls; the documented setup grants it only if the person
+agrees. On PVE 8 the only privilege for it, `VM.Monitor`, also allows running commands in guests,
+so the documentation advises against granting it; VM disk use then stays unknown. A remote that
+refuses the call is not asked again for 6 hours.
+
 ## Residual risks
 
 - **The panel can still reach the sealed value.** Any code running in the plugin's panel can read
@@ -95,6 +107,9 @@ text before it is copied.
   worker's key, nor redirect it by rewriting the connection settings (see above). It can make the
   plugin unusable until the secret is entered again. Orca offers no worker-only secret store or
   storage today.
+- **A token for a direct PVE or PBS** reads that server with the role it was given; with
+  `PVEAuditor` on `/` that includes every guest's configuration (cloud-init users, SSH keys),
+  as through PDM. The worker keeps only names, addresses and notes from it.
 - **Saving through the panel is trusted.** The worker accepts a new connection from the panel's
   Settings form (that is how you set it up); a new endpoint or pin always needs the secret entered
   with it.
