@@ -72,6 +72,12 @@ export interface EstateSource {
    * absent on sources without guests.
    */
   readGuestFs?(guest: Guest, signal?: AbortSignal): Promise<unknown>
+  /**
+   * Which API answers a guest's agent call, where that is not simply its remote's (a guest PDM
+   * shows whose agent is read through an enrich-only connection): a refusal of the call is
+   * remembered per such scope.
+   */
+  agentScope?(guest: Guest): string
   /** Pending package updates per host key, where PDM has checked. */
   fetchUpdates(inventory: Inventory, signal?: AbortSignal): Promise<{ hosts: Record<string, number>; warnings: string[] }>
 }

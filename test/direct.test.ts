@@ -4,6 +4,7 @@ import { EstateService } from '../src/estate'
 import { estateMarkdown } from '../src/features/insights'
 import { DEFAULT_SETTINGS, estateScope, type ConnectionConfig, type Guest } from '../src/model'
 import { attachBackups } from '../src/proxmox/backups'
+import { ApiError } from '../src/proxmox/client'
 import { ProxmoxClient } from '../src/proxmox/client'
 import { CompositeSource, directRemoteIds, type FailedPart, type Part } from '../src/proxmox/composite'
 import { createSource, type BackupScan, type EstateSource, type Inventory } from '../src/proxmox/source'
@@ -351,4 +352,79 @@ test('with no rival, an outage elsewhere leaves a hint that names one remote dec
     unavailableRemotes: other.remotes.map((r) => r.id)
   }).guests
   assert.equal(out[0].backupState, 'ok')
+})
+
+test('enrich only: PDM stays the source; a direct PVE adds VM disk use, storage types and updates to the guests and nodes it matches', async () => {
+  const GiB = 1024 ** 3
+  // PDM shows cluster "pve-a" with one node "pve-a" (the direct server calls it "pve-x1") and its guests.
+  const pdmInv: Inventory = {
+    remotes: [{ id: 'pve-a', type: 'pve', online: true }],
+    hosts: [{ key: 'pve-a/pve-a', remote: 'pve-a', remoteType: 'pve', node: 'pve-a', online: true, status: 'online', storages: [{ name: 'local-lvm', node: 'pve-a', disk: GiB, maxdisk: 8 * GiB, shared: false, status: 'available' }] } as never],
+    guests: [vm('pve-a', 501), vm('pve-a', 502), { ...vm('pve-a', 777), node: 'pve-a' }].map((g) => ({ ...g, node: 'pve-a' })),
+    datastores: [],
+    warnings: []
+  }
+  const pdmAgent: string[] = []
+  const pdmPart: EstateSource = {
+    ...stub('pdm', pdmInv, { records: [], available: false, complete: false, gaps: [], warnings: [] }),
+    // PDM offers no guest-agent call.
+    readGuestFs: async (g) => {
+      pdmAgent.push(g.key)
+      throw new ApiError({ kind: 'http', status: 404, message: 'not found' })
+    }
+  }
+  const enrich: ConnectionConfig = { ...pve, id: 'e1', name: 'pve-a-agent', enrichOnly: true, nodeMap: { 'pve-x1': 'pve-a' } }
+  const pdmC = { ...pdm, id: 'p' }
+  const scope = { id: 'enrich', kind: 'pdm' as const, baseUrl: 'x', tokenId: '', fingerprint: '' }
+  const read = (parts: Part[], failed: FailedPart[] = []) => new EstateService(() => NOW).get(new CompositeSource(parts, failed), scope, DEFAULT_SETTINGS, { maxAgeMs: 0 })
+
+  const snap = await read([{ connection: pdmC, source: pdmPart }, { connection: enrich, source: sourceOf(enrich, pveRoutes(NOW)).source }])
+  // Nothing added: PDM's remote, node and guests only.
+  assert.deepEqual(snap.remotes.map((r) => r.id), ['pve-a'])
+  assert.deepEqual(snap.hosts.map((h) => h.key), ['pve-a/pve-a'])
+  assert.deepEqual(snap.guests.map((g) => g.key).sort(), ['pve-a/501', 'pve-a/502', 'pve-a/777'])
+  const g = (vmid: number) => snap.guests.find((x) => x.vmid === vmid)!
+  // VM 501's disk use comes from the direct server's guest agent; 502 has none running there.
+  assert.deepEqual(g(501).diskUsage, { used: 21 * GiB, total: 60 * GiB, from: 'agent' })
+  assert.equal(g(502).diskUnknown, 'no-agent')
+  // 777 is not on the direct server: asked through PDM, which offers no agent call; that does not
+  // stop the enriched guests from being read.
+  assert.deepEqual(pdmAgent, ['pve-a/777'])
+  assert.equal(g(777).diskUnknown, 'unsupported')
+  // The node's storage types and pending updates, where PDM had none.
+  const host = snap.hosts[0]
+  assert.deepEqual(host.storages![0].content, ['images', 'rootdir'])
+  assert.equal(host.pendingUpdates, 2)
+
+  // Unmapped names match nothing: a warning, still no duplicates.
+  const unmapped = await read([{ connection: pdmC, source: pdmPart }, { connection: { ...enrich, nodeMap: undefined }, source: sourceOf({ ...enrich, nodeMap: undefined }, pveRoutes(NOW)).source }])
+  assert.equal(unmapped.guests.length, 3)
+  assert.ok(unmapped.warnings.some((w) => /matched none of the estate's guests/.test(w)))
+  // Down (or without its secret): a warning, never an unreachable remote of its own.
+  const down = await read([{ connection: pdmC, source: pdmPart }], [{ connection: enrich, reason: 'No token secret is stored for this connection.' }])
+  assert.deepEqual(down.remotes.map((r) => r.id), ['pve-a'])
+  assert.ok(down.warnings.some((w) => /pve-a-agent \(enrich only\) could not be used/.test(w)))
+  const failing = await read([{ connection: pdmC, source: pdmPart }, { connection: enrich, source: sourceOf(enrich, {}).source }])
+  assert.deepEqual(failing.remotes.map((r) => r.id), ['pve-a'])
+  assert.ok(failing.warnings.some((w) => /\(enrich only\) could not be read/.test(w)))
+})
+
+test('enrich only: a guest matching two of the estate\'s is left alone, and a mapping can name the remote', async () => {
+  const twoRemotes: Inventory = {
+    remotes: [{ id: 'pve-a', type: 'pve', online: true }, { id: 'pve-b', type: 'pve', online: true }],
+    hosts: [],
+    guests: [{ ...vm('pve-a', 501), node: 'pve-x1' }, { ...vm('pve-b', 501), node: 'pve-x1' }],
+    datastores: [],
+    warnings: []
+  }
+  const pdmPart = stub('pdm', twoRemotes, { records: [], available: false, complete: false, gaps: [], warnings: [] })
+  const enrich: ConnectionConfig = { ...pve, id: 'e1', name: 'x-agent', enrichOnly: true }
+  const scope = { id: 'enrich2', kind: 'pdm' as const, baseUrl: 'x', tokenId: '', fingerprint: '' }
+  const read = (c: ConnectionConfig) => new EstateService(() => NOW).get(new CompositeSource([{ connection: { ...pdm, id: 'p' }, source: pdmPart }, { connection: c, source: sourceOf(c, pveRoutes(NOW)).source }]), scope, DEFAULT_SETTINGS, { maxAgeMs: 0 })
+  const ambiguous = await read(enrich)
+  assert.ok(ambiguous.guests.every((g) => g.diskUsage === undefined))
+  assert.ok(ambiguous.warnings.some((w) => /matched more than one guest/.test(w)))
+  const mapped = await read({ ...enrich, nodeMap: { 'pve-x1': 'pve-b/pve-x1' } })
+  assert.equal(mapped.guests.find((g) => g.remote === 'pve-b')!.diskUsage?.from, 'agent')
+  assert.equal(mapped.guests.find((g) => g.remote === 'pve-a')!.diskUsage, undefined)
 })

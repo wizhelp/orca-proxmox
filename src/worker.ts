@@ -767,7 +767,8 @@ export default function activate(orca: OrcaWorkerApi): void {
       else failed.push({ connection: c, reason: noSecret.message })
     }
     if (!parts.length) return { state: 'error', refreshSeconds, error: list.length > 1 ? { ...noSecret, message: 'No token secret is stored for these connections.' } : noSecret }
-    const single = list.length === 1
+    // An enrich-only connection alone adds to nothing: it still goes through the composite, which says so.
+    const single = list.length === 1 && !list[0].enrichOnly
     const connection: ConnectionConfig = single ? list[0] : { id: estateScope(list), kind: parts[0].source.kind, baseUrl: linksKey(list), tokenId: '', fingerprint: '' }
     const source = single ? parts[0].source : new CompositeSource(parts, failed)
     const pdmUrl = list.find((c) => c.kind === 'pdm')?.baseUrl

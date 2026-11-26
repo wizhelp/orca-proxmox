@@ -36,7 +36,8 @@ export function directRemoteIds(connections: readonly ConnectionConfig[]): Map<s
   const withPdm = connections.some((c) => c.kind === 'pdm')
   const ids = new Map<string, string>()
   const taken = new Set<string>()
-  for (const c of [...connections].filter((x) => x.kind !== 'pdm').sort((a, b) => a.id.localeCompare(b.id))) {
+  // An enrich-only connection adds no remote of its own.
+  for (const c of [...connections].filter((x) => x.kind !== 'pdm' && !x.enrichOnly).sort((a, b) => a.id.localeCompare(b.id))) {
     const base = connectionLabel(c)
     let id = base
     for (let n = 2; taken.has(id.toLowerCase()); n += 1) id = `${base}-${n}`
@@ -71,6 +72,13 @@ export class CompositeSource implements EstateSource {
   private names: Names[]
   /** Estate keys -> the part's own (native) objects, to hand back to that part. */
   private native = { remotes: new Map<string, Remote>(), hosts: new Map<string, Host>(), guests: new Map<string, Guest>(), datastores: new Map<string, Datastore>() }
+  /**
+   * Enrich-only parts: an estate guest -> the part whose guest agent is read for it (and that
+   * part's own guest); an estate node -> the part's own node, for pending updates.
+   */
+  private enrichGuests = new Map<string, { part: number; guest: Guest }>()
+  private enrichHosts = new Map<string, { part: number; host: Host }>()
+  private enrichNative = new Map<number, Inventory>()
   /** Connections that hold backups (PDM, PBS) and could not be read in the last inventory. */
   private downBackupSources: ConnectionConfig[] = []
   private readonly ids: Map<string, string>
@@ -96,8 +104,21 @@ export class CompositeSource implements EstateSource {
     this.owner = new Map()
     this.native = { remotes: new Map(), hosts: new Map(), guests: new Map(), datastores: new Map() }
     this.downBackupSources = this.failed.map((f) => f.connection).filter((c) => c.kind !== 'pve')
+    this.enrichGuests = new Map()
+    this.enrichHosts = new Map()
+    this.enrichNative = new Map()
+    const enrichers: number[] = []
     answers.forEach((answer, i) => {
       const part = this.parts[i]
+      if (part.connection.enrichOnly) {
+        // It only adds to what the others show: down, a warning; up, matched once all are merged.
+        if (answer.status === 'rejected') merged.warnings.push(`${connectionLabel(part.connection)} (enrich only) could not be read: ${message(answer.reason)}; what it adds (VM disk use, storage types, updates) is missing.`)
+        else {
+          this.enrichNative.set(i, answer.value)
+          enrichers.push(i)
+        }
+        return
+      }
       if (answer.status === 'rejected') {
         this.addUnreachable(merged, part.connection, message(answer.reason))
         if (part.connection.kind !== 'pve') this.downBackupSources.push(part.connection)
@@ -138,8 +159,58 @@ export class CompositeSource implements EstateSource {
       }
       merged.warnings.push(...inventory.warnings)
     })
-    for (const f of this.failed) this.addUnreachable(merged, f.connection, f.reason)
+    for (const f of this.failed) {
+      if (f.connection.enrichOnly) merged.warnings.push(`${connectionLabel(f.connection)} (enrich only) could not be used: ${f.reason}`)
+      else this.addUnreachable(merged, f.connection, f.reason)
+    }
+    for (const i of enrichers) this.enrich(merged, i, this.enrichNative.get(i)!)
     return merged
+  }
+
+  /**
+   * Matches an enrich-only part's nodes and guests to the estate's, by node name (or its mapping,
+   * `node` or `remote/node`) and VMID; only a single match counts. Nothing of it is added to the
+   * estate: its guests' agents answer for the matched guests, its storages' content types fill
+   * the matched nodes' where missing, its pending updates the nodes' that have none.
+   */
+  private enrich(merged: Inventory, index: number, own: Inventory): void {
+    const connection = this.parts[index].connection
+    const label = connectionLabel(connection)
+    const where = (node: string) => {
+      const [a, b] = (connection.nodeMap?.[node] ?? node).split('/')
+      return b === undefined ? { node: a } : { remote: a, node: b }
+    }
+    const fits = (x: { remote: string; node: string }, w: { remote?: string; node: string }) => x.node === w.node && (w.remote === undefined || x.remote === w.remote)
+    let matched = 0
+    let ambiguous = 0
+    for (const g of own.guests) {
+      const w = where(g.node)
+      const found = merged.guests.filter((x) => x.vmid === g.vmid && x.type === g.type && fits(x, w))
+      if (found.length === 1 && !this.enrichGuests.has(found[0].key)) {
+        this.enrichGuests.set(found[0].key, { part: index, guest: g })
+        matched += 1
+      } else if (found.length > 1) ambiguous += 1
+    }
+    for (const h of own.hosts) {
+      const w = where(h.node)
+      const found = merged.hosts.filter((x) => x.remoteType === 'pve' && fits(x, w))
+      if (found.length !== 1 || this.enrichHosts.has(found[0].key)) continue
+      const target = found[0]
+      this.enrichHosts.set(target.key, { part: index, host: h })
+      if (target.storages && h.storages) {
+        target.storages = target.storages.map((s) => {
+          const theirs = h.storages!.find((o) => o.name === s.name)
+          return s.content || !theirs?.content ? s : { ...s, content: theirs.content }
+        })
+      }
+    }
+    if (own.guests.length && !matched) merged.warnings.push(`${label} (enrich only) matched none of the estate's guests: its node names must be PDM's, or be mapped in Settings.`)
+    if (ambiguous) merged.warnings.push(`${label} (enrich only): ${ambiguous} guest(s) matched more than one guest of the estate and were left alone; map their node as remote/node.`)
+  }
+
+  agentScope(guest: Guest): string {
+    const e = this.enrichGuests.get(guest.key)
+    return e ? `enrich:${e.part}` : guest.remote
   }
 
   /** The estate id a connection's remote has, or would have: for PDM its label (it has no single remote). */
@@ -248,10 +319,29 @@ export class CompositeSource implements EstateSource {
       return { ...r, hosts: renameRecord(names, r.hosts) }
     })
     const values = results.map((r) => r.value)
-    return { hosts: Object.assign({}, ...values.map((r) => r.hosts)), warnings: [...values.flatMap((r) => r.warnings), ...warnings] }
+    const hosts: Record<string, number> = Object.assign({}, ...values.map((r) => r.hosts))
+    const more: string[] = []
+    // Enrich-only parts: their nodes' counts for the matched nodes PDM gave none for.
+    await Promise.all(
+      [...this.enrichNative].map(async ([i, own]) => {
+        try {
+          const r = await this.parts[i].source.fetchUpdates({ ...own, guests: [] }, signal)
+          for (const [key, e] of this.enrichHosts) if (e.part === i && hosts[key] === undefined && r.hosts[e.host.key] !== undefined) hosts[key] = r.hosts[e.host.key]
+        } catch (error) {
+          more.push(`${connectionLabel(this.parts[i].connection)} (enrich only): updates could not be read: ${message(error)}`)
+        }
+      })
+    )
+    return { hosts, warnings: [...values.flatMap((r) => r.warnings), ...warnings, ...more] }
   }
 
   readGuestFs(guest: Guest, signal?: AbortSignal): Promise<unknown> {
+    // A guest an enrich-only connection matched: its agent is read there (PDM offers no such call).
+    const enriched = this.enrichGuests.get(guest.key)
+    if (enriched) {
+      const source = this.parts[enriched.part].source
+      if (source.readGuestFs) return source.readGuestFs(enriched.guest, signal)
+    }
     const part = this.parts[this.owner.get(guest.remote) ?? -1]
     const own = this.native.guests.get(guest.key)
     if (!part?.source.readGuestFs || !own) return Promise.reject(new ApiError({ kind: 'http', status: 501, message: 'No guest agent call for this remote' }))

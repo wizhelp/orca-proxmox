@@ -4,7 +4,7 @@
 //
 // Everything is scoped to one saved configuration (connectionScope): a refresh still running for
 // a configuration that was replaced is aborted, and whatever it returns is never cached.
-import { connectionScope, type ConnectionConfig, type DiskUnknown, type EstateSnapshot, type PluginSettings, type Task } from './model'
+import { connectionScope, type ConnectionConfig, type DiskUnknown, type EstateSnapshot, type Guest, type PluginSettings, type Task } from './model'
 import { attachBackups } from './proxmox/backups'
 import { refreshGuestDisks, withDiskUsage, type DiskEntry } from './proxmox/agent'
 import type { BackupScan, EstateSource, Inventory, MetricsScan, NetworkScan } from './proxmox/source'
@@ -244,17 +244,18 @@ export class EstateService {
     if (this.disks?.scope !== scope) this.disks = { scope, cache: new Map(), blocked: new Map() }
     const disks = this.disks
     const agentOff = !settings.guestAgentDisk
+    const agentScope = (g: Guest) => source.agentScope?.(g) ?? g.remote
     // Turned off in Settings: nothing read from agents before is shown either.
     if (agentOff) for (const g of inventory.guests) if (g.type === 'qemu') disks.cache.delete(g.key)
     if (source.readGuestFs && !agentOff) {
       try {
-        await refreshGuestDisks(inventory.guests, disks.cache, (g) => source.readGuestFs!(g, signal), this.now(), disks.blocked)
+        await refreshGuestDisks(inventory.guests, disks.cache, (g) => source.readGuestFs!(g, signal), this.now(), disks.blocked, undefined, agentScope)
       } catch (error) {
         warnings.push(`Disk use inside VMs could not be read: ${error instanceof Error ? error.message : String(error)}`)
       }
       live()
     }
-    inventory.guests = withDiskUsage(inventory.guests, disks.cache, disks.blocked, this.now(), agentOff)
+    inventory.guests = withDiskUsage(inventory.guests, disks.cache, disks.blocked, this.now(), agentOff, agentScope)
     const claims = this.claimants(scope, inventory)
     const { guests, missing, orphans } = attachBackups(inventory.guests, backups.scan?.records ?? [], {
       now,

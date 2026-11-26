@@ -71,12 +71,13 @@ export async function refreshGuestDisks(
   read: (guest: Guest) => Promise<unknown>,
   now: number,
   blocked: Map<string, { until: number; reason: DiskUnknown }>,
-  clock: () => number = Date.now
+  clock: () => number = Date.now,
+  scopeOf: (guest: Guest) => string = (g) => g.remote
 ): Promise<void> {
   const started = clock()
   const due = guests
     .filter((g) => g.type === 'qemu' && g.status === 'running' && !g.template)
-    .filter((g) => !((blocked.get(g.remote)?.until ?? 0) > now))
+    .filter((g) => !((blocked.get(scopeOf(g))?.until ?? 0) > now))
     .filter((g) => {
       const entry = cache.get(g.key)
       return !entry || now - entry.at >= (entry.unknown === 'no-permission' ? DISK_BACKOFF_MS : DISK_EVERY_MS)
@@ -84,7 +85,7 @@ export async function refreshGuestDisks(
     .sort((a, b) => (cache.get(a.key)?.at ?? -Infinity) - (cache.get(b.key)?.at ?? -Infinity))
     .slice(0, DISK_PER_REFRESH)
   await mapLimit(due, DISK_PARALLEL, async (guest) => {
-    if ((blocked.get(guest.remote)?.until ?? 0) > now || clock() - started > DISK_BUDGET_MS) return
+    if ((blocked.get(scopeOf(guest))?.until ?? 0) > now || clock() - started > DISK_BUDGET_MS) return
     try {
       const usage = fsUsage(await read(guest))
       cache.set(guest.key, usage ? { at: now, ...usage } : { at: now, unknown: 'no-agent' })
@@ -92,7 +93,7 @@ export async function refreshGuestDisks(
       if (error instanceof ApiError && (error.info.kind === 'auth' || error.info.kind === 'fingerprint-mismatch')) throw error
       const reason = unknownReason(error)
       cache.set(guest.key, { at: now, unknown: reason })
-      if (reason === 'unsupported') blocked.set(guest.remote, { until: now + DISK_BACKOFF_MS, reason })
+      if (reason === 'unsupported') blocked.set(scopeOf(guest), { until: now + DISK_BACKOFF_MS, reason })
     }
   })
 }
@@ -102,7 +103,7 @@ export async function refreshGuestDisks(
  * A running container's use is remembered in `cache`, so that once stopped (Proxmox then reports
  * 0) it shows the last use measured, marked as such, rather than an empty disk.
  */
-export function withDiskUsage(guests: readonly Guest[], cache: Map<string, DiskEntry> | undefined, blocked: Map<string, { until: number; reason: DiskUnknown }> | undefined, now: number, agentOff = false): Guest[] {
+export function withDiskUsage(guests: readonly Guest[], cache: Map<string, DiskEntry> | undefined, blocked: Map<string, { until: number; reason: DiskUnknown }> | undefined, now: number, agentOff = false, scopeOf: (guest: Guest) => string = (g) => g.remote): Guest[] {
   return guests.map((g) => {
     const next: Guest = { ...g }
     delete next.diskUsage
@@ -121,7 +122,7 @@ export function withDiskUsage(guests: readonly Guest[], cache: Map<string, DiskE
       } else next.diskUnknown = 'not-read'
       return next
     }
-    const block = blocked?.get(g.remote)
+    const block = blocked?.get(scopeOf(g))
     if (agentOff) next.diskUnknown = 'off'
     else if (entry && entry.total) next.diskUsage = { used: entry.used ?? 0, total: entry.total, from }
     else if (block && block.until > now) next.diskUnknown = block.reason
