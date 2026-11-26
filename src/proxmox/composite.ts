@@ -85,6 +85,8 @@ export class CompositeSource implements EstateSource {
   private enrichGuests = new Map<string, { part: number; guest: Guest }>()
   private enrichHosts = new Map<string, { part: number; host: Host }>()
   private enrichNative = new Map<number, Inventory>()
+  /** How many remotes PDM knows but did not list in the last inventory (unknown cluster contents). */
+  private pdmUnlisted = 0
   /** Connections that hold backups (PDM, PBS) and could not be read in the last inventory. */
   private downBackupSources: ConnectionConfig[] = []
   private readonly ids: Map<string, string>
@@ -114,6 +116,7 @@ export class CompositeSource implements EstateSource {
     this.enrichGuests = new Map()
     this.enrichHosts = new Map()
     this.enrichNative = new Map()
+    this.pdmUnlisted = 0
     const enrichers: number[] = []
     answers.forEach((answer, i) => {
       const part = this.parts[i]
@@ -132,6 +135,7 @@ export class CompositeSource implements EstateSource {
         return
       }
       const inventory = answer.value
+      if (part.connection.kind === 'pdm') this.pdmUnlisted += inventory.unlisted?.length ?? 0
       const names: Names = { toEstate: new Map() }
       const estateId = this.ids.get(part.connection.id)
       // A direct connection reports one remote; it takes the configured id.
@@ -187,7 +191,8 @@ export class CompositeSource implements EstateSource {
     const pdmGuests = merged.guests.filter((g) => fromPdm(g.remote))
     const pdmHosts = merged.hosts.filter((h) => h.remoteType === 'pve' && fromPdm(h.remote))
     const pdmRemotes = merged.remotes.filter((r) => fromPdm(r.id) && r.type === 'pve')
-    const allVisible = pdmRemotes.length > 0 && pdmRemotes.every((r) => r.online)
+    // Every PDM cluster readable now: none offline, none PDM knows but did not list.
+    const allVisible = pdmRemotes.length > 0 && pdmRemotes.every((r) => r.online) && this.pdmUnlisted === 0
     const guestClaims = new Map<string, { part: number; guest: Guest }[]>()
     const hostClaims = new Map<string, { part: number; host: Host }[]>()
     const claim = <T>(map: Map<string, T[]>, key: string, value: T) => map.set(key, [...(map.get(key) ?? []), value])
@@ -199,7 +204,14 @@ export class CompositeSource implements EstateSource {
       // PDM cluster is visible, as the only one with its node names, and kept.
       const scope = connectionScope(connection)
       const mapped = (node: string) => connection.nodeMap?.[node] ?? node
-      if (!this.bindings.has(scope)) {
+      // remote/node mappings name the cluster for the whole connection: all must name the same one.
+      const named = new Set(Object.values(connection.nodeMap ?? {}).filter((v) => v.includes('/')).map((v) => v.split('/')[0]))
+      if (named.size > 1) {
+        merged.warnings.push(`${label} (enrich only): its node mappings name more than one PDM cluster (${[...named].join(', ')}); one connection adds to one cluster.`)
+        continue
+      }
+      if (named.size === 1) this.bindings.set(scope, [...named][0])
+      else if (!this.bindings.has(scope)) {
         const names = new Set(own.hosts.map((h) => mapped(h.node)).concat(own.guests.map((g) => mapped(g.node))).filter((n) => !n.includes('/')))
         const clusters = new Set([...pdmHosts.filter((h) => names.has(h.node)).map((h) => h.remote), ...pdmGuests.filter((g) => names.has(g.node)).map((g) => g.remote)])
         if (clusters.size > 1) this.bindings.set(scope, 'ambiguous')
@@ -208,8 +220,10 @@ export class CompositeSource implements EstateSource {
       const bound = this.bindings.get(scope)
       const where = (node: string) => {
         const [a, b] = mapped(node).split('/')
-        if (b !== undefined) return { remote: a, node: b }
-        return bound && bound !== 'ambiguous' ? { remote: bound, node: a } : undefined
+        if (!bound || bound === 'ambiguous') return undefined
+        // Only ever within the bound cluster.
+        if (b !== undefined) return a === bound ? { remote: a, node: b } : undefined
+        return { remote: bound, node: a }
       }
       if (bound === 'ambiguous') merged.warnings.push(`${label} (enrich only): its node names are in more than one PDM cluster; map its nodes as remote/node to say which.`)
       else if (!bound && !Object.values(connection.nodeMap ?? {}).some((v) => v.includes('/'))) {

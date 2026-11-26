@@ -15,6 +15,8 @@ export type Inventory = {
   guests: Guest[]
   datastores: Datastore[]
   warnings: string[]
+  /** Remotes the source knows but could not list (PDM: none of their resources came back). */
+  unlisted?: string[]
 }
 
 export type BackupScan = {

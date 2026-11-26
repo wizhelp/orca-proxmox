@@ -527,3 +527,59 @@ test('enrich only is bound to one PDM cluster: an outage never moves it to anoth
   assert.equal(fresh.size, 0)
   assert.ok(first.warnings.some((w) => /PDM cluster is not known yet/.test(w)))
 })
+
+test('enrich only binds strictly: one cluster for the whole connection, never learnt while a PDM cluster is hidden', async () => {
+  // The enrich-only server (cluster A's) has nodes pve-x1 and pve-x2; it reads its own VMs' agents.
+  const agentReads: string[] = []
+  const own: Inventory = {
+    remotes: [{ id: 'own', type: 'pve', online: true }],
+    hosts: [],
+    guests: [{ ...vm('own', 501), node: 'pve-x1' }, { ...vm('own', 502), node: 'pve-x2' }],
+    datastores: [],
+    warnings: []
+  }
+  const enrichSource: EstateSource = {
+    ...stub('pve', own, { records: [], available: false, complete: false, gaps: [], warnings: [] }),
+    readGuestFs: async (g) => {
+      agentReads.push(g.key)
+      return { result: [{ name: 'sda1', mountpoint: '/', type: 'ext4', 'total-bytes': 10 * 1024 ** 3, 'used-bytes': 1024 ** 3 }] }
+    }
+  }
+  const pdmC = { ...pdm, id: 'p' }
+  const read = (inv: Inventory, enrich: ConnectionConfig, bindings: EnrichBindings) =>
+    new EstateService(() => NOW).get(
+      new CompositeSource([{ connection: pdmC, source: stub('pdm', inv, { records: [], available: false, complete: false, gaps: [], warnings: [] }) }, { connection: enrich, source: enrichSource }], [], bindings),
+      { id: `strict-${enrich.id}`, kind: 'pdm', baseUrl: 'x', tokenId: '', fingerprint: '' },
+      DEFAULT_SETTINGS,
+      { maxAgeMs: 0 }
+    )
+
+  // 1. pve-x1 mapped to cluster A; pve-x2 left bare. Cluster B has a node pve-x2 with VM 502:
+  //    the bare name stays within A, so B's VM 502 is never read through A's agent.
+  const twoClusters: Inventory = {
+    remotes: [{ id: 'cluster-a', type: 'pve', online: true }, { id: 'cluster-b', type: 'pve', online: true }],
+    hosts: [],
+    guests: [{ ...vm('cluster-a', 501), node: 'pve-x1' }, { ...vm('cluster-b', 502), node: 'pve-x2' }],
+    datastores: [],
+    warnings: []
+  }
+  const mixed = await read(twoClusters, { ...pve, id: 's1', name: 'a-agent', enrichOnly: true, nodeMap: { 'pve-x1': 'cluster-a/pve-x1' } }, new Map())
+  assert.equal(mixed.guests.find((g) => g.key === 'cluster-a/501')!.diskUsage?.from, 'agent')
+  assert.equal(mixed.guests.find((g) => g.key === 'cluster-b/502')!.diskUsage, undefined)
+  assert.deepEqual(agentReads, ['own/501'])
+  // Mappings naming two clusters: nothing is matched at all.
+  agentReads.length = 0
+  const conflicting = await read(twoClusters, { ...pve, id: 's2', name: 'a-agent', enrichOnly: true, nodeMap: { 'pve-x1': 'cluster-a/pve-x1', 'pve-x2': 'cluster-b/pve-x2' } }, new Map())
+  assert.deepEqual(agentReads, [])
+  assert.ok(conflicting.warnings.some((w) => /name more than one PDM cluster/.test(w)))
+
+  // 2. PDM knows cluster A but listed none of its resources; only B shows a node pve-x1 with VM 501.
+  //    Nothing is learnt (A may hold the names), so B's VM is not read through A's agent.
+  agentReads.length = 0
+  const hidden: Inventory = { remotes: [{ id: 'cluster-b', type: 'pve', online: true }], hosts: [], guests: [{ ...vm('cluster-b', 501), node: 'pve-x1' }], datastores: [], warnings: [], unlisted: ['cluster-a'] }
+  const bindings: EnrichBindings = new Map()
+  const snap = await read(hidden, { ...pve, id: 's3', name: 'a-agent', enrichOnly: true }, bindings)
+  assert.equal(snap.guests.find((g) => g.key === 'cluster-b/501')!.diskUsage, undefined)
+  assert.deepEqual(agentReads, [])
+  assert.equal(bindings.size, 0)
+})

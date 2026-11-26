@@ -290,8 +290,10 @@ export class PdmSource implements EstateSource {
     }
     if (skipped > 0) warnings.push(`${skipped} malformed entries in PDM's remote and resource lists were skipped.`)
     // A remote PDM knows but /resources/list left out (e.g. no Resource.Audit on it).
+    const unlisted: string[] = []
     for (const remote of remoteList) {
       if (!seen.has(remote.id)) {
+        unlisted.push(remote.id)
         warnings.push(`No resources visible for remote ${remote.id}; check the token's permissions on /resource/${remote.id}.`)
       }
     }
@@ -303,7 +305,7 @@ export class PdmSource implements EstateSource {
       if (mine.length === 1 && addresses.length > 0) mine[0].addresses = addresses
     }
     await this.addHostDetails(hosts, remotes, warnings, signal)
-    return { remotes, hosts, guests, datastores, warnings }
+    return { remotes, hosts, guests, datastores, warnings, ...(unlisted.length ? { unlisted } : {}) }
   }
 
   /** Version, root disk and a fresher uptime per host. A failure marks the row, never the refresh. */
