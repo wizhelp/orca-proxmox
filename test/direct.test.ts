@@ -290,3 +290,65 @@ test('a PBS that goes down between scans: no "never" from the cached scan, the s
   assert.match(second.backups.incomplete ?? '', /pbs-1 is unreachable now/)
   assert.equal(second.backups.fetchedAt, NOW, 'the time of the last successful scan')
 })
+
+test('an outage does not turn a shared backup hint into "backed up" for the cluster still reachable', async () => {
+  // PDM's remote "lab" and a cluster reached directly whose own name is also "lab" both have VM 501;
+  // the only snapshot is in namespace "lab".
+  const pdmLab = (online: boolean): Inventory => ({ remotes: [{ id: 'lab', type: 'pve', online }], hosts: [], guests: online ? [vm('lab', 501)] : [], datastores: [], warnings: [] })
+  const directLab: Inventory = { remotes: [{ id: 'lab', type: 'pve', online: true, direct: true }], hosts: [], guests: [vm('lab', 501)], datastores: [], warnings: [] }
+  const scan: BackupScan = { records: [{ remote: 'pbs1', datastore: 'store', ns: 'lab', type: 'vm', id: '501', time: NOW - 3600_000 }], available: true, complete: true, gaps: [], warnings: [] }
+  const pdmC = { ...pdm, id: 'p' }
+  const pveC = { ...pve, id: 'v', name: 'lab' } // shown as "lab (direct)", its own name "lab"
+  const pbsC = { ...pbs, id: 'b', name: 'pbs-1', baseUrl: 'https://pbs1.example.test:8007' }
+  let pdmState: 'up' | 'remote-offline' | 'down' = 'up'
+  const pdmSource: EstateSource = {
+    ...stub('pdm', pdmLab(true), { records: [], available: false, complete: false, gaps: [], warnings: [] }),
+    fetchInventory: async () => (pdmState === 'down' ? Promise.reject(new Error('refused')) : pdmLab(pdmState === 'up'))
+  }
+  const parts = (): Part[] => [
+    { connection: pdmC, source: pdmSource },
+    { connection: pveC, source: stub('pve', directLab, scan) },
+    { connection: pbsC, source: stub('pbs', pbsInventory('pbs1'), scan) }
+  ]
+  const scope = { id: 'shared-hint', kind: 'pdm' as const, baseUrl: 'x', tokenId: '', fingerprint: '' }
+  let now = NOW
+  const service = new EstateService(() => now)
+  const direct501 = async () => {
+    const snap = await service.get(new CompositeSource(parts()), scope, DEFAULT_SETTINGS, { maxAgeMs: 0 })
+    return snap.guests.find((g) => g.remote === 'lab (direct)' && g.vmid === 501)!
+  }
+  // Both reachable: the hint is shared, so unknown.
+  assert.equal((await direct501()).backupState, 'unknown')
+  // PDM still lists "lab", but offline: its VM 501 is no longer listed; the hint stays disputed.
+  pdmState = 'remote-offline'
+  now += 30_000
+  let g = await direct501()
+  assert.equal(g.backupState, 'unknown')
+  assert.equal(g.backupAmbiguous, true)
+  // The PDM connection itself fails: the remotes it had are remembered as claimants.
+  pdmState = 'down'
+  now += 30_000
+  g = await direct501()
+  assert.equal(g.backupState, 'unknown')
+  assert.equal(g.backupAmbiguous, true)
+  // A PDM that has not been read once under this configuration: any named snapshot may be its.
+  const fresh = await new EstateService(() => now).get(new CompositeSource(parts()), { ...scope, id: 'fresh' }, DEFAULT_SETTINGS, { maxAgeMs: 0 })
+  assert.equal(fresh.guests.find((x) => x.vmid === 501)!.backupState, 'unknown')
+  // Back up: still decided from both, unknown; nothing was learnt from the outage.
+  pdmState = 'up'
+  now += 30_000
+  assert.equal((await direct501()).backupState, 'unknown')
+})
+
+test('with no rival, an outage elsewhere leaves a hint that names one remote decisive', async () => {
+  const other: Inventory = { remotes: [{ id: 'pve-o', type: 'pve', online: false }], hosts: [], guests: [], datastores: [], warnings: [] }
+  const out = attachBackups([vm('lab (direct)', 501)], [{ remote: 'pbs1', datastore: 'store', ns: 'lab', type: 'vm', id: '501', time: NOW - 3600_000 }], {
+    now: NOW,
+    staleHours: 26,
+    available: true,
+    complete: true,
+    aliases: { 'lab (direct)': 'lab' },
+    unavailableRemotes: other.remotes.map((r) => r.id)
+  }).guests
+  assert.equal(out[0].backupState, 'ok')
+})

@@ -7,7 +7,7 @@
 import { connectionScope, type ConnectionConfig, type DiskUnknown, type EstateSnapshot, type PluginSettings, type Task } from './model'
 import { attachBackups } from './proxmox/backups'
 import { refreshGuestDisks, withDiskUsage, type DiskEntry } from './proxmox/agent'
-import type { BackupScan, EstateSource, MetricsScan, NetworkScan } from './proxmox/source'
+import type { BackupScan, EstateSource, Inventory, MetricsScan, NetworkScan } from './proxmox/source'
 
 /** `fetchedAt`: the last attempt (paces the next); `scannedAt`: when `scan` was read. */
 type BackupCache = { scope: string; fetchedAt: number; scannedAt?: number; scan?: BackupScan; error?: string }
@@ -34,6 +34,11 @@ export class EstateService {
   private last: EstateSnapshot | undefined
   /** VM disk use from guest agents, per guest, and remotes that cannot answer: for one scope. */
   private disks: { scope: string; cache: Map<string, DiskEntry>; blocked: Map<string, { until: number; reason: DiskUnknown }> } | undefined
+  /**
+   * Every cluster remote seen readable under this configuration, with its server's own name: a
+   * remote that is down now still claims the backups its name points at (backups.ts).
+   */
+  private seen: { scope: string; remotes: Map<string, { alias?: string; direct: boolean }> } | undefined
   /** Bumped by reset(): a build started under an older generation keeps nothing. */
   private generation = 0
   private abort = new AbortController()
@@ -68,6 +73,40 @@ export class EstateService {
   }
 
   /** Forget everything and abort the refresh in flight, e.g. after the connection changed. */
+  /**
+   * Who may own a backup, decided from what this configuration has shown, not from who answered
+   * this refresh: the names of every cluster remote seen (and its server's own name), which of
+   * them cannot be read now, and whether a source is down whose remotes were never seen at all.
+   */
+  private claimants(scope: string, inventory: Inventory): { aliases: Record<string, string>; unavailableRemotes: string[]; unknownSources: boolean } {
+    if (this.seen?.scope !== scope) this.seen = { scope, remotes: new Map() }
+    const seen = this.seen.remotes
+    for (const r of inventory.remotes) if (r.online && r.type !== 'pbs') seen.set(r.id, { alias: r.alias, direct: !!r.direct })
+    const online = new Set(inventory.remotes.filter((r) => r.online).map((r) => r.id))
+    const unavailable = new Set<string>()
+    let unknownSources = false
+    for (const r of inventory.remotes) {
+      if (r.online || r.type === 'pbs') continue
+      if (r.direct && r.backupSource) {
+        // A PDM connection that could not be read: its remotes are the PDM remotes seen before.
+        const before = [...seen].filter(([id, m]) => !m.direct && !online.has(id)).map(([id]) => id)
+        if (before.length === 0) unknownSources = true
+        for (const id of before) unavailable.add(id)
+      } else {
+        // A cluster down now (listed offline by PDM, or a direct connection that failed); never
+        // seen readable, its server's own name is unknown.
+        if (r.direct && !seen.has(r.id)) unknownSources = true
+        unavailable.add(r.id)
+      }
+    }
+    // Seen before, missing now.
+    for (const id of seen.keys()) if (!online.has(id) && !inventory.remotes.some((r) => r.id === id)) unavailable.add(id)
+    const aliases: Record<string, string> = {}
+    for (const [id, m] of seen) if (m.alias) aliases[id] = m.alias
+    for (const r of inventory.remotes) if (r.alias) aliases[r.id] = r.alias
+    return { aliases, unavailableRemotes: [...unavailable], unknownSources }
+  }
+
   reset(): void {
     this.generation += 1
     this.abort.abort(new StaleRefreshError())
@@ -77,6 +116,7 @@ export class EstateService {
     this.metrics = undefined
     this.updates = undefined
     this.disks = undefined
+    this.seen = undefined
     this.last = undefined
     this.inflight = undefined
   }
@@ -215,13 +255,14 @@ export class EstateService {
       live()
     }
     inventory.guests = withDiskUsage(inventory.guests, disks.cache, disks.blocked, this.now(), agentOff)
+    const claims = this.claimants(scope, inventory)
     const { guests, missing, orphans } = attachBackups(inventory.guests, backups.scan?.records ?? [], {
       now,
       staleHours: settings.backupStaleHours,
       available,
       complete,
       offlineRemotes,
-      aliases: Object.fromEntries(inventory.remotes.filter((r) => r.alias).map((r) => [r.id, r.alias!]))
+      ...claims
     })
     const pbsRemotes = inventory.remotes.filter((r) => r.type === 'pbs')
     const snapshot: EstateSnapshot = {

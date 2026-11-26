@@ -37,6 +37,13 @@ export type BackupOptions = {
    * beside PDM): a namespace or owner named either way points at that remote.
    */
   aliases?: Readonly<Record<string, string>>
+  /**
+   * Remotes that may hold guests but cannot be read now (offline, or their connection failed):
+   * their guests are not listed, so a snapshot their name points at may be theirs.
+   */
+  unavailableRemotes?: readonly string[]
+  /** A source is down whose remotes were never seen: any named snapshot may be one of theirs. */
+  unknownSources?: boolean
 }
 
 const GUEST_BACKUP_TYPE = { qemu: 'vm', lxc: 'ct' } as const
@@ -70,6 +77,8 @@ export function attachBackups(
   const name = (hint: string, remote: string) => named.set(hint.toLowerCase(), (named.get(hint.toLowerCase()) ?? new Set()).add(remote.toLowerCase()))
   for (const g of guests) name(g.remote, g.remote)
   for (const [remote, alias] of Object.entries(options.aliases ?? {})) name(alias, remote)
+  for (const remote of options.unavailableRemotes ?? []) name(remote, remote)
+  const unavailable = new Set((options.unavailableRemotes ?? []).map((r) => r.toLowerCase()))
   const byGuest = new Map<string, { record: BackupRecord; owners: string[] }[]>()
   for (const record of records) {
     const key = `${record.type}/${record.id}`
@@ -92,9 +101,10 @@ export function attachBackups(
     const remote = guest.remote.toLowerCase()
     const all = byGuest.get(key) ?? []
     const holders = remotesPerVmid.get(key) ?? new Set<string>()
-    // A hint that names several remotes which all have this VMID (a PDM remote and a cluster
-    // reached directly, both called "lab") cannot say whose snapshot it is.
-    const disputed = (e: { owners: string[] }) => e.owners.filter((o) => holders.has(o)).length > 1
+    // A hint that also names another remote which has this VMID (a PDM remote and a cluster
+    // reached directly, both called "lab"), or which cannot be read now and so may have it, cannot
+    // say whose snapshot it is; nor can any hint while a source with unknown remotes is down.
+    const disputed = (e: { owners: string[] }) => options.unknownSources === true || e.owners.some((o) => o !== remote && (holders.has(o) || unavailable.has(o)))
     const mine = all.filter((e) => e.owners.includes(remote) && !disputed(e))
     const contested = all.filter((e) => e.owners.includes(remote) && disputed(e))
     const unattributed = all.filter((e) => e.owners.length === 0)
