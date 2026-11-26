@@ -55,7 +55,12 @@ const PRODUCTS = {
     userAclDel: 'pveum acl delete / --users "$U" --roles PVEAuditor',
     tokenAcl: 'pveum acl modify / --tokens "$U!$T" --roles PVEAuditor',
     tokenAclDel: 'pveum acl delete / --tokens "$U!$T" --roles PVEAuditor',
-    preflight: ''
+    preflight: '',
+    // Deleting a PVE user also drops it from its groups: a membership added since keeps the user.
+    groupCheck: `INGROUP=
+GL=$(pveum group list --output-format json) || stop "the groups could not be read"
+printf '%s\\n' "$GL" | tr '{' '\\n' | sed -n 's/.*"users":"\\([^"]*\\)".*/\\1/p' | tr ',' '\\n' | grep -qxF "$U" && INGROUP=1
+`
   },
   pbs: {
     label: 'Proxmox Backup Server',
@@ -79,6 +84,8 @@ const PRODUCTS = {
     tokenAclDel: 'proxmox-backup-manager acl update / Audit --auth-id "$U!$T" --delete true',
     // Every subcommand and option this script uses, as the installed version documents them;
     // missing ones stop it before anything is changed.
+    // PBS has no groups.
+    groupCheck: 'INGROUP=\n',
     preflight: `for C in 'user list:--output-format' 'user list-tokens:--output-format' 'user generate-token:--comment' 'user create:--comment' 'acl list:--output-format' 'acl update:--delete' 'acl update:--auth-id' 'user delete-token:delete-token' 'user remove:remove'; do
   H=$(proxmox-backup-manager help \${C%%:*} --verbose 2>&1 || proxmox-backup-manager help \${C%%:*} --verbose true 2>&1) || stop "this proxmox-backup-manager has no '\${C%%:*}'; nothing was changed"
   printf '%s' "$H" | grep -q -- "\${C#*:}" || stop "this proxmox-backup-manager's '\${C%%:*}' has no \${C#*:}; nothing was changed"
@@ -236,6 +243,12 @@ if ! has "$AL" "\\"ugid\\":\\"$U\\"" '"roleid":"${p.role}"' '"path":"/"'; then
   ${p.userAcl} || stop "the user's permission could not be set"
   mark done user_acl
   say added_user_acl 1
+  # The grant exactly as it now stands (path, role, propagate, user): Undo removes it only while
+  # it is still this very entry.
+  AL=$(${p.aclList}) || stop "the permissions could not be read"
+  A=$(printf '%s\\n' "$AL" | tr '{' '\\n' | grep -F "\\"ugid\\":\\"$U\\"" | grep -F '"roleid":"${p.role}"' | grep -F '"path":"/"' | sed 's/[]},[:space:]]*$//')
+  [ -n "$A" ] && [ "$(printf '%s\\n' "$A" | wc -l)" = 1 ] || stop "the user's new permission could not be read back"
+  mark acl "$A"
 else
   mark existing user_acl
 fi
@@ -298,21 +311,56 @@ if made token && ! undone token; then
 fi
 # 2. The user (or its permission) only when this run made it and it has no token left at all.
 LEFT=$(printf '%s' "$TL" | tr '{' '\\n' | grep -c '"tokenid"')
-if [ -n "$UEX" ] && made user && ! undone user; then
+# The user's own permission entries now, and the one this run made as it recorded it then.
+UG="\\"ugid\\":\\"$U\\""
+AL=$(${p.aclList}) || stop "the permissions could not be read"
+ALLU=$(printf '%s\\n' "$AL" | tr '{' '\\n' | grep -F "$UG" | sed 's/[]},[:space:]]*$//')
+MINE=$(printf '%s\\n' "$ALLU" | grep -F '"roleid":"${p.role}"' | grep -F '"path":"/"')
+REC=$(sed -n 's/^acl //p' "$STATE" | head -n 1)
+CHANGED=
+ACL=
+if made user_acl && ! undone user_acl; then
+  if [ -z "$MINE" ]; then
+    say kept_user "its permission was already removed"
+    mark undone user_acl
+  elif [ -n "$REC" ] && [ "$MINE" = "$REC" ]; then
+    ACL=1
+  else
+    # Changed since the run (propagation, role or more): an administrator's now; left as it is.
+    CHANGED="$CHANGED user_acl"
+  fi
+fi
+${p.groupCheck}if [ -n "$UEX" ] && made user && ! undone user; then
   if ! has "$UL" "\\"userid\\":\\"$U\\"" "\\"comment\\":\\"Read-only, Orca plugin $S\\""; then
     say kept_user "it is not this run's any more"
-  elif [ "$LEFT" = 0 ]; then
-    ${p.userDel} || stop "the user could not be removed"
-    say removed_user 1
-  else
+    mark undone user
+  elif [ "$LEFT" != 0 ]; then
     say kept_user "$LEFT other token(s)"
+    mark undone user
+  elif [ -n "$CHANGED" ]; then
+    say kept_user "its permission was changed since the run"
+  elif [ -n "$ALLU" ] && [ "$ALLU" != "$REC" ]; then
+    CHANGED="$CHANGED user"
+    say kept_user "it has permissions this run did not make"
+  elif [ -n "$INGROUP" ]; then
+    CHANGED="$CHANGED user"
+    say kept_user "it was added to a group since the run"
+  else
+    # Its permission first (PBS keeps a removed user's permissions), then the user; then
+    # nothing may be left for it or its token.
+    if [ -n "$ACL" ]; then
+      ${p.userAclDel} || stop "the user's permission could not be removed"
+      mark undone user_acl
+      say removed_user_acl 1
+    fi
+    ${p.userDel} || stop "the user could not be removed"
+    mark undone user
+    say removed_user 1
+    AL=$(${p.aclList}) || stop "the permissions could not be read after removing the user"
+    printf '%s\\n' "$AL" | tr '{' '\\n' | grep -qF -e "$UG" -e "\\"ugid\\":\\"$U!" && stop "permissions for $U are still there after removing it; remove them by hand"
   fi
-  mark undone user
-elif [ -n "$UEX" ] && made user_acl && ! undone user_acl; then
-  AL=$(${p.aclList}) || stop "the permissions could not be read"
-  if ! has "$AL" "\\"ugid\\":\\"$U\\"" '"roleid":"${p.role}"' '"path":"/"'; then
-    say kept_user "its permission was already removed"
-  elif [ "$LEFT" = 0 ]; then
+elif [ -n "$ACL" ]; then
+  if [ "$LEFT" = 0 ]; then
     ${p.userAclDel} || stop "the user's permission could not be removed"
     say removed_user_acl 1
   else
@@ -320,9 +368,10 @@ elif [ -n "$UEX" ] && made user_acl && ! undone user_acl; then
   fi
   mark undone user_acl
 fi
-if [ -n "$UNSURE" ]; then
-  # Started but not recorded as done: perhaps made, perhaps not; never removed from here.
-  say unconfirmed "$UNSURE"
+if [ -n "$UNSURE" ] || [ -n "$CHANGED" ]; then
+  # Started but not recorded as done, or changed since: never removed from here; the journal stays.
+  [ -n "$UNSURE" ] && say unconfirmed "$UNSURE"
+  [ -n "$CHANGED" ] && say changed "$CHANGED"
 else
   rm -f "$STATE"
 fi
@@ -335,7 +384,7 @@ finish ok
 const KEYS = new Set([
   'root', 'pve', 'pbs', 'pdm', 'hostname', 'fqdn', 'via',
   'reused_user', 'created_user', 'replaced_token', 'created_token', 'added_user_acl', 'api_fp', 'secret',
-  'nothing', 'unconfirmed', 'removed_token', 'kept_token', 'removed_user', 'removed_user_acl', 'kept_user', 'stop'
+  'nothing', 'unconfirmed', 'changed', 'removed_token', 'kept_token', 'removed_user', 'removed_user_acl', 'kept_user', 'stop'
 ])
 const REPEATED = new Set(['secret'])
 

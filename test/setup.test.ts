@@ -141,8 +141,8 @@ test('Undo owns only what the run recorded as done, never what it found there; o
   assert.ok(undo.includes('made() { grep -q "^done $1') && undo.includes('&& ! grep -qx "existing $1" "$STATE"; }'))
   for (const item of ['token', 'user', 'user_acl']) assert.ok(undo.includes(`made ${item} && ! undone ${item}`), item)
   assert.ok(!/\bdid (token|user|user_acl) &&/.test(undo), 'intent alone never removes anything')
-  // An ACL is removed only while it is still there as granted, and intent-only items are reported.
-  assert.ok(undo.indexOf('AL=$(pveum acl list --output-format json) || stop') > undo.indexOf('made user_acl'))
+  // The permissions are read (checked) before anything about the user's permission is decided.
+  assert.ok(undo.indexOf('AL=$(pveum acl list --output-format json) || stop') > 0 && undo.indexOf('AL=$(pveum acl list --output-format json) || stop') < undo.indexOf('if made user_acl'))
   assert.ok(undo.includes('say unconfirmed "$UNSURE"'))
   // Setup and Undo take the same host-side lock, without waiting, before touching the journal.
   for (const script of [setup, undo]) {
@@ -151,6 +151,29 @@ test('Undo owns only what the run recorded as done, never what it found there; o
     assert.ok(script.includes('[ "$(stat -c %u "$D")" = 0 ]'), 'the state folder must be root’s own')
   }
   assert.ok(setup.includes('( set -C; : > "$STATE" )'), 'a run’s journal is created exclusively')
+})
+
+test('a user permission is undone only while it is exactly the entry the run made; PBS loses none to a removed user', () => {
+  for (const product of ['pve', 'pbs'] as const) {
+    const setup = setupScript(request({ product }))
+    // The grant as it stood right after the run made it: path, role, propagate and user, journaled.
+    assert.ok(setup.indexOf('mark acl "$A"') > setup.indexOf('mark done user_acl'))
+    assert.ok(setup.includes('the user\'s new permission could not be read back'))
+    const undo = undoScript(product, RUN, 'fedcba9876543210')
+    assert.ok(undo.includes("REC=$(sed -n 's/^acl //p' \"$STATE\" | head -n 1)"))
+    assert.ok(undo.includes('elif [ -n "$REC" ] && [ "$MINE" = "$REC" ]; then\n    ACL=1'))
+    assert.ok(undo.includes('CHANGED="$CHANGED user_acl"') && undo.includes('say changed "$CHANGED"'))
+    // The user only when its permissions are exactly that one entry; the permission removed first
+    // (PBS keeps a removed user's permissions), and none left for the user or its token afterwards.
+    assert.ok(undo.includes('elif [ -n "$ALLU" ] && [ "$ALLU" != "$REC" ]; then'))
+    const branch = undo.slice(undo.indexOf('if [ -n "$UEX" ] && made user'))
+    const del = product === 'pve' ? 'pveum user delete' : 'proxmox-backup-manager user remove'
+    const aclDel = product === 'pve' ? 'pveum acl delete / --users' : 'proxmox-backup-manager acl update / Audit --auth-id "$U" --delete true'
+    assert.ok(branch.indexOf(aclDel) > 0 && branch.indexOf(aclDel) < branch.indexOf(del), product)
+    assert.ok(branch.indexOf('grep -qF -e "$UG" -e "\\"ugid\\":\\"$U!" && stop') > branch.indexOf(del))
+    // A PVE user added to a group since is kept: deleting it would drop the membership.
+    assert.equal(undo.includes('pveum group list --output-format json'), product === 'pve')
+  }
 })
 
 test('Undo removes only what carries the run’s label, from the host’s own record', () => {
@@ -225,13 +248,14 @@ function fakeOrca(server: Server, opts: { failRead?: boolean; shrink?: boolean }
 }
 
 /** The server's side, as the real scripts print it. */
-function server(opts: { stopAt?: string; garble?: boolean; unconfirmed?: boolean } = {}): Server {
+function server(opts: { stopAt?: string; garble?: boolean; unconfirmed?: boolean; changed?: boolean } = {}): Server {
   return (script, runId) => {
     if (script.includes('detect what this host runs')) {
       return frame(runId, [['root', 'yes'], ['pve', '9.1.2'], ['hostname', 'pve-x1'], ['fqdn', 'pve-x1.example.test'], ['via', '198.51.100.7 50122 198.51.100.21 22']])
     }
     if (script.includes('undo what the setup run')) {
-      return frame(runId, opts.unconfirmed ? [['removed_token', '1'], ['unconfirmed', ' user_acl']] : [['removed_token', '1'], ['removed_user', '1']])
+      if (opts.changed) return frame(runId, [['removed_token', '1'], ['kept_user', 'its permission was changed since the run'], ['changed', ' user_acl']])
+      return frame(runId, opts.unconfirmed ? [['removed_token', '1'], ['unconfirmed', ' user_acl']] : [['removed_token', '1'], ['removed_user_acl', '1'], ['removed_user', '1']])
     }
     const pem = /<<'ORCA_KEY'\n([\s\S]+?)\nORCA_KEY/.exec(script)![1]
     const cipher = publicEncrypt({ key: pem, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' }, Buffer.from(SECRET)).toString('base64')
@@ -360,10 +384,10 @@ test('Undo that finds something only started, not done, keeps it and the record,
   const record = (await worker!.request('setup.hosts')).hosts[0].records[0]
   const undone = await runJob((await worker!.request('setup.undoPlan', { hostKey: X1, runId: record.runId })).planId)
   assert.equal(undone.ok, false)
-  assert.match(undone.message, /Not recorded as done, so kept for you to check on the host: user_acl/)
+  assert.match(undone.message, /not recorded as done: user_acl/)
   const kept = (await worker!.request('setup.hosts')).hosts[0].records
   assert.equal(kept.length, 1)
-  assert.match(kept[0].message ?? '', /kept: user_acl/)
+  assert.match(kept[0].message ?? '', /Kept on the host, not recorded as done: user_acl/)
   assert.equal((await worker!.request('config.get')).connections.length, 0, 'the connection that run saved is removed all the same')
 })
 
@@ -425,4 +449,17 @@ test('refusals: altered records, no check, no product, wrong host, a used plan, 
   const failing = await mounted(server(), { failRead: true })
   await assert.rejects(worker!.request('setup.detect', { hostKey: X1 }), /terminal could not be read/)
   assert.deepEqual(failing.orca.closed, ['term_1'])
+})
+
+test('Undo that finds the run’s permission changed since keeps it and the record, and says so', async () => {
+  await mounted(server({ changed: true }))
+  await worker!.request('setup.detect', { hostKey: X1 })
+  assert.equal((await runJob((await plan()).planId)).ok, true)
+  const record = (await worker!.request('setup.hosts')).hosts[0].records[0]
+  const undone = await runJob((await worker!.request('setup.undoPlan', { hostKey: X1, runId: record.runId })).planId)
+  assert.equal(undone.ok, false)
+  assert.match(undone.message, /changed since the run \(an administrator's now\): user_acl/)
+  const kept = (await worker!.request('setup.hosts')).hosts[0].records
+  assert.equal(kept.length, 1)
+  assert.match(kept[0].message ?? '', /changed since the run/)
 })
