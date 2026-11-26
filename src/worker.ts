@@ -39,6 +39,8 @@ import { outboundSnapshot, redactDeep, scrubLine } from './scrub'
 import { fileVault, keyFile, memoryVault, type Binding, type Vault } from './vault'
 import { cleanupText, importFile, takeImport, type ImportedConnection } from './importer'
 import { SetupService } from './setup/service'
+import { lookup } from 'node:dns/promises'
+import { readdir, rm } from 'node:fs/promises'
 import type { AlertState } from './features/alerts'
 import type { JsonValue } from 'orca/worker'
 
@@ -93,6 +95,7 @@ let protectKeyFile: (path: string) => Promise<void> = (path) =>
         execFile('icacls', [path, '/inheritance:r', '/grant:r', `${userInfo().username}:(F)`], { windowsHide: true, timeout: 10000 }, (error) => (error ? reject(new ApiError({ kind: 'invalid-config', message: 'The tunnel key file could not be closed to other users' })) : resolve()))
       )
 let clock: () => number = Date.now
+let scopeWaitMs = 8000
 let sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms))
 let cliRunner: (() => CliRunner) | undefined
 let vault: Vault | undefined
@@ -106,6 +109,25 @@ const ALERT_STATE_KEY = 'alerts.state'
 /** The terminals the plugin opened (newest last), so they can be told apart from others' later. */
 const TERMINALS_KEY = 'terminals'
 type OpenedTerminal = { handle: string; environment?: string; hostKey: string; at: number }
+
+/** Every privilege name in an /access/permissions answer (path -> privilege -> set). */
+export function privilegeNames(answer: unknown): string[] {
+  const out = new Set<string>()
+  if (answer && typeof answer === 'object' && !Array.isArray(answer)) {
+    for (const privs of Object.values(answer as Record<string, unknown>)) {
+      if (privs && typeof privs === 'object' && !Array.isArray(privs)) for (const [name, on] of Object.entries(privs as Record<string, unknown>)) if (on) out.add(name)
+    }
+  }
+  return [...out].sort()
+}
+
+/** Copies of tunnel keys (`<16 hex>.key`) left in the private folder; answers how many were removed. */
+async function removeOrphanKeys(dir: string): Promise<number> {
+  const names = await readdir(dir).catch(() => [] as string[])
+  const keys = names.filter((n) => /^[0-9a-f]{16}\.key$/.test(n))
+  for (const n of keys) await rm(join(dir, n), { force: true })
+  return keys.length
+}
 
 /** Tests replace the network (and the clock) with recorded answers. Orca never calls this. */
 export function useTestDoubles(doubles: {
@@ -121,7 +143,10 @@ export function useTestDoubles(doubles: {
   importPath?: string
   importPlatform?: NodeJS.Platform
   sleep?: (ms: number) => Promise<void>
+  /** How long a scope check waits for ssh to be refused. */
+  scopeWaitMs?: number
 }): void {
+  scopeWaitMs = doubles.scopeWaitMs ?? 8000
   sleep = doubles.sleep ?? ((ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))))
   protectKeyFile = async () => undefined
   background = doubles.background ?? false
@@ -874,9 +899,32 @@ export default function activate(orca: OrcaWorkerApi): void {
     const stored = await orca.secrets.get(tunnelKeyName(ref))
     return stored ? sealer().open(stored, keyBinding(ref)) : null
   }
+  // Setup records are sealed like secrets, bound to their host and run: the panel can read and
+  // write plugin storage, but cannot forge or alter one.
+  const recordBinding = (hostKey: string, runId: string): Binding => ({ id: 'setup-record', kind: 'setup', baseUrl: hostKey, tokenId: runId, fingerprint: '' })
+  /** A connection the setup is about to save, checked like the Settings form's. */
+  const setupConnection = (input: ConnectionInput) => {
+    const c = validate(input, 'new')
+    const secret = cleanSecret(input.secret)
+    if (!secret) throw new InputError('No secret for this connection')
+    return { c, secret }
+  }
   const setup = new SetupService({
     cli: () => (cliRunner ?? nodeCliRunner)(),
     storage: { get: (key) => orca.storage.get(key), set: (key, value) => orca.storage.set(key, value as JsonValue) },
+    sealRecord: (hostKey, runId, plain) => sealer().seal(plain, recordBinding(hostKey, runId)),
+    openRecord: (hostKey, runId, sealed) => sealer().open(sealed, recordBinding(hostKey, runId)),
+    privileges: async (input) => {
+      const { c, secret } = setupConnection(input)
+      const answer = await checkWith(c, secret, {}, (client) => client.get<unknown>('/access/permissions'))
+      return privilegeNames(answer)
+    },
+    scopeCheck: async (input) => {
+      const { c } = setupConnection(input)
+      if (!c.tunnel) return []
+      return tunnels().scopeCheck(c.tunnel, scopeWaitMs)
+    },
+    resolve: async (host) => (await lookup(host, { all: true })).map((a) => a.address),
     sealKey: async (ref, pem) => {
       if ((await secretsProtection()) === 'unavailable') throw new InputError('Orca cannot encrypt secrets on this machine (no OS keyring); the tunnel key is not stored.')
       await orca.secrets.set(tunnelKeyName(ref), await sealer().seal(pem, keyBinding(ref)))
@@ -920,8 +968,17 @@ export default function activate(orca: OrcaWorkerApi): void {
   orca.panels.handle('setup.hosts', () => setup.hosts().then(outbound, setupError))
   orca.panels.handle('setup.detect', (input) => setup.detect(hostKeyOf(input)).then(outbound, setupError))
   orca.panels.handle('setup.plan', (input) => setup.plan({ ...input, hostKey: hostKeyOf(input) }).then(outbound, setupError))
-  orca.panels.handle('setup.undoPlan', (input) => setup.undoPlan(hostKeyOf(input), input.product === 'pbs' ? 'pbs' : 'pve').then(outbound, setupError))
+  orca.panels.handle('setup.undoPlan', (input) => setup.undoPlan(hostKeyOf(input), typeof input.runId === 'string' ? input.runId : '').then(outbound, setupError))
   orca.panels.handle('setup.run', (input) => setup.run(typeof input.planId === 'string' ? input.planId : '', hostKeyOf(input)).then(outbound, setupError))
+  orca.panels.handle('setup.job', async (input) => {
+    try {
+      return outbound(setup.job(typeof input.jobId === 'string' ? input.jobId : ''))
+    } catch (error) {
+      return setupError(error)
+    }
+  })
+  // Copies of the plugin's own key that a stopped worker could not remove are removed now.
+  void removeOrphanKeys(tunnelDir()).then((n) => n && log(`Removed ${n} leftover copies of tunnel keys`), (error: unknown) => log(`Could not remove leftover tunnel key copies: ${String(error)}`))
 
   // The status-bar item runs this: show the panel (Orca's plugin API cannot, its CLI can).
   orca.commands.register('proxmox.openPanel', async () => {

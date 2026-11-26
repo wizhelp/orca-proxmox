@@ -5,12 +5,15 @@
 //
 // The terminal is a normal Orca terminal: what it shows is kept like any other terminal's output.
 // So nothing secret may ever be in it: the script carries only public values, and its answers
-// hold no secret but the token's, encrypted to a one-time key (keys.ts).
+// hold no secret but the token's, encrypted to a one-time key (keys.ts). What it shows is also
+// only as trustworthy as the host: answers are collected strictly (script.ts AnswerReader), and a
+// run whose end was not seen complete is reported as of unknown outcome.
+import { createHash } from 'node:crypto'
 import { gzipSync } from 'node:zlib'
 import type { OrcaHost, OrcaWorkspace } from '../model'
 import type { CliRunner } from '../orca/inventory'
 import { pick, worktreeSelector } from '../orca/terminal'
-import { parseAnswer, type ScriptAnswer } from './script'
+import { AnswerReader, type ScriptAnswer } from './script'
 
 /** Where a script for one Orca host runs: the workspace to open the terminal in. */
 export type HostShell = { hostKey: string; environment?: string; worktree: string; where: string }
@@ -20,7 +23,10 @@ export function hostShell(host: OrcaHost, workspaces: readonly OrcaWorkspace[]):
   if (host.kind === 'local') return { error: 'This machine is not a server Orca connects to.' }
   if (host.kind === 'ssh' && host.connected === false) return { error: `Orca is not connected to ${host.name}; connect it in Orca first.` }
   const keys = new Set([host.key, ...(host.paired ? [host.paired.key] : [])])
-  const ws = pick(workspaces.filter((w) => keys.has(w.hostKey)))
+  const mine = workspaces.filter((w) => keys.has(w.hostKey))
+  // A workspace of the SSH target itself first: its shell came in over SSH (SSH_CONNECTION), the
+  // context a tunnel's checks need; a paired server's own workspaces have none.
+  const ws = pick(mine.filter((w) => !w.environment)) ?? pick(mine)
   if (!ws?.worktreeId) return { error: `${host.name} has no Orca workspace to open a terminal in; open a folder on it in Orca first.` }
   return {
     hostKey: host.key,
@@ -67,14 +73,26 @@ const env = (shell: HostShell) => (shell.environment ? [`--environment=${shell.e
  * Runs `script` in a new terminal of `shell` and answers what it said, once it said `end` (or
  * what it said until the timeout). The terminal is closed in every case, its whole tab.
  */
-export async function runScript(deps: RunDeps, shell: HostShell, script: string, runId: string, title: string, timeoutMs: number): Promise<ScriptAnswer & { timedOut?: boolean; unread?: boolean }> {
+export type RunResult = ScriptAnswer & {
+  timedOut?: boolean
+  /** The terminal could not be read to the end. */
+  unread?: boolean
+  /** The terminal could not be closed: it may still be open in Orca. */
+  closeError?: string
+}
+
+const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex')
+
+export async function runScript(deps: RunDeps, shell: HostShell, script: string, runId: string, title: string, timeoutMs: number): Promise<RunResult> {
   const created = (await deps.run(['terminal', 'create', ...env(shell), `--worktree=${shell.worktree}`, `--title=${title.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 60)}`, `--command=${commandLine(script)}`], 30000)) as {
     terminal?: { handle?: unknown }
   } | null
   const handle = typeof created?.terminal?.handle === 'string' ? created.terminal.handle : ''
   if (!handle) throw new Error('Orca did not open a terminal on that host.')
+  let result: RunResult | undefined
   try {
     const until = deps.now() + timeoutMs
+    const reader = new AnswerReader(runId)
     let answer: ScriptAnswer = { pairs: [] }
     let failed = 0
     for (;;) {
@@ -86,17 +104,21 @@ export async function runScript(deps: RunDeps, shell: HostShell, script: string,
       } catch (error) {
         // What was read so far is kept (it says what the script created); a few misses are retried.
         deps.log(`Could not read the setup terminal on ${shell.hostKey}: ${error instanceof Error ? error.message : String(error)}`)
-        if ((failed += 1) >= 3 || deps.now() > until) return { ...answer, timedOut: true, unread: true }
+        if ((failed += 1) >= 3 || deps.now() > until) return (result = { ...answer, timedOut: true, unread: true })
         continue
       }
-      answer = parseAnswer(logicalLines(read), runId)
-      if (answer.end) return answer
-      if (read?.terminal?.status === 'exited' || deps.now() > until) return { ...answer, timedOut: true }
+      reader.add(logicalLines(read))
+      answer = reader.answer(sha256)
+      if (answer.end || answer.invalid) return (result = answer)
+      if (read?.terminal?.status === 'exited' || deps.now() > until) return (result = { ...answer, timedOut: true })
     }
   } finally {
-    // Closed even when reading failed: nothing of the run stays open in Orca.
+    // Closed even when reading failed: nothing of the run stays open in Orca; if it cannot be
+    // closed, the answer says so.
     await deps.run(['terminal', 'close', ...env(shell), `--terminal=${handle}`, '--tab'], 20000).catch((error: unknown) => {
-      deps.log(`Could not close the setup terminal on ${shell.hostKey}: ${error instanceof Error ? error.message : String(error)}`)
+      const message = error instanceof Error ? error.message : String(error)
+      deps.log(`Could not close the setup terminal on ${shell.hostKey}: ${message}`)
+      if (result) result.closeError = message
     })
   }
 }

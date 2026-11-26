@@ -63,8 +63,11 @@ export type SetupDetection = {
   via?: { client: string; server: string; port: number }
 }
 
-/** A setup the plugin made on a host, as far as Undo needs to know (no secret). */
-export type SetupRecord = { product: 'pve' | 'pbs'; runId: string; at: number; tunnel: boolean; replacedToken: boolean; connectionId?: string; complete: boolean }
+/**
+ * A setup run the plugin recorded (sealed, before it ran): its last known state. `pending` and
+ * `unknown`: what happened on the host is not known; Undo works from the host's own record.
+ */
+export type SetupRecord = { product: 'pve' | 'pbs'; runId: string; at: number; tunnel: boolean; status: 'pending' | 'unknown' | 'stopped' | 'failed' | 'saved'; message?: string; connectionId?: string }
 
 /** An Orca host for "Connect via Orca". */
 export type SetupHost = {
@@ -79,7 +82,8 @@ export type SetupHost = {
   records: SetupRecord[]
 }
 
-export type SetupHostsAnswer = { hosts: SetupHost[]; error?: string; busy: boolean }
+/** `ignoredRecords`: stored records that did not open with the worker's key or were altered. */
+export type SetupHostsAnswer = { hosts: SetupHost[]; error?: string; busy: boolean; ignoredRecords?: number }
 
 /** What Connect or Undo will run, shown in full before anything runs; `planId` runs it once. */
 export type SetupPlan = {
@@ -102,7 +106,9 @@ export type SetupPlanInput = { hostKey: string; product: 'pve' | 'pbs'; tunnel: 
 export type SetupRunAnswer = {
   ok: boolean
   /** How far it got. */
-  stage: 'script' | 'secret' | 'test' | 'saved' | 'undone'
+  stage: 'script' | 'secret' | 'test' | 'rights' | 'scope' | 'save' | 'saved' | 'undone'
+  /** What is known of the result: `unknown` when the host's answer was not seen complete. */
+  outcome: 'saved' | 'undone' | 'stopped' | 'failed' | 'unknown'
   message: string
   test?: TestAnswer
   /** What the host reported it did, step by step (no values). */
@@ -110,6 +116,9 @@ export type SetupRunAnswer = {
   /** An Undo is available for what was created. */
   undo: boolean
 }
+
+/** A started setup or Undo: still running, or how it ended. */
+export type SetupJobAnswer = { running: true } | { running: false; answer: SetupRunAnswer }
 
 declare module 'orca' {
   interface PluginRequests {
@@ -146,10 +155,12 @@ declare module 'orca' {
     'setup.detect': { input: { hostKey: string }; output: SetupHostsAnswer }
     /** The exact setup script for a host, to show before it runs. */
     'setup.plan': { input: SetupPlanInput; output: SetupPlan }
-    /** The exact Undo script for what a setup created on a host. */
-    'setup.undoPlan': { input: { hostKey: string; product: 'pve' | 'pbs' }; output: SetupPlan }
-    /** Runs a shown plan, once, before it expires. */
-    'setup.run': { input: { planId: string; hostKey: string }; output: SetupRunAnswer }
+    /** The exact Undo script for one recorded setup run on a host. */
+    'setup.undoPlan': { input: { hostKey: string; runId: string }; output: SetupPlan }
+    /** Starts a shown plan, once, before it expires, as a background job. */
+    'setup.run': { input: { planId: string; hostKey: string }; output: { jobId: string } }
+    /** A started job: still running, or its answer. */
+    'setup.job': { input: { jobId: string }; output: SetupJobAnswer }
     /** The estate, refreshed when older than the refresh interval or when `force` is set. */
     'estate.get': { input: { force?: boolean }; output: EstateResponse }
   }

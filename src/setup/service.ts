@@ -5,28 +5,36 @@
 //    terminal of it, says what it runs (PVE, PBS, PDM) and whether the shell may act as root.
 // 2. Connect generates the exact script (script.ts) and shows it; nothing runs until the person
 //    confirms that very plan (single use, 10 minutes).
-// 3. The script runs in a terminal of that host (runner.ts), closed afterwards whatever happens.
-//    It creates the read-only token, optionally the restricted tunnel account with the plugin's
-//    own key, reads the API certificate and SSH host key fingerprints on the server itself, and
-//    prints the token secret only encrypted to the run's one-time key (keys.ts).
-// 4. The plugin decrypts the secret in memory, wipes the one-time key, tests the connection
-//    (through the pinned tunnel when there is one) and only then saves it, sealed.
-// 5. What the host reported creating is kept (no secret) for Undo, which reverses only that.
+// 3. Before anything runs, a record of the run is stored, sealed with the worker's key (the panel
+//    can read and write plugin storage, but cannot forge or alter a record). The script runs in a
+//    terminal of that host (runner.ts), closed afterwards whatever happens, as a background job the
+//    panel polls. It keeps its own durable record on the host, which Undo works from.
+// 4. Nothing the terminal says is taken on its word alone: the answer must be complete and match
+//    its checksum, else the outcome is reported as unknown. The plugin then checks from this
+//    machine what it can: the certificate the host reported is the one the address presents
+//    (the connection test pins it), the token has no right beyond auditing (the API's own
+//    permission list), and with a tunnel the account may only forward to the API (live ssh
+//    attempts, while its key is still limited to this machine and expiring). Only then is the
+//    key made permanent and the connection saved.
+// 5. Undo is bound to one recorded run: its script removes only resources labelled with that
+//    run's id on the host, and the plugin removes only the connection revision that run saved.
 import { randomBytes } from 'node:crypto'
 import type { ConnectionConfig } from '../model'
-import type { ConnectionInput, SetupDetection, SetupHost, SetupHostsAnswer, SetupPlan, SetupPlanInput, SetupRecord, SetupRunAnswer, TestAnswer } from '../protocol'
+import type { ConnectionInput, SetupDetection, SetupHost, SetupHostsAnswer, SetupJobAnswer, SetupPlan, SetupPlanInput, SetupRecord, SetupRunAnswer, TestAnswer } from '../protocol'
 import { safeIp, safeTarget } from '../features/targets'
 import { readOrcaInventory, type CliRunner } from '../orca/inventory'
 import { newTunnelKey, oneTimeKey, type OneTimeKey } from './keys'
-import { hostShell, runScript, type HostShell } from './runner'
+import { hostShell, runScript, type HostShell, type RunResult } from './runner'
 import {
-  anythingToUndo,
   apiPortOf,
-  clientAddress,
+  cipherOf,
   detectScript,
+  EXPIRY,
+  finalizeScript,
   KEY_COMMENT,
+  KEY_LINE,
   productLabel,
-  receiptOf,
+  RUN_ID,
   said,
   ScriptError,
   setupScript,
@@ -36,21 +44,33 @@ import {
   valueOf,
   type ScriptAnswer,
   type SetupProduct,
-  type SetupReceipt,
-  type SetupRequest
+  type SetupRequest,
+  type TunnelRequest
 } from './script'
+
+/** A sealed record as stored: who it is for in the clear, the record itself sealed to exactly that. */
+export type SealedRecord = { hostKey: string; runId: string; sealed: string }
 
 export type SetupDeps = {
   cli: () => CliRunner
   storage: { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void> }
+  /** Seals a record with the worker's key, bound to its host and run; opens it again or null. */
+  sealRecord(hostKey: string, runId: string, plain: string): Promise<string>
+  openRecord(hostKey: string, runId: string, sealed: string): Promise<string | null>
   /** The tunnel's private key, sealed in the plugin's secrets under `ref`. */
   sealKey(ref: string, pem: string): Promise<void>
   dropKey(ref: string): Promise<void>
   connections(): Promise<ConnectionConfig[]>
   test(input: ConnectionInput): Promise<TestAnswer>
+  /** The token's privileges, as the API lists them for it (GET /access/permissions). */
+  privileges(input: ConnectionInput): Promise<string[]>
+  /** Live ssh attempts the tunnel account must be refused (reverse and socket forwards, a command); what was not refused. */
+  scopeCheck(input: ConnectionInput): Promise<string[]>
+  /** The IP addresses a name resolves to here. */
+  resolve(host: string): Promise<string[]>
   save(input: ConnectionInput): Promise<ConnectionConfig>
-  /** Removes a connection the setup saved, when it is still as saved. */
-  remove(connection: ConnectionConfig): Promise<void>
+  /** Removes exactly this connection revision. */
+  remove(connection: { id: string; revision: string }): Promise<void>
   /** Whether a PDM connection already shows a node of this name. */
   pdmCovers(node: string): Promise<boolean>
   /** A secret now known: every log and answer masks it from here on. */
@@ -75,9 +95,49 @@ const VERSION = /^[0-9A-Za-z.+~:-]{1,40}$/
 const SECRET = /^[0-9A-Za-z-]{8,128}$/
 const FINGERPRINT = /^([0-9A-F]{2}:){31}[0-9A-F]{2}$/
 const HOST_KEY = /^(ssh-ed25519|ecdsa-sha2-nistp256|ecdsa-sha2-nistp384|ecdsa-sha2-nistp521) [A-Za-z0-9+/]+={0,2}$/
+const HOST_KEY_ID = /^(ssh|env):[A-Za-z0-9._:-]{1,120}$/
+const KEY_REF = /^k-[0-9a-f]{16}$/
 
-/** A setup's receipt as stored: what it created, where, and the connection it saved. */
-type StoredRecord = { hostKey: string; at: number; receipt: SetupReceipt; connectionId?: string; keyRef?: string; complete: boolean }
+type Status = SetupRecord['status']
+const STATUSES: Status[] = ['pending', 'unknown', 'stopped', 'failed', 'saved']
+
+/** What the plugin keeps about one setup run (sealed): enough for Undo, no secret. */
+type StoredRecord = {
+  hostKey: string
+  runId: string
+  product: SetupProduct
+  at: number
+  status: Status
+  message?: string
+  tunnel?: TunnelRequest
+  keyRef?: string
+  /** The connection revision this run saved. */
+  connection?: { id: string; revision: string }
+}
+
+/** A record exactly as written, or null: every field in the one form it is written in. */
+export function validRecord(raw: unknown, hostKey: string, runId: string): StoredRecord | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const r = raw as Record<string, unknown>
+  const allowed = new Set(['hostKey', 'runId', 'product', 'at', 'status', 'message', 'tunnel', 'keyRef', 'connection'])
+  if (Object.keys(r).some((k) => !allowed.has(k))) return null
+  if (r.hostKey !== hostKey || r.runId !== runId || !HOST_KEY_ID.test(hostKey) || !RUN_ID.test(runId)) return null
+  if (r.product !== 'pve' && r.product !== 'pbs') return null
+  if (typeof r.at !== 'number' || !Number.isFinite(r.at)) return null
+  if (!STATUSES.includes(r.status as Status)) return null
+  if (r.message !== undefined && (typeof r.message !== 'string' || r.message.length > 600)) return null
+  if (r.keyRef !== undefined && (typeof r.keyRef !== 'string' || !KEY_REF.test(r.keyRef))) return null
+  if (r.tunnel !== undefined) {
+    const t = r.tunnel as Record<string, unknown>
+    if (!t || typeof t !== 'object' || Object.keys(t).sort().join() !== 'client,keyLine,laddr,lport') return null
+    if (typeof t.keyLine !== 'string' || !KEY_LINE.test(t.keyLine) || safeIp(t.client) !== t.client || safeIp(t.laddr) !== t.laddr || !Number.isInteger(t.lport) || (t.lport as number) < 1 || (t.lport as number) > 65535) return null
+  }
+  if (r.connection !== undefined) {
+    const c = r.connection as Record<string, unknown>
+    if (!c || typeof c !== 'object' || Object.keys(c).sort().join() !== 'id,revision' || typeof c.id !== 'string' || typeof c.revision !== 'string' || c.id.length > 80 || c.revision.length > 80) return null
+  }
+  return r as unknown as StoredRecord
+}
 
 type Plan = {
   id: string
@@ -86,6 +146,7 @@ type Plan = {
   shell: HostShell
   script: string
   expiresAt: number
+  timer?: ReturnType<typeof setTimeout>
   request?: SetupRequest
   oneTime?: OneTimeKey
   keyPem?: string
@@ -93,6 +154,8 @@ type Plan = {
   input?: { product: SetupProduct; name: string; address: string; sshPort: number; enrichOnly: boolean }
   record?: StoredRecord
 }
+
+type Job = { hostKey: string; action: 'setup' | 'undo'; answer?: SetupRunAnswer }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 
@@ -124,8 +187,17 @@ export function detectionOf(answer: ScriptAnswer, at: number): SetupDetection | 
 
 const urlHost = (address: string) => (address.includes(':') ? `[${address}]` : address)
 
+/** Why a finished run's answer cannot be relied on, in words, or undefined. */
+function unknownWhy(r: RunResult): string {
+  if (r.invalid) return `its answer could not be trusted (${r.invalid})`
+  if (r.unread) return 'its terminal could not be read to the end'
+  if (r.timedOut) return 'it did not finish in time (is the shell root, or may it use sudo without a password?)'
+  return 'its end was not seen'
+}
+
 export class SetupService {
   private plans = new Map<string, Plan>()
+  private jobs = new Map<string, Job>()
   private running = false
   private detected = new Map<string, SetupDetection>()
   private loaded = false
@@ -139,13 +211,35 @@ export class SetupService {
     if (isRecord(stored)) for (const [k, v] of Object.entries(stored)) if (isRecord(v)) this.detected.set(k, v as unknown as SetupDetection)
   }
 
-  private async records(): Promise<StoredRecord[]> {
+  /** The records that open with the worker's key and are exactly as written; others are ignored. */
+  private async records(): Promise<{ list: StoredRecord[]; ignored: number }> {
     const stored = await this.deps.storage.get(RECORDS_KEY)
-    return Array.isArray(stored) ? (stored.filter((r) => isRecord(r) && typeof r.hostKey === 'string' && isRecord(r.receipt)) as StoredRecord[]) : []
+    const list: StoredRecord[] = []
+    let ignored = 0
+    for (const item of Array.isArray(stored) ? stored : []) {
+      const e = item as Partial<SealedRecord>
+      const ok = isRecord(item) && typeof e.hostKey === 'string' && typeof e.runId === 'string' && typeof e.sealed === 'string' && HOST_KEY_ID.test(e.hostKey) && RUN_ID.test(e.runId)
+      const plain = ok ? await this.deps.openRecord(e.hostKey!, e.runId!, e.sealed!).catch(() => null) : null
+      let parsed: unknown = null
+      try {
+        parsed = plain ? JSON.parse(plain) : null
+      } catch {
+        parsed = null
+      }
+      const record = ok ? validRecord(parsed, e.hostKey!, e.runId!) : null
+      if (record) list.push(record)
+      else ignored += 1
+    }
+    return { list, ignored }
   }
 
-  private async writeRecords(list: StoredRecord[]): Promise<void> {
-    await this.deps.storage.set(RECORDS_KEY, JSON.parse(JSON.stringify(list)))
+  /** Writes one record (replacing that run's), sealed, keeping every other stored entry as it is. */
+  private async putRecord(record: StoredRecord | null, drop?: { hostKey: string; runId: string }): Promise<void> {
+    const key = record ?? drop!
+    const stored = await this.deps.storage.get(RECORDS_KEY)
+    const others = (Array.isArray(stored) ? stored : []).filter((e) => !(isRecord(e) && e.hostKey === key.hostKey && e.runId === key.runId))
+    const next = record ? [...others, { hostKey: record.hostKey, runId: record.runId, sealed: await this.deps.sealRecord(record.hostKey, record.runId, JSON.stringify(record)) }] : others
+    await this.deps.storage.set(RECORDS_KEY, next)
   }
 
   /** Orca's servers with what is known of them; the inventory is read fresh. */
@@ -157,12 +251,21 @@ export class SetupService {
     } catch (error) {
       return { hosts: [], error: error instanceof Error ? error.message : String(error), busy: this.running }
     }
-    const records = await this.records()
+    const { list, ignored } = await this.records()
+    const known = new Set(inventory.hosts.map((h) => h.key))
+    const view = (r: StoredRecord): SetupRecord => ({
+      product: r.product,
+      runId: r.runId,
+      at: r.at,
+      tunnel: !!r.tunnel,
+      status: r.status,
+      ...(r.message ? { message: r.message } : {}),
+      ...(r.connection ? { connectionId: r.connection.id } : {})
+    })
     const hosts: SetupHost[] = inventory.hosts
       .filter((h) => h.kind !== 'local')
       .map((h) => {
         const shell = hostShell(h, inventory.workspaces)
-        const mine = records.filter((r) => r.hostKey === h.key)
         return {
           key: h.key,
           name: h.name,
@@ -170,20 +273,19 @@ export class SetupService {
           ...(typeof h.connected === 'boolean' ? { connected: h.connected } : {}),
           ...('error' in shell ? { unavailable: shell.error } : { where: shell.where }),
           ...(this.detected.has(h.key) ? { detection: this.detected.get(h.key) } : {}),
-          records: mine.map(
-            (r): SetupRecord => ({
-              product: r.receipt.product,
-              runId: r.receipt.runId,
-              at: r.at,
-              tunnel: !!r.receipt.tunnel,
-              replacedToken: r.receipt.replacedToken,
-              complete: r.complete,
-              ...(r.connectionId ? { connectionId: r.connectionId } : {})
-            })
-          )
+          records: list.filter((r) => r.hostKey === h.key).map(view)
         }
       })
-    return { hosts, busy: this.running }
+    // Runs on hosts Orca no longer lists are still shown, so they are not forgotten.
+    for (const r of list.filter((x) => !known.has(x.hostKey))) {
+      let host = hosts.find((h) => h.key === r.hostKey)
+      if (!host) {
+        host = { key: r.hostKey, name: r.hostKey, kind: r.hostKey.startsWith('env:') ? 'environment' : 'ssh', unavailable: 'Orca no longer lists this host; its setup can only be undone by hand (the guide’s way back).', records: [] }
+        hosts.push(host)
+      }
+      host.records.push(view(r))
+    }
+    return { hosts, busy: this.running, ...(ignored ? { ignoredRecords: ignored } : {}) }
   }
 
   private async shellOf(hostKey: string): Promise<{ shell: HostShell; name: string }> {
@@ -195,32 +297,30 @@ export class SetupService {
     return { shell, name: host.name }
   }
 
-  /** One script at a time: a second Connect or check waits for none, it is refused. */
-  private async exclusive<T>(work: () => Promise<T>): Promise<T> {
+  /** One script at a time: a second one is refused while one runs. */
+  private claim(): void {
     if (this.running) throw new SetupInputError('Another setup step is running; wait for it to finish.')
     this.running = true
-    try {
-      return await work()
-    } finally {
-      this.running = false
-    }
   }
 
   async detect(hostKey: string): Promise<SetupHostsAnswer> {
     await this.load()
-    await this.exclusive(async () => {
+    this.claim()
+    try {
       const { shell } = await this.shellOf(hostKey)
       const runId = randomBytes(8).toString('hex')
-      const answer = await runScript(this.runDeps(), shell, detectScript(runId), runId, 'Proxmox check', DETECT_MS)
-      const detection = detectionOf(answer, this.deps.now())
+      const result = await runScript(this.runDeps(), shell, detectScript(runId), runId, 'Proxmox check', DETECT_MS)
+      const detection = detectionOf(result, this.deps.now())
       if (!detection) {
-        this.deps.log(`Setup check on ${hostKey}: no answer${answer.timedOut ? ' (timed out)' : ''}`)
-        throw new SetupInputError(answer.unread ? 'The check’s terminal could not be read; try again.' : answer.timedOut ? 'The check got no answer from that host in time; is its shell a POSIX shell (sh, bash)?' : 'The check did not finish on that host.')
+        this.deps.log(`Setup check on ${hostKey}: no usable answer (${unknownWhy(result)})`)
+        throw new SetupInputError(result.unread ? 'The check’s terminal could not be read; try again.' : `The check gave no usable answer: ${unknownWhy(result)}.`)
       }
       this.detected.set(hostKey, detection)
       await this.deps.storage.set(DETECTED_KEY, JSON.parse(JSON.stringify(Object.fromEntries(this.detected))))
       this.deps.log(`Setup check on ${hostKey}: ${Object.keys(detection.products).join(', ') || 'no Proxmox product'}; root: ${detection.root}`)
-    })
+    } finally {
+      this.running = false
+    }
     return this.hosts()
   }
 
@@ -228,19 +328,23 @@ export class SetupService {
     return { run: this.deps.cli(), sleep: this.deps.sleep, now: this.deps.now, log: this.deps.log }
   }
 
-  private dropExpired(): void {
-    for (const [id, plan] of this.plans) {
-      if (plan.expiresAt <= this.deps.now()) {
-        plan.oneTime?.wipe()
-        this.plans.delete(id)
-      }
-    }
+  private forget(plan: Plan): void {
+    clearTimeout(plan.timer)
+    plan.oneTime?.wipe()
+    plan.keyPem = undefined
+    this.plans.delete(plan.id)
+  }
+
+  /** Keeps a plan for 10 minutes; then its one-time key is wiped even if nothing else happens. */
+  private keep(plan: Plan): void {
+    plan.timer = setTimeout(() => this.forget(plan), PLAN_MS)
+    ;(plan.timer as { unref?: () => void }).unref?.()
+    this.plans.set(plan.id, plan)
   }
 
   /** The setup script for one host and product, shown before it runs. */
   async plan(input: SetupPlanInput): Promise<SetupPlan> {
     await this.load()
-    this.dropExpired()
     const product: SetupProduct | null = input.product === 'pbs' || input.product === 'pve' ? input.product : null
     if (!product) throw new SetupInputError('Choose Proxmox VE or Backup Server; for PDM, see the guide’s PDM token steps.')
     const detection = this.detected.get(input.hostKey)
@@ -248,42 +352,38 @@ export class SetupService {
     if (!detection.products[product]) throw new SetupInputError(`The check found no ${productLabel(product)} on this host.`)
     if (detection.root === 'no') throw new SetupInputError('Orca’s shell on this host is not root and may not use sudo without a password; nothing can be set up from it.')
     const tunnel = input.tunnel === true
-    if (tunnel && !detection.sshd) throw new SetupInputError('The check found no SSH server (sshd) on this host for a tunnel.')
     const address = safeTarget(input.address)
     if (!address) throw new SetupInputError('The address must be a DNS name or an IP address that this machine reaches the host at.')
     const name = (input.name ?? '').trim()
     if (!NAME.test(name)) throw new SetupInputError('The name may hold letters, digits, ".", "_" and "-" (40 at most).')
+    let context: TunnelRequest | undefined
+    if (tunnel) {
+      if (!detection.sshd) throw new SetupInputError('The check found no SSH server (sshd) on this host for a tunnel.')
+      // The sshd checks are for the very connection the tunnel will make: the one Orca's shell
+      // came in on. Without it (a paired server's own shell), or to another address, they could
+      // check a different connection; so there is no tunnel then.
+      const via = detection.via
+      if (!via) throw new SetupInputError('Orca’s shell on this host did not come in over SSH, so the tunnel’s connection cannot be checked; connect it as an SSH target in Orca, check it again, or set it up without a tunnel.')
+      const ips = safeIp(address) ? [address] : await this.deps.resolve(address).catch(() => [])
+      if (!ips.includes(via.server)) throw new SetupInputError(`For a tunnel, the address must be the one Orca reaches the host at (${via.server}), so the checks apply to the tunnel’s own connection.`)
+      context = { keyLine: '', client: via.client, laddr: via.server, lport: via.port }
+    }
     const { shell, name: hostName } = await this.shellOf(input.hostKey)
     const port = apiPortOf(product)
     const baseUrl = `https://${urlHost(address)}:${port}`
     const existing = await this.deps.connections()
     if (existing.some((c) => c.baseUrl === baseUrl)) throw new SetupInputError(`A connection to ${baseUrl} exists already.`)
     if (existing.some((c) => c.name === name && c.kind !== 'pdm')) throw new SetupInputError(`A connection named ${name} exists already; choose another name.`)
-    const records = await this.records()
-    if (records.some((r) => r.hostKey === input.hostKey && r.receipt.product === product && !r.complete && r.receipt.tunnel) && tunnel) {
-      throw new SetupInputError('An earlier setup of this host made the tunnel account; undo it first.')
-    }
     const enrichOnly = product === 'pve' && (await this.deps.pdmCovers(detection.hostname))
     const runId = randomBytes(8).toString('hex')
     const oneTime = oneTimeKey()
-    let keyPem: string | undefined
-    let request: SetupRequest
-    try {
-      const key = tunnel ? newTunnelKey(KEY_COMMENT) : undefined
-      keyPem = key?.privatePem
-      request = {
-        product,
-        runId,
-        resultKey: oneTime.publicPem,
-        replace: input.replace === true,
-        ...(key ? { tunnel: { keyLine: key.publicLine, clientAddr: clientAddress(detection.via?.client) } } : {})
-      }
-    } catch (error) {
-      oneTime.wipe()
-      throw error
-    }
     let script: string
+    let request: SetupRequest
+    let keyPem: string | undefined
     try {
+      const key = context ? newTunnelKey(KEY_COMMENT) : undefined
+      keyPem = key?.privatePem
+      request = { product, runId, resultKey: oneTime.publicPem, replace: input.replace === true, ...(key && context ? { tunnel: { ...context, keyLine: key.publicLine } } : {}) }
       script = setupScript(request)
     } catch (error) {
       oneTime.wipe()
@@ -299,10 +399,9 @@ export class SetupService {
       request,
       oneTime,
       ...(keyPem ? { keyPem, keyRef: `k-${randomBytes(8).toString('hex')}` } : {}),
-      input: { product, name, address, sshPort: detection.via?.port ?? 22, enrichOnly }
+      input: { product, name, address, sshPort: context?.lport ?? 22, enrichOnly }
     }
-    this.plans.set(plan.id, plan)
-    const p = productLabel(product)
+    this.keep(plan)
     return {
       planId: plan.id,
       action: 'setup',
@@ -312,15 +411,18 @@ export class SetupService {
       script,
       expiresAt: plan.expiresAt,
       summary: [
-        `Runs on ${hostName} in a terminal of ${shell.where}, as root${detection.root === 'sudo' ? ' (sudo -n)' : ''}; the terminal is closed afterwards.`,
-        `Creates ${tokenIdOf(product)} with ${product === 'pve' ? 'PVEAuditor' : 'Audit'} on / for the user and the token (privilege separation): it can read, not change.`,
-        input.replace ? 'Replaces an earlier token of that name: the old one stops working, and Undo cannot bring it back.' : 'Stops without changing anything if that token exists already (choose Replace to make a new one).',
+        `Runs on ${hostName} in a terminal of ${shell.where}, as root${detection.root === 'sudo' ? ' (sudo -n)' : ''}; the terminal is closed afterwards. It keeps a record of what it changes on the host (/var/lib/orca-proxmox-setup), which Undo works from.`,
+        `Creates ${tokenIdOf(product)} with ${product === 'pve' ? 'PVEAuditor' : 'Audit'} on / for the user and the token (privilege separation), both labelled with this run. The plugin then asks the API which rights the token has, and refuses it if any is more than auditing.`,
+        input.replace === true ? 'Replaces an earlier token of that name: the old one stops working, and Undo cannot bring it back.' : 'Stops without changing anything if that token exists already (choose Replace to make a new one).',
         ...(request.tunnel
-          ? [`Creates the account ${TUNNEL_USER} (no password, no shell) that may only forward to 127.0.0.1:${port}, verifies sshd’s effective rules before and after the reload, then installs the plugin’s own key (made here, kept sealed).`]
+          ? [
+              `Creates the account ${TUNNEL_USER} (no password, no shell) that may only forward to 127.0.0.1:${port}. sshd's effective rules are checked for the tunnel's own connection (${request.tunnel.client} to ${request.tunnel.laddr} port ${request.tunnel.lport}), on what the running sshd applies, before and after the reload, with root's unchanged.`,
+              'The plugin’s own key (made here, kept sealed) is first allowed from this machine only and expires by itself after 15 minutes; it becomes permanent only once this machine has seen the account refuse a reverse forward, a socket forward and a command.'
+            ]
           : []),
-        'Reads the API certificate’s fingerprint on the server itself, and the SSH host key when there is a tunnel; the plugin pins both.',
+        `The host reports the API certificate${request.tunnel ? ' and its SSH host key' : ''}; the plugin pins them and then connects to ${baseUrl} from this machine, which must present the same.`,
         'The token secret is printed only encrypted to a one-time key held by the plugin; no secret is ever in the terminal.',
-        enrichOnly ? 'PDM already shows this node: the connection is saved as enrich only.' : 'Saved as a direct connection once its test passes.'
+        enrichOnly ? 'PDM already shows this node: the connection is saved as enrich only.' : 'Saved as a direct connection once every check passes.'
       ],
       connection: {
         kind: product,
@@ -328,27 +430,26 @@ export class SetupService {
         baseUrl,
         tokenId: tokenIdOf(product),
         enrichOnly,
-        ...(request.tunnel ? { tunnel: `${TUNNEL_USER}@${address}:${detection.via?.port ?? 22} → 127.0.0.1:${port}` } : {})
+        ...(request.tunnel ? { tunnel: `${TUNNEL_USER}@${address}:${request.tunnel.lport} → 127.0.0.1:${port}` } : {})
       }
     }
   }
 
-  /** The Undo script for what a setup created on a host. */
-  async undoPlan(hostKey: string, product: SetupProduct): Promise<SetupPlan> {
-    this.dropExpired()
-    const record = (await this.records()).filter((r) => r.hostKey === hostKey && r.receipt.product === product).at(-1)
-    if (!record) throw new SetupInputError('The plugin set nothing up for that product on this host.')
-    const runId = randomBytes(8).toString('hex')
+  /** The Undo script for one recorded run on a host. */
+  async undoPlan(hostKey: string, runId: string): Promise<SetupPlan> {
+    if (!RUN_ID.test(runId)) throw new SetupInputError('Name the setup run to undo.')
+    const record = (await this.records()).list.find((r) => r.hostKey === hostKey && r.runId === runId)
+    if (!record) throw new SetupInputError('The plugin has no (valid) record of that setup run on this host.')
+    const undoId = randomBytes(8).toString('hex')
     let script: string
     try {
-      script = undoScript(record.receipt, runId)
+      script = undoScript(record.product, record.runId, undoId, record.tunnel?.keyLine)
     } catch (error) {
       throw new SetupInputError(error instanceof ScriptError ? error.message : 'The Undo script could not be generated.')
     }
     const { shell, name } = await this.shellOf(hostKey)
-    const plan: Plan = { id: runId, action: 'undo', hostKey, shell, script, expiresAt: this.deps.now() + PLAN_MS, record }
-    this.plans.set(plan.id, plan)
-    const r = record.receipt
+    const plan: Plan = { id: undoId, action: 'undo', hostKey, shell, script, expiresAt: this.deps.now() + PLAN_MS, record }
+    this.keep(plan)
     return {
       planId: plan.id,
       action: 'undo',
@@ -359,129 +460,174 @@ export class SetupService {
       expiresAt: plan.expiresAt,
       summary: [
         `Runs on ${name} in a terminal of ${shell.where}; the terminal is closed afterwards.`,
-        'Reverses only what that setup reported creating, each step checked, stopping at the first that fails:',
-        ...(r.tunnel ? [`the key file (only while it holds exactly the plugin’s key), ${TUNNEL_USER}’s processes, the Match block (only while sshd_config is exactly the backup plus that block), the account`] : []),
-        r.createdToken ? `the token ${tokenIdOf(r.product)} and its permission` : 'no token (that setup created none)',
-        r.createdUser ? 'the user, when it has no other token left' : r.addedUserAcl ? 'the user’s permission, when it has no other token left' : 'not the user (it existed before)',
-        ...(record.connectionId ? ['Then removes the connection it saved here, and the plugin’s own key.'] : []),
-        ...(r.replacedToken ? ['The token that setup replaced cannot be brought back.'] : [])
+        `Undoes setup run ${record.runId} only: it reads what that run recorded on the host and removes a resource only while it still carries that run's label, each step checked, stopping at the first that fails:`,
+        ...(record.tunnel ? [`the key file (only while it holds exactly that run's key), ${TUNNEL_USER}’s processes, the Match block (only while sshd_config is exactly the backup plus that block), the account`] : []),
+        `the token ${tokenIdOf(record.product)} and its permission; the user, or its permission, only when it has no token left.`,
+        ...(record.connection ? ['Then removes the connection that run saved, if it is still that revision, and the plugin’s own key.'] : [])
       ]
     }
   }
 
-  /** Runs a plan the person was shown, once. */
-  async run(planId: string, hostKey: string): Promise<SetupRunAnswer> {
-    this.dropExpired()
+  /** Starts a plan the person was shown, once, as a background job; `job` reports on it. */
+  async run(planId: string, hostKey: string): Promise<{ jobId: string }> {
     const plan = this.plans.get(planId)
-    if (!plan || plan.hostKey !== hostKey) throw new SetupInputError('This script is no longer valid (shown too long ago, already run, or for another host); show it again.')
-    // Single use, from here on.
-    this.plans.delete(planId)
-    try {
-      return await this.exclusive(() => (plan.action === 'setup' ? this.runSetup(plan) : this.runUndo(plan)))
-    } finally {
-      plan.oneTime?.wipe()
-      plan.keyPem = undefined
+    if (!plan || plan.hostKey !== hostKey || plan.expiresAt <= this.deps.now()) {
+      if (plan && plan.expiresAt <= this.deps.now()) this.forget(plan)
+      throw new SetupInputError('This script is no longer valid (shown too long ago, already run, or for another host); show it again.')
     }
+    this.claim()
+    // Single use, from here on; its keys stay with the job until it ends.
+    clearTimeout(plan.timer)
+    this.plans.delete(plan.id)
+    const job: Job = { hostKey, action: plan.action }
+    this.jobs.set(plan.id, job)
+    void (async () => {
+      try {
+        job.answer = plan.action === 'setup' ? await this.runSetup(plan) : await this.runUndo(plan)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.deps.log(`Setup job on ${hostKey} failed: ${message}`)
+        job.answer = { ok: false, stage: 'script', outcome: 'unknown', message: `The run failed in the plugin (${message}); what happened on the host is not known. Undo works from the host’s own record.`, steps: [], undo: plan.action === 'setup' }
+      } finally {
+        plan.oneTime?.wipe()
+        plan.keyPem = undefined
+        this.running = false
+      }
+    })()
+    return { jobId: plan.id }
+  }
+
+  /** A job's state: running, or its answer. */
+  job(jobId: string): SetupJobAnswer {
+    const job = this.jobs.get(jobId)
+    if (!job) throw new SetupInputError('That run is not known (the plugin restarted?); its record shows its last known state.')
+    return job.answer ? { running: false, answer: job.answer } : { running: true }
   }
 
   private async runSetup(plan: Plan): Promise<SetupRunAnswer> {
     const request = plan.request!
     const input = plan.input!
-    const answer = await runScript(this.runDeps(), plan.shell, plan.script, plan.id, 'Proxmox setup', RUN_MS)
-    const receipt = receiptOf(request, answer)
-    const steps = answer.pairs.map(([k]) => k).filter((k) => /^(created|added|replaced|backup)/.test(k))
-    const record: StoredRecord = { hostKey: plan.hostKey, at: this.deps.now(), receipt, complete: false, ...(plan.keyRef ? { keyRef: plan.keyRef } : {}) }
-    const keep = async () => {
-      if (anythingToUndo(receipt)) await this.writeRecords([...(await this.records()), record])
+    const record: StoredRecord = {
+      hostKey: plan.hostKey,
+      runId: plan.id,
+      product: input.product,
+      at: this.deps.now(),
+      status: 'pending',
+      ...(request.tunnel ? { tunnel: request.tunnel } : {}),
+      ...(plan.keyRef ? { keyRef: plan.keyRef } : {})
     }
-    if (answer.end !== 'ok') {
-      await keep()
-      const why = answer.stop
-        ? `The host stopped: ${answer.stop}.`
-        : answer.unread
-          ? 'The terminal could not be read to the end, so what the script did is not fully known: look at the host (the guide’s way back lists what to check).'
-          : answer.timedOut
-            ? 'The script did not finish in time (is the shell root, or may it use sudo without a password?).'
-            : 'The script did not finish.'
+    // Recorded before anything can change on the host.
+    await this.putRecord(record)
+    const set = async (status: Status, message: string) => {
+      record.status = status
+      record.message = message.slice(0, 600)
+      await this.putRecord(record)
+    }
+    const result = await runScript(this.runDeps(), plan.shell, plan.script, plan.id, 'Proxmox setup', RUN_MS)
+    const steps = result.pairs.map(([k]) => k).filter((k) => /^(created|added|replaced|reused)/.test(k))
+    const closeNote = result.closeError ? ` The setup terminal could not be closed (${result.closeError}); close it in Orca.` : ''
+    if (result.end !== 'ok') {
+      const known = result.end === 'stop'
+      const why = known ? `The host stopped: ${result.stop ?? 'no reason given'}.` : `The outcome is unknown: ${unknownWhy(result)}.`
+      await set(known ? 'stopped' : 'unknown', why)
       this.deps.log(`Setup on ${plan.hostKey}: ${why}`)
-      return { ok: false, stage: 'script', message: `${why}${anythingToUndo(receipt) ? ' Undo reverses what it created.' : ' Nothing was created.'}`, steps, undo: anythingToUndo(receipt) }
+      return { ok: false, stage: 'script', outcome: known ? 'stopped' : 'unknown', message: `${why} Undo reverses whatever the host recorded for this run.${closeNote}`, steps, undo: true }
     }
-    const cipher = answer.pairs.filter(([k]) => k === 'secret').map(([, v]) => v).join('')
-    const secret = plan.oneTime!.open(cipher)
-    const fingerprint = (valueOf(answer, 'api_fp') ?? '').toUpperCase()
-    const hostKey = valueOf(answer, 'ssh_hostkey') ?? ''
-    if (!secret || !SECRET.test(secret) || !FINGERPRINT.test(fingerprint) || (request.tunnel && !HOST_KEY.test(hostKey))) {
-      await keep()
-      return { ok: false, stage: 'secret', message: 'The host’s answer was incomplete (secret, certificate fingerprint or SSH host key); nothing was saved. Undo reverses what it created.', steps, undo: true }
+    const fail = async (stage: SetupRunAnswer['stage'], message: string, test?: TestAnswer): Promise<SetupRunAnswer> => {
+      await set('failed', message)
+      this.deps.log(`Setup on ${plan.hostKey}: ${message}`)
+      return { ok: false, stage, outcome: 'failed', message: `${message} Nothing was saved; Undo reverses what was created on the host.${closeNote}`, ...(test ? { test } : {}), steps, undo: true }
+    }
+    const secret = plan.oneTime!.open(cipherOf(result) ?? '')
+    const fingerprint = (valueOf(result, 'api_fp') ?? '').toUpperCase()
+    const hostKey = valueOf(result, 'ssh_hostkey') ?? ''
+    const expiry = valueOf(result, 'key_expiry') ?? ''
+    if (!secret || !SECRET.test(secret) || !FINGERPRINT.test(fingerprint) || (request.tunnel && (!HOST_KEY.test(hostKey) || !EXPIRY.test(expiry) || !said(result, 'created_keyfile')))) {
+      return fail('secret', 'The host’s answer was incomplete (secret, certificate fingerprint, SSH host key or key expiry).')
     }
     this.deps.secretSeen(secret)
     if (plan.keyRef && plan.keyPem) await this.deps.sealKey(plan.keyRef, plan.keyPem)
+    const port = apiPortOf(input.product)
     const connection: ConnectionInput = {
       id: 'new',
       kind: input.product,
       name: input.name,
-      baseUrl: `https://${urlHost(input.address)}:${apiPortOf(input.product)}`,
+      baseUrl: `https://${urlHost(input.address)}:${port}`,
       tokenId: tokenIdOf(input.product),
       fingerprint,
       secret,
       ...(input.enrichOnly ? { enrichOnly: true } : {}),
       ...(request.tunnel && plan.keyRef
-        ? { tunnel: { host: input.address, port: input.sshPort, user: TUNNEL_USER, identityFile: '', keyRef: plan.keyRef, target: `127.0.0.1:${apiPortOf(input.product)}`, hostKey } }
+        ? { tunnel: { host: input.address, port: input.sshPort, user: TUNNEL_USER, identityFile: '', keyRef: plan.keyRef, target: `127.0.0.1:${port}`, hostKey } }
         : {})
     }
+    // From this machine: the address presents the reported certificate (and SSH host key)...
     const test = await this.deps.test(connection)
-    if (!test.ok) {
-      await keep()
-      if (plan.keyRef) await this.deps.dropKey(plan.keyRef).catch(() => undefined)
-      return { ok: false, stage: 'test', message: `The connection test failed: ${test.error.message}. Nothing was saved; Undo reverses what was created on the host.`, test, steps, undo: true }
+    if (!test.ok) return fail('test', `The connection test from this machine failed: ${test.error.message}.`, test)
+    // ...the token has no right beyond auditing...
+    let privileges: string[]
+    try {
+      privileges = await this.deps.privileges(connection)
+    } catch (error) {
+      return fail('rights', `The token’s rights could not be read: ${error instanceof Error ? error.message : String(error)}.`)
     }
-    const saved = await this.deps.save(connection)
-    record.connectionId = saved.id
-    record.complete = true
-    await this.writeRecords([...(await this.records()), record])
+    const more = privileges.filter((p) => !/^[A-Za-z]+(\.[A-Za-z]+)*\.Audit$/.test(p))
+    if (more.length) return fail('rights', `The token has more than read rights (${more.slice(0, 6).join(', ')}).`)
+    if (request.tunnel) {
+      // ...and the tunnel account refuses what it must, as the running sshd applies it.
+      let open: string[]
+      try {
+        open = await this.deps.scopeCheck(connection)
+      } catch (error) {
+        return fail('scope', `The tunnel account’s limits could not be checked: ${error instanceof Error ? error.message : String(error)}. Its key expires by itself at ${expiry} (UTC).`)
+      }
+      if (open.length) return fail('scope', `The tunnel account was not refused: ${open.join('; ')}. Its key expires by itself at ${expiry} (UTC).`)
+      const finalId = randomBytes(8).toString('hex')
+      const final = await runScript(this.runDeps(), plan.shell, finalizeScript(input.product, plan.id, finalId, request.tunnel, expiry), finalId, 'Proxmox setup', RUN_MS)
+      if (final.end !== 'ok' || !said(final, 'finalized_key')) {
+        return fail('scope', `The key could not be made permanent (${final.end === 'stop' ? (final.stop ?? 'stopped') : unknownWhy(final)}); it expires by itself at ${expiry} (UTC).`)
+      }
+    }
+    let saved: ConnectionConfig
+    try {
+      saved = await this.deps.save(connection)
+    } catch (error) {
+      return fail('save', `Everything checked out, but the connection could not be saved: ${error instanceof Error ? error.message : String(error)}.`)
+    }
+    record.connection = { id: saved.id, revision: saved.revision ?? '' }
+    await set('saved', `Saved ${connection.baseUrl}.`)
     this.deps.log(`Setup on ${plan.hostKey}: saved the ${input.product.toUpperCase()} connection to ${connection.baseUrl}${input.enrichOnly ? ' (enrich only)' : ''}`)
-    return { ok: true, stage: 'saved', message: `Connected: ${productLabel(input.product)} ${test.version}, ${test.remotes} ${test.unit ?? 'nodes'} visible${input.enrichOnly ? ', adding to what PDM shows' : ''}.`, test, steps, undo: true }
+    return {
+      ok: true,
+      stage: 'saved',
+      outcome: 'saved',
+      message: `Connected: ${productLabel(input.product)} ${test.version}, ${test.remotes} ${test.unit ?? 'nodes'} visible, read rights only${input.enrichOnly ? ', adding to what PDM shows' : ''}.${closeNote}`,
+      test,
+      steps,
+      undo: true
+    }
   }
 
   private async runUndo(plan: Plan): Promise<SetupRunAnswer> {
     const record = plan.record!
-    const answer = await runScript(this.runDeps(), plan.shell, plan.script, plan.id, 'Proxmox undo', RUN_MS)
-    const steps = answer.pairs.map(([k]) => k).filter((k) => /^(removed|kept)/.test(k))
-    // What was reversed is no longer to undo, even when a later step stopped.
-    const r = record.receipt
-    const left: SetupReceipt = {
-      ...r,
-      createdToken: r.createdToken && !said(answer, 'removed_token'),
-      createdUser: r.createdUser && !said(answer, 'removed_user'),
-      addedUserAcl: r.addedUserAcl && !said(answer, 'removed_user_acl') && !said(answer, 'removed_user'),
-      ...(r.tunnel
-        ? {
-            tunnel: {
-              ...r.tunnel,
-              createdKeyFile: r.tunnel.createdKeyFile && !said(answer, 'removed_keyfile'),
-              addedPolicy: r.tunnel.addedPolicy && !said(answer, 'removed_policy'),
-              createdAccount: r.tunnel.createdAccount && !said(answer, 'removed_account')
-            }
-          }
-        : {})
+    const result = await runScript(this.runDeps(), plan.shell, plan.script, plan.id, 'Proxmox undo', RUN_MS)
+    const steps = result.pairs.map(([k]) => k).filter((k) => /^(removed|kept|nothing)/.test(k))
+    const closeNote = result.closeError ? ` The terminal could not be closed (${result.closeError}); close it in Orca.` : ''
+    if (result.end !== 'ok') {
+      const why = result.end === 'stop' ? `The host stopped: ${result.stop ?? 'no reason given'}.` : `The outcome is unknown: ${unknownWhy(result)}.`
+      return { ok: false, stage: 'script', outcome: result.end === 'stop' ? 'stopped' : 'unknown', message: `${why} The host keeps track of what was undone; run Undo again once that is fixed.${closeNote}`, steps, undo: true }
     }
-    const others = (await this.records()).filter((x) => !(x.hostKey === record.hostKey && x.receipt.runId === r.runId))
-    if (answer.end !== 'ok') {
-      await this.writeRecords([...others, { ...record, receipt: left }])
-      const why = answer.stop ? `The host stopped: ${answer.stop}.` : 'The Undo did not finish in time.'
-      return { ok: false, stage: 'script', message: `${why} What was reversed is no longer listed; run Undo again once that is fixed.`, steps, undo: true }
-    }
-    // The connection it saved, still as saved; and the plugin's own key.
+    // The connection that run saved, only while it is still that revision; and the plugin's key.
     let note = ''
-    if (record.connectionId) {
-      const c = (await this.deps.connections()).find((x) => x.id === record.connectionId)
-      if (c && c.tokenId === tokenIdOf(r.product)) await this.deps.remove(c)
-      else if (c) note = ' The connection was changed since; it was kept, remove it in Settings.'
+    if (record.connection) {
+      const c = (await this.deps.connections()).find((x) => x.id === record.connection!.id)
+      if (c && c.revision === record.connection.revision) await this.deps.remove(record.connection)
+      else if (c) note = ' The connection was changed since; it was kept, remove it in Settings if you want.'
     }
-    if (record.keyRef) await this.deps.dropKey(record.keyRef).catch(() => undefined)
-    await this.writeRecords(others)
-    const kept = valueOf(answer, 'kept_user')
-    this.deps.log(`Undo on ${record.hostKey}: done`)
-    return { ok: true, stage: 'undone', message: `Undone on the host${kept ? `; the user was kept (${kept})` : ''}.${note}`, steps, undo: false }
+    if (record.keyRef) await this.deps.dropKey(record.keyRef).catch((error: unknown) => this.deps.log(`Could not delete the tunnel key ${record.keyRef}: ${String(error)}`))
+    await this.putRecord(null, { hostKey: record.hostKey, runId: record.runId })
+    const kept = [valueOf(result, 'kept_user'), valueOf(result, 'kept_token')].filter(Boolean)
+    this.deps.log(`Undo on ${record.hostKey} of ${record.runId}: done`)
+    return { ok: true, stage: 'undone', outcome: 'undone', message: `Undone on the host${kept.length ? `; kept: ${kept.join('; ')}` : ''}.${note}${closeNote}`, steps, undo: false }
   }
 }
