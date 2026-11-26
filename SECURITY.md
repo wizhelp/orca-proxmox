@@ -152,88 +152,76 @@ only while the connection that measured it still answers for it.
 
 ### Connect via Orca
 
-An optional one-click setup for a PVE or PBS host that Orca already reaches (an SSH target or a
-paired server), in place of the manual steps. It is the only time the plugin changes anything,
-and it does so only as a script on the host, never through the Proxmox API (towards the API the
-plugin still only sends `GET`, here also `GET /access/permissions` to check the new token).
+An optional one-click setup of the read-only API token for a PVE or PBS host that Orca already
+reaches (an SSH target or a paired server), in place of the manual token steps. It is the only
+time the plugin changes anything, and it does so only as a script on the host, never through the
+Proxmox API (towards the API the plugin still only sends `GET`, here also `GET
+/access/permissions` to check the new token). An SSH tunnel account is not part of it: that stays
+the guided manual path (docs/AGENT_SETUP.md).
 
 - **What runs.** The plugin generates each script from a fixed template in its own code (nothing
   is downloaded), filling in only values it validates strictly, each in its one exact form: the
-  product, random run ids, the one-time public key (PEM), the plugin's tunnel public key
-  (`ssh-ed25519 … orca-proxmox-tunnel`, nothing else), IP addresses and a port for the connection
-  context, a `replace` yes/no, and for finalize the key's expiry time. Anything else is refused
-  before a script exists. The person sees the exact script and what it does; it runs only when
-  they press **Run**, once, within 10 minutes, on the host it was made for. The one-time key of a
-  plan that is never run is wiped when the plan expires.
+  product, random run ids, the one-time public key (PEM) and a `replace` yes/no. Anything else is
+  refused before a script exists. The person sees the exact script and what it does; it runs only
+  when they press **Run**, once, within 10 minutes, on the host it was made for. The one-time key
+  of a plan that is never run is wiped when the plan expires.
 - **Where it runs.** In a terminal the plugin opens with the orca CLI in one of that host's Orca
-  workspaces (one of the SSH target itself first), so the shell runs on the host over Orca's own
-  connection, as Orca's user there: the plugin never learns the host's credentials. The typed line
-  carries the script compressed (base64), runs it with `sh` as root or through `sudo -n` (never a
-  password prompt), and starts with a space to keep it out of most shells' history. The plugin
-  reads the output with `orca terminal read` and closes the terminal's tab afterwards, also when
-  reading fails; a close that fails is reported. One script runs at a time, as a background job
-  the panel follows, so a run is never cut off by the panel's request time limit.
+  workspaces, so the shell runs on the host over Orca's own connection, as Orca's user there: the
+  plugin never learns the host's credentials. The typed line carries the script compressed
+  (base64), runs it with `sh` as root or through `sudo -n` (never a password prompt), and starts
+  with a space to keep it out of most shells' history. The plugin reads the output with `orca
+  terminal read` and closes the terminal's tab afterwards, also when reading fails; a close that
+  fails is reported. One script runs at a time, as a background job the panel follows, so a run is
+  never cut off by the panel's request time limit.
 - **No secret in the terminal.** An Orca terminal's output is kept like any other terminal's, so
   nothing secret may appear in it. The script holds only public values. The new token's secret is
   kept in a shell variable on the host, encrypted there with `openssl pkeyutl` (RSA-OAEP, SHA-256)
   to a one-time RSA-3072 key the worker made for this run, and only that ciphertext is printed;
   the private half exists only in the worker's memory and is wiped after one use, or when the plan
   expires. Decrypted, the secret is sealed like any other (it is also masked in every log and
-  answer). The tunnel's key pair is made in the worker; only its public half goes to the host.
-  Its private half is sealed in the plugin's secrets like a token secret (bound to its own
-  reference), and written for `ssh` only into the worker's private folder (owner-only; on Windows
-  the file's ACL is reduced to the user) when a tunnel starts, then removed as soon as that ssh
-  says it has authenticated, or ends; copies a stopped worker left behind are removed when it
-  starts again.
+  answer).
 - **What the terminal says is trusted only as far as the host.** Whoever controls the host (or
-  its output) controls what the script prints: it could print another encrypted token, other
-  fingerprints or other creation steps. So the answers are framed strictly (the run's random id,
+  its output) controls what the script prints: it could print another encrypted token, another
+  fingerprint or other creation steps. So the answers are framed strictly (the run's random id,
   numbered from 1 without gaps, each key at most once, and a last line with a SHA-256 checksum
   over all of them): lines are collected across reads, a line still being written is never taken,
   and an answer that is not complete and consistent makes the outcome **unknown**, never success.
   And the plugin checks on its own, from this machine, what matters before it saves: the address
   the person confirmed must present the certificate the host reported (the connection test pins
-  it, and with a tunnel `StrictHostKeyChecking=yes` pins the reported SSH host key); the token's
-  rights, as the API itself lists them, must all be `*.Audit`; and the tunnel account must refuse a
-  reverse forward, a reverse Unix-socket forward and a command, tried with live logins. The
-  address field is only a suggestion from what the host reported, and says so.
+  it), and the token's rights, as the API itself lists them, must all be `*.Audit`. Every listed
+  privilege counts, at every path and whatever its propagate bit (0 or false only means it is not
+  inherited further down, not that it is not granted), and a permission list of any other shape is
+  refused rather than read as empty. The address field is only a suggestion from what the host
+  reported, and says so.
 - **Records and recovery.** Before anything runs, the plugin stores a record of the run, sealed
   with the worker's key and bound to its host and run id: the panel can read and write plugin
   storage, but cannot forge, alter or move a record (one that does not open, or is not exactly as
   written, is ignored and reported). The record follows the run (pending, unknown, stopped,
   failed, saved, with the connection revision it saved), so an interrupted run, a failed save or a
-  plugin restart leaves a record to undo. On the host, the script records its intent before each
-  change and the result after it in `/var/lib/orca-proxmox-setup/<run id>` (root only), and
-  labels everything it creates with the run id: the user's and token's comments, the account's
-  GECOS field, the exact key line, the backup's name.
+  plugin restart leaves a record to undo. On the host, each script first takes a lock (`flock`,
+  without waiting) on the state folder `/var/lib/orca-proxmox-setup`, which must be a real folder
+  owned by root, so a setup and an Undo never run at once on a host, also after the plugin
+  restarted while a terminal it could not close still runs. The setup records its intent before
+  each change and the result after it in its own journal there (created exclusively, root only),
+  records a user or permission it found as `existing`, and labels what it creates with the run id
+  (the user's and token's comments).
 - **On the host.** The same rules as the guide: a user only for this (an existing one is reused
   only when its comment says it was made for Orca), its token with privilege separation, the
   read-only role on `/` for both; an existing token `orca` stops the script unless the person
   chose **Replace**. Every list it reads must succeed. For PBS, the script first checks that the
-  installed `proxmox-backup-manager` documents every subcommand and option it uses (`user list`,
-  `user list-tokens`, `user create`, `user generate-token --comment`, `acl list`, `acl update
-  --delete`); `generate-token` has no `--output-format`, and its JSON result is read as printed.
-- **The tunnel.** It is only offered for the connection Orca's shell came in on (its
-  `SSH_CONNECTION`), to the address Orca reaches: the script stops if the shell's connection is
-  not exactly that one (this machine's address, the host's address and SSH port), so `sshd -T -C`
-  is asked about the tunnel's real context (with the client's name when `UseDNS` is on). It stops
-  if sshd's settings changed on disk since sshd last (re)loaded them (unless sshd is
-  socket-activated), so the files checked are what the running daemon applies. The account is
-  refused if anything of it exists; its rules are appended after a backup, checked for the
-  account (exactly local forwarding to the API) and for root (unchanged) before and after the
-  reload, and sshd must still answer new connections on that address and port. Only then does
-  the account get the key, limited to this machine's address and expiring by itself after 15
-  minutes; it is made permanent (only while the file holds exactly that line) once the plugin's
-  live checks passed. If anything fails or is interrupted, the key expires on its own.
-- **Undo** is bound to one recorded run and works from the host's own record of it, in the guide's
-  order, each step checked and stopping at the first that fails: the key file only while it
-  holds exactly that run's key, then that account's processes only while the account is still
-  labelled with that run, then the `Match` block only while `sshd_config` is exactly the backup
-  plus that block (or already the backup, when a reload failed before: it reloads again), then the
-  account, the token only while its comment is that run's, and the user (or its permission) only
-  while labelled with that run and with no token left at all. What it undid is recorded on the
-  host, so it can be run again after a stop. The plugin then removes the connection that run
-  saved only if it is still that revision.
+  installed `proxmox-backup-manager` documents every subcommand and option it and its Undo use
+  (`user list`, `user list-tokens`, `user create`, `user generate-token --comment`, `user
+  delete-token`, `user remove`, `acl list`, `acl update --auth-id`, `acl update --delete`);
+  `generate-token` has no `--output-format`, and its JSON result is read as printed.
+- **Undo** is bound to one recorded run, takes the same lock, and works from the host's own
+  journal of it, each step checked and stopping at the first that fails. It removes only what
+  that run recorded as **done**, never what it found there (`existing`) and never what it only
+  meant to do (`intent`): the token only while its comment is that run's, the user only while
+  labelled with that run and with no token left at all, the user's permission only when that run
+  added it and it is still granted. What the run started but did not record as done is kept,
+  named to the person, and the journal and the plugin's record stay for a check by hand. What it
+  undid is recorded on the host, so it can be run again after a stop. The plugin then removes the
+  connection that run saved only if it is still that revision.
 - **PDM** is recognized but not set up: it has no root-only local command for tokens, and the
   plugin does not handle an admin password.
 
@@ -242,14 +230,9 @@ plugin still only sends `GET`, here also `GET /access/permissions` to check the 
 - **Connect via Orca trusts Orca's connection to the host.** The script runs with root rights on
   the host, as whatever Orca's shell there is; whoever controls that Orca connection or the host
   already has those rights, and can make the host report anything. The plugin's own checks bound
-  what that buys: a reported certificate must also be what the confirmed address presents, the
-  token must have audit rights only, and the tunnel account must refuse what it must, seen from
-  this machine. They cannot prove the host is the one you meant: confirm the address. The
-  terminal shows what the scripts do (user and account names, the backup's name), never a
-  secret.
-- **The tunnel key is a file for a moment.** `ssh` needs the private key as a file: it exists in
-  the worker's private folder from just before ssh starts until ssh has authenticated (normally
-  well under a second), readable by the user only.
+  what that buys: a reported certificate must also be what the confirmed address presents, and the
+  token must have audit rights only. They cannot prove the host is the one you meant: confirm the
+  address. The terminal shows what the scripts do (user and token names), never a secret.
 - **The panel can still reach the sealed value.** Any code running in the plugin's panel can read
   (and overwrite or delete) the sealed secret through `secrets:own`; it cannot open it without the
   worker's key, nor redirect it by rewriting the connection settings (see above). It can make the

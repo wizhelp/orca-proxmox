@@ -52,6 +52,23 @@ every create shown in the panel's log. What Orca would need to add:
   each call;
 - `hosts.add` (above), so the new guest becomes the worktree's host.
 
+## The SSH tunnel in Connect via Orca
+
+Connect via Orca sets up the read-only token only; the SSH tunnel account for VM disk use stays
+the guided manual path (docs/AGENT_SETUP.md, T1–T6). Bringing it into the one-click setup later
+needs, before it is offered:
+
+- a live check of the account's limits that only counts an explicit refusal of each attempt (a
+  remote forward refused, a forward to another target refused, a command refused), never an
+  inconclusive disconnect;
+- sshd's effective settings as the running daemon applies them (its own files and options), for
+  the tunnel's real connection, and a fresh admin login checked before the key is enabled;
+- a key that stays limited to what was verified (source address included), with its promotion
+  journaled and reconciled on the host, and a failed or unconfirmed promotion rolled back or left
+  expiring, never reported as expiring once it is permanent;
+- the local connection's revision recorded durably with the host state, so a save or record
+  update that fails cannot strand a key or a connection outside Undo.
+
 ## Guest actions
 
 Start, shutdown and reboot a guest from its details card, behind an explicit confirmation that
