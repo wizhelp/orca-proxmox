@@ -103,6 +103,23 @@ of `PVEAuditor` without that privilege (docs/AGENT_SETUP.md). On PVE 8 the only 
 granting it; VM disk use then stays unknown. A VM the token may not ask is not asked again for 6
 hours.
 
+**SSH tunnels** (optional, per direct connection). The worker runs the system's OpenSSH client
+by its absolute path, without a shell, as `ssh -F none -N -T -L 127.0.0.1:<port>:<target>` with
+every option explicit: `BatchMode=yes` (no prompt can appear), `IdentitiesOnly=yes` with the
+configured key, password and keyboard-interactive authentication off, `ExitOnForwardFailure=yes`,
+and `StrictHostKeyChecking=yes` against a known_hosts file of its own (in the worker's folder,
+owner-only) that holds only the pinned host key. The person's `~/.ssh/config` and known_hosts are
+not read. A host key is learnt only by an explicit **Test** in Settings (`accept-new` into a fresh,
+empty known_hosts file), shown as its SHA-256 fingerprint, and pinned only when the person confirms
+it and saves; an import must bring the key already verified. Every tunnel field is validated
+(host strictly a DNS name or IP, a plain user name, an absolute key path, `host:port` target) and
+passed as separate arguments after `--` where it could be read as an option. The tunnel's fields
+are part of what the sealed secret is bound to. Through the tunnel the HTTP client still checks the
+PVE/PBS certificate pin (or CA and hostname) before sending the token. Tunnels stop when their
+connection changes or is removed, and when Orca stops the worker. The documented server side gives
+the key `restrict,port-forwarding,permitopen="127.0.0.1:8006",command="/bin/false"`: it can open
+that one forward and nothing else.
+
 ## Residual risks
 
 - **The panel can still reach the sealed value.** Any code running in the plugin's panel can read
@@ -131,5 +148,8 @@ hours.
   value; the scheme separates the panel from the worker, not your account from itself.
 - **Server text shown in the panel** (a remote's error, a task's status) is scrubbed, but its
   meaning is the server's: treat it as untrusted.
+- **An SSH key without a passphrase** sits on Orca's machine for tunnels; anyone running as your
+  user can use it, limited on the server to forwarding to the API (as documented). Use a dedicated
+  key and user per purpose.
 - **The `orca` CLI** used for Orca awareness, the status-bar command and terminals runs with your
   account's rights, like Orca itself.

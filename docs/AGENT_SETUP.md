@@ -7,7 +7,8 @@ Settings tab, done through PDM's API and a one-shot import file instead.
 The plugin is read-only towards Proxmox. Everything below creates **one read-only API token**
 in Proxmox Datacenter Manager (PDM) and hands it to the plugin. Without PDM, the same is done once
 per PVE cluster (or standalone host) and per PBS: see
-[Without PDM: PVE and PBS directly](#without-pdm-pve-and-pbs-directly).
+[Without PDM: PVE and PBS directly](#without-pdm-pve-and-pbs-directly). Start with
+[Choose the setup with the person](#choose-the-setup-with-the-person).
 
 ## Rules for the agent
 
@@ -24,6 +25,22 @@ per PVE cluster (or standalone host) and per PBS: see
 - **Two-factor login**: if PDM asks for a second factor, stop and let the person create the token
   in PDM's web interface (step 2 by hand), then continue at step 3.
 - Show the person each change before making it in PDM (a user, a token, two permissions).
+
+## Choose the setup with the person
+
+Before anything else, explain the setups and ask which the person wants. Each adds to the one
+before, and all of them are read-only towards Proxmox:
+
+| Setup | Needs | Adds | Sections |
+| --- | --- | --- | --- |
+| **A. PDM** | A read-only PDM token, HTTPS to PDM | Every remote's hosts, guests, containers' disk use, PBS backups, tasks, alerts, planner, Copy for AI | [0–5](#0-trust-pdms-certificate-first) |
+| **B. PVE and PBS directly** (instead of A, or beside it) | A read-only token per server, HTTPS to each | The same per connection | [Without PDM](#without-pdm-pve-and-pbs-directly) |
+| **C. + SSH tunnel, enrich only** | Per PVE node: SSH, a forward-only key, a read-only token; nothing else opened | VM disk use from the guest agent, storage types and updates, added to PDM's guests | [Through an SSH tunnel](#through-an-ssh-tunnel-enrich-only) |
+| **D. + hosts connected to Orca** | The Proxmox nodes (or the guests running Orca) added to Orca as SSH targets or paired servers | Where Orca runs on the map, *Open Orca terminal here*, the base for per-worktree VMs | [Connect the hosts to Orca](#connect-the-hosts-to-orca) |
+
+**Recommend A + D, and C if they want VM disk use.** Then follow the matching sections in order;
+each one ends by handing a connection to the plugin through the import file
+([step 4](#4-hand-the-connection-to-the-plugin)), except D, which is done in Orca itself.
 
 ## What to ask the person for
 
@@ -306,7 +323,10 @@ but you and SYSTEM. Do not use a shared or redirected folder.
 
 The file holds exactly `baseUrl`, `tokenId`, `secret` and optionally `fingerprint`, `kind`
 (`pdm`, the default, `pve` or `pbs`) and, for `pve` and `pbs`, `name` (how the connection is
-shown in the panel), all strings. A file for a URL the plugin already has replaces that
+shown in the panel), all strings; for a direct connection also `tunnel` (an object: `host`,
+`port`, `user`, `identityFile`, `target`, `hostKey`; see
+[Through an SSH tunnel](#through-an-ssh-tunnel-enrich-only)), `enrichOnly` (true or false, PVE
+only) and `nodeMap` (node names to PDM's). A file for a URL the plugin already has replaces that
 connection; any other is added beside the existing ones.
 The plugin refuses a file in a folder it cannot trust (a link, another owner, others can write
 to it) and leaves it as it is. A file it has taken is never put back: one it cannot trust (a link,
@@ -498,6 +518,105 @@ In the Python of step 4, add `"kind": "pve"` (or `"pbs"`) and `"name"` to the du
 the server's URL and token ID; in the PowerShell, add `kind = 'pve'; name = 'lab'` to the hashtable.
 The plugin tests each one before saving it; a PDM connection, if there is one, is kept. In the
 panel, **Settings** lists every connection; the header counts the remotes of all of them.
+
+## Through an SSH tunnel (enrich only)
+
+For each PVE node whose API (8006) is not reachable from Orca's machine but SSH is. Usually beside
+PDM, as **enrich only**: the connection adds VM disk use (guest agent), storage content types and
+pending updates to the guests and nodes PDM already shows, and nothing else. Same rules as above:
+show each change first, never print a secret.
+
+**Ask the person for**, per node: the SSH host and port as Orca's machine reaches them, how you may
+make changes there (an SSH login as root, over a host key that is already trusted or that they
+confirm on the console), and the node's name in PDM if it differs from its own (`hostname`).
+
+### On Orca's machine: a forward-only key
+
+One key for all nodes, without a passphrase (the plugin runs ssh in batch mode), readable by the
+person only:
+
+```sh
+ssh-keygen -t ed25519 -N '' -C orca-proxmox -f ~/.ssh/orca-proxmox
+```
+
+On Windows PowerShell use `-N '""'` and `$HOME\.ssh\orca-proxmox`; OpenSSH there refuses a key
+others can read, as it does elsewhere.
+
+### On each node: a user that can only forward, and a read-only token
+
+Over a trusted SSH session as root (show the person each command first):
+
+```sh
+useradd --system --create-home --shell /usr/sbin/nologin orca-tunnel
+install -d -m 700 -o orca-tunnel -g orca-tunnel /home/orca-tunnel/.ssh
+printf '%s\n' 'restrict,port-forwarding,permitopen="127.0.0.1:8006",command="/bin/false" <contents of ~/.ssh/orca-proxmox.pub>' \
+  > /home/orca-tunnel/.ssh/authorized_keys
+chown orca-tunnel:orca-tunnel /home/orca-tunnel/.ssh/authorized_keys
+chmod 600 /home/orca-tunnel/.ssh/authorized_keys
+sshd -T | grep -i '^allowtcpforwarding'      # must not be "no"
+```
+
+`restrict` turns off shells, PTYs and every forwarding; `port-forwarding` allows forwards again
+and `permitopen` limits them to the API on the node itself. Then the read-only token, as in
+[PVE: a read-only user and token](#pve-a-read-only-user-and-token): `monitor@pve!orca` with
+privilege separation, `PVEAuditor` on `/` for **both** the user and the token (and the guest-agent
+choice made there). On a cluster, the user and token exist once for all nodes; the
+`orca-tunnel` user and its key are per node.
+
+Two values to bring back, read on the node (not over the network):
+
+```sh
+openssl x509 -in /etc/pve/local/pve-ssl.pem -noout -fingerprint -sha256   # the TLS pin
+cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub                          # the SSH host key
+```
+
+(`pveproxy-ssl.pem` next to `pve-ssl.pem` when a custom certificate is installed.) Show the person
+the host key's fingerprint (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`); the plugin pins
+the key itself and refuses any other.
+
+### Hand each node to the plugin
+
+Step 4 once per node, with the tunnel, `enrichOnly` and, if the node is named differently in PDM,
+`nodeMap` (this node's name to PDM's, or to `remote/node`). The import must carry the verified
+`hostKey`: an import cannot show anyone a new key, so one without it is refused.
+
+```json
+{
+  "kind": "pve",
+  "name": "pve-a-agent",
+  "baseUrl": "https://pve-a.example.com:8006",
+  "tokenId": "monitor@pve!orca",
+  "fingerprint": "AB:CD:…",
+  "secret": "…",
+  "enrichOnly": true,
+  "nodeMap": { "pve-a": "pve-a" },
+  "tunnel": {
+    "host": "pve-a.example.com",
+    "port": 22,
+    "user": "orca-tunnel",
+    "identityFile": "/home/you/.ssh/orca-proxmox",
+    "target": "127.0.0.1:8006",
+    "hostKey": "ssh-ed25519 AAAA…"
+  }
+}
+```
+
+`identityFile` is an absolute path on Orca's machine. The log line says
+`Imported the PVE connection to …` with the node count, or why not (for an SSH problem: the key
+refused, the host key not matching, or the forward not allowed). Alternatively the person adds it
+in **Settings** with *Reach via SSH tunnel* and *Enrich only*, presses **Test**, compares the SSH
+host key shown and pins it.
+
+## Connect the hosts to Orca
+
+This is done in Orca, not in the plugin: add each machine where Orca should run or open terminals
+(the Proxmox nodes, and guests that run Orca) as an **SSH target**, or pair a remote Orca server,
+following Orca's documentation ([github.com/stablyai/orca](https://github.com/stablyai/orca)).
+From the command line, `orca host list` shows what Orca can reach and how each is named, and a
+remote Orca server is paired with `orca environment add --name <name> --pairing-code <code>`; there is
+no CLI command to add an SSH target, so ask the person to add it in Orca's interface. The plugin
+then places each Orca host on its node or guest (by address or name; by hand under the Orca tab's
+*Placement* if neither matches) and turns on *Open Orca terminal here*.
 
 ## Appendix: No PDM yet?
 
