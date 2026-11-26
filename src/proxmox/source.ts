@@ -1,11 +1,12 @@
 // Where an estate comes from. A source reads inventory (remotes, hosts, guests, datastores) and,
-// on a slower cadence, PBS snapshot lists. v1 ships the PDM source; a single PVE or PBS host
-// added directly would be another `EstateSource` over the same `ProxmoxClient` (same token and
-// fingerprint model, a different auth scheme and API paths).
-import type { Datastore, Guest, Host, Metrics, Remote, SourceKind, Task } from '../model'
-import { ApiError, type ProxmoxClient } from './client'
+// on a slower cadence, PBS snapshot lists: PDM (many remotes), or a PVE or PBS reached directly
+// (one remote each, direct.ts), all over the same `ProxmoxClient` with its own token and pin.
+// Several connections are combined by composite.ts.
+import type { ConnectionConfig, Datastore, Guest, Host, Metrics, Remote, SourceKind, Task } from '../model'
+import type { ProxmoxClient } from './client'
 import type { BackupRecord } from './backups'
 import { PdmSource } from './pdm'
+import { PbsSource, PveSource } from './direct'
 
 export type Inventory = {
   remotes: Remote[]
@@ -49,8 +50,10 @@ export type MetricsScan = {
 
 export type AccessCheck = {
   version: string
-  /** Remotes the token can see; 0 usually means the token lacks the Auditor role. */
+  /** Remotes the token can see (nodes of a PVE, datastores of a PBS); 0 usually means a missing role. */
   remotes: number
+  /** What `remotes` counts, when it is not remotes. */
+  unit?: 'nodes' | 'datastores'
 }
 
 export interface EstateSource {
@@ -73,15 +76,18 @@ export interface EstateSource {
   fetchUpdates(inventory: Inventory, signal?: AbortSignal): Promise<{ hosts: Record<string, number>; warnings: string[] }>
 }
 
-export function createSource(kind: SourceKind, client: ProxmoxClient): EstateSource {
+/** A stand-in configuration where only the client is known (its name comes from the server). */
+function fallback(client: ProxmoxClient, kind: SourceKind): ConnectionConfig {
+  return { id: 'direct', kind, baseUrl: client.baseUrl, tokenId: '', fingerprint: '' }
+}
+
+export function createSource(kind: SourceKind, client: ProxmoxClient, connection?: ConnectionConfig): EstateSource {
   switch (kind) {
     case 'pdm':
       return new PdmSource(client)
     case 'pve':
+      return new PveSource(client, connection ?? fallback(client, kind))
     case 'pbs':
-      throw new ApiError({
-        kind: 'invalid-config',
-        message: `Connecting to a single ${kind.toUpperCase()} host is not supported yet; connect through Proxmox Datacenter Manager.`
-      })
+      return new PbsSource(client, connection ?? fallback(client, kind))
   }
 }

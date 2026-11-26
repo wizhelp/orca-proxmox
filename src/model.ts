@@ -23,11 +23,21 @@ export type ConnectionConfig = {
    * ever gets that configuration's secret; absent on connections saved before revisions.
    */
   revision?: string
+  /** A direct PVE or PBS connection's name in the estate; else the cluster's or server's own. */
+  name?: string
 }
 
 /** One saved configuration: what estates, caches, alerts and secrets are scoped to. */
 export function connectionScope(connection: Pick<ConnectionConfig, 'id' | 'revision'>): string {
   return connection.revision ? `${connection.id}@${connection.revision}` : connection.id
+}
+
+/**
+ * The scope of an estate made of several connections: every connection's scope, so a change to
+ * any of them is a new estate. One connection keeps its own scope.
+ */
+export function estateScope(connections: readonly Pick<ConnectionConfig, 'id' | 'revision'>[]): string {
+  return connections.length === 1 ? connectionScope(connections[0]) : connections.map(connectionScope).join('+')
 }
 
 /** A connection as the panel sees it: whether a secret is stored, never the secret. */

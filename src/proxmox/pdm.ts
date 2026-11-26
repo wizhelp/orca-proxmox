@@ -22,7 +22,7 @@ export type PveInterface = { iface: string; address?: string; cidr?: string; act
 /** A guest config, of which only these keys are read: never kept or logged as a whole. */
 export type GuestConfig = Record<string, unknown>
 
-type PdmGuestResource = {
+export type PdmGuestResource = {
   type: 'pve-qemu' | 'pve-lxc'
   id: string
   vmid: number
@@ -71,9 +71,9 @@ export type PbsNamespace = { ns?: string }
 
 /** Namespaces scanned per datastore at most; deeper estates are reported as a warning. */
 const MAX_NAMESPACES = 64
-const PARALLEL = 4
+export const PARALLEL = 4
 /** Guest configs read per network scan at most. */
-const MAX_GUEST_CONFIGS = 300
+export const MAX_GUEST_CONFIGS = 300
 
 const seg = encodeURIComponent
 
@@ -104,26 +104,26 @@ export function formatVersion(info: VersionInfo): string | undefined {
   return safeVersion(info.version)
 }
 
-function tagsOf(tags: unknown): string[] {
+export function tagsOf(tags: unknown): string[] {
   if (Array.isArray(tags)) return tags.filter((t): t is string => typeof t === 'string' && t !== '')
   return typeof tags === 'string' ? tags.split(/[;,\s]+/).filter(Boolean) : []
 }
 
 // ---- shapes: PDM's answers are checked where they arrive; a malformed item is skipped ----
 
-const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
-const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
-const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
+export const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
+export const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
+export const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
 
 /** A storage's content types (`images,rootdir` or a list), when PDM reports them. */
-function contentOf(value: unknown): { content?: string[] } {
+export function contentOf(value: unknown): { content?: string[] } {
   const list = typeof value === 'string' ? value.split(',') : Array.isArray(value) ? value : undefined
   const content = list?.filter((c): c is string => typeof c === 'string').map((c) => c.trim()).filter(Boolean)
   return content?.length ? { content } : {}
 }
 
 /** A list answer, or a protocol error naming the path: the core endpoints cannot do without. */
-function listOf(value: unknown, path: string): unknown[] {
+export function listOf(value: unknown, path: string): unknown[] {
   if (Array.isArray(value)) return value
   throw new ApiError({ kind: 'protocol', message: `${path} did not answer a list`, hint: 'Is the base URL a Proxmox Datacenter Manager 1.x, and the token allowed to read it?' })
 }
@@ -147,7 +147,7 @@ export function validResource(r: unknown): PdmResource | null {
   }
 }
 
-function message(error: unknown): string {
+export function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
@@ -475,19 +475,37 @@ export class PdmSource implements EstateSource {
   }
 
   async fetchBackups(inventory: Inventory, signal?: AbortSignal): Promise<BackupScan> {
-    const warnings: string[] = []
-    const records: BackupRecord[] = []
     const gaps: string[] = []
-    let available = false
     const online = new Set(inventory.remotes.filter((r) => r.online && r.type === 'pbs').map((r) => r.id))
     for (const r of inventory.remotes) if (r.type === 'pbs' && !r.online) gaps.push(`${r.id} is unreachable`)
     const stores = inventory.datastores.filter((d) => online.has(d.remote))
-
-    await mapLimit(stores, 2, async (store) => {
+    return scanSnapshots(this.client, stores, (store) => {
       const base = `/pbs/remotes/${seg(store.remote)}/datastore/${seg(store.name)}`
+      return { namespaces: `${base}/namespaces`, snapshots: `${base}/snapshots` }
+    }, gaps, signal)
+  }
+}
+
+/**
+ * PBS snapshot lists of `stores`, every namespace (up to MAX_NAMESPACES), into backup records; the
+ * same for PDM (proxied) and a PBS reached directly, which differ only in their paths. `gaps`
+ * collects what was not read, so the scan says whether it is complete.
+ */
+export async function scanSnapshots(
+  client: ProxmoxClient,
+  stores: readonly Datastore[],
+  paths: (store: Datastore) => { namespaces: string; snapshots: string },
+  gaps: string[],
+  signal?: AbortSignal
+): Promise<BackupScan> {
+  const warnings: string[] = []
+  const records: BackupRecord[] = []
+  let available = false
+    await mapLimit(stores, 2, async (store) => {
+      const path = paths(store)
       let namespaces = ['']
       try {
-        const listed = listOf(await this.client.get<unknown>(`${base}/namespaces`, {}, signal), `${base}/namespaces`)
+        const listed = listOf(await client.get<unknown>(path.namespaces, {}, signal), path.namespaces)
         namespaces = [...new Set(['', ...listed.map((n) => (isObj(n) && typeof n.ns === 'string' ? n.ns : '')).filter((n) => n === '' || /^[A-Za-z0-9_][A-Za-z0-9_./-]*$/.test(n))])]
       } catch (error) {
         warnings.push(`Namespaces of ${store.remote}/${store.name}: ${message(error)}; scanning the root namespace only.`)
@@ -500,7 +518,7 @@ export class PdmSource implements EstateSource {
       }
       await mapLimit(namespaces, PARALLEL, async (ns) => {
         try {
-          const snapshots = listOf(await this.client.get<unknown>(`${base}/snapshots`, { ns: ns || undefined }, signal), `${base}/snapshots`)
+          const snapshots = listOf(await client.get<unknown>(path.snapshots, { ns: ns || undefined }, signal), path.snapshots)
           available = true
           // An entry that cannot be read could be a guest's only backup: the scan is incomplete.
           let unreadable = 0
@@ -530,8 +548,7 @@ export class PdmSource implements EstateSource {
         }
       })
     })
-    return { records, available, complete: available && gaps.length === 0, gaps, warnings }
-  }
+  return { records, available, complete: available && gaps.length === 0, gaps, warnings }
 }
 
 /** One RRD point as PDM serializes it (kebab-case); fields are absent where nothing was recorded. */
@@ -686,11 +703,11 @@ function guessType(resources: PdmResource[]): RemoteType {
   return resources.some((r) => r.type.startsWith('pbs-')) ? 'pbs' : 'pve'
 }
 
-function unreachableHost(remote: string, type: RemoteType, error: string): Host {
+export function unreachableHost(remote: string, type: RemoteType, error: string): Host {
   return { key: `${remote}/`, remote, remoteType: type, node: '', online: false, status: 'unreachable', detailError: error }
 }
 
-function toGuest(remote: string, r: PdmGuestResource): Guest {
+export function toGuest(remote: string, r: PdmGuestResource): Guest {
   return {
     key: `${remote}/${r.vmid}`,
     remote,
