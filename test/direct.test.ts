@@ -98,3 +98,15 @@ test('PDM plus a direct PVE: names kept apart, and a failing connection is one u
   const broken = new CompositeSource([{ connection: pve, source: sourceOf(pve, {}).source }])
   await assert.rejects(broken.fetchInventory({ maxAgeSeconds: 30 }))
 })
+
+test('the harness estate: PDM, a direct PVE and a direct PBS together', async () => {
+  const { mixedEstate } = await import('./fixtures/estate')
+  const { snapshot, config } = await mixedEstate()
+  assert.equal(snapshot.connectionId, estateScope(config.connections))
+  const ids = snapshot.remotes.map((r) => r.id)
+  assert.ok(['pve-a', 'pve-b', 'lab', 'backup-x'].every((id) => ids.includes(id)), ids.join(','))
+  const vm = (key: string) => snapshot.guests.find((g) => g.key === key)!
+  assert.equal(vm('lab/501').diskUsage?.from, 'agent')
+  // Through PDM the agent call is not offered (404): unknown, not 0 %.
+  assert.ok(snapshot.guests.filter((g) => g.remote === 'pve-a' && g.type === 'qemu' && g.status === 'running').every((g) => g.diskUnknown === 'unsupported'))
+})

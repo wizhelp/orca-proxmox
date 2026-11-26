@@ -106,3 +106,40 @@ async function build(routes: Record<string, unknown>, now: number, orcaAwareness
   // As it crosses from the worker to the panel: JSON, so absent fields are dropped.
   return JSON.parse(JSON.stringify(snapshot)) as EstateSnapshot
 }
+
+/** The example PVE cluster and PBS reached directly, beside the PDM estate (fixtures/direct.ts). */
+export const directConnections: ConnectionConfig[] = [
+  { id: 'c-lab', kind: 'pve', name: 'lab', baseUrl: 'https://pve.example.test:8006', tokenId: 'monitor@pve!orca', fingerprint: FIXTURE_PIN, revision: 'example-2' },
+  { id: 'c-backup', kind: 'pbs', name: 'backup-x', baseUrl: 'https://pbs.example.test:8007', tokenId: 'monitor@pbs!orca', fingerprint: FIXTURE_PIN, revision: 'example-3' }
+]
+
+/**
+ * PDM plus a PVE and a PBS reached directly, read as one estate, as the worker answers it, with
+ * the Settings answer that goes with it: for the harness and the screenshots.
+ */
+export async function mixedEstate(): Promise<{ snapshot: EstateSnapshot; config: ConfigAnswer }> {
+  const { pveRoutes, pbsRoutes } = await import('./direct')
+  const { CompositeSource } = await import('../../src/proxmox/composite')
+  const { estateScope } = await import('../../src/model')
+  const pdmConnection = { ...fixtureConnection, revision: 'example-1' }
+  const connections = [pdmConnection, ...directConnections]
+  const routes: Record<string, Record<string, unknown>> = {
+    'pdm.example.test:8443': exampleRoutes(RENAMED_AT),
+    'pve.example.test:8006': pveRoutes(RENAMED_AT),
+    'pbs.example.test:8007': pbsRoutes(RENAMED_AT)
+  }
+  const parts = connections.map((connection) => {
+    const transport = mockTransport(routes[new URL(connection.baseUrl).host] as never)
+    const client = new ProxmoxClient({ connection, secret: 'fixture-secret', transport, probe: async () => null })
+    return { connection, source: createSource(connection.kind, client, connection) }
+  })
+  const scope = estateScope(connections)
+  const scopeConnection: ConnectionConfig = { id: scope, kind: 'pdm', baseUrl: connections.map((c) => c.baseUrl).sort().join(' '), tokenId: '', fingerprint: '' }
+  const snapshot = await new EstateService(() => RENAMED_AT).get(new CompositeSource(parts), scopeConnection, { ...DEFAULT_SETTINGS, orcaAwareness: true }, { maxAgeMs: 0 })
+  const orca = await new OrcaService(() => recordedCli(), () => RENAMED_AT).view(snapshot, {})
+  const views = connections.map((c) => ({ ...c, hasSecret: true }))
+  return {
+    snapshot: JSON.parse(JSON.stringify({ ...snapshot, pdmUrl: fixtureConnection.baseUrl, orca })) as EstateSnapshot,
+    config: { connections: views, connection: views[0], secretsProtection: 'os-keyring', settings: DEFAULT_SETTINGS, importPath: '~/.config/orca-proxmox-visualizer/connection-import.json', importStatus: null }
+  }
+}
