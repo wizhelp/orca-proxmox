@@ -11,7 +11,7 @@ import { after } from 'node:test'
 import { assert, test } from 'orca/testing'
 import type { SshTunnel } from '../src/model'
 import { ApiError } from '../src/proxmox/client'
-import { findSsh, hostKeyFingerprint, sshArgs, sshConfigPath, sshFailure, TunnelManager, type TunnelChild } from '../src/proxmox/tunnel'
+import { findSsh, hostKeyFingerprint, sshArgs, sshConfigPath, sshEnvironment, sshFailure, TunnelManager, type TunnelChild } from '../src/proxmox/tunnel'
 
 /** An example host key (32 bytes 1..32), and its fingerprint as ssh-keygen -l prints it. */
 const HOST_KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g'
@@ -331,4 +331,22 @@ test('no ssh on the machine is a clear error; ssh’s own words become the reaso
   assert.equal(hostKeyFingerprint('not a key'), null)
   // The forward and the host stay separate arguments; a host can never become an option.
   assert.equal(sshArgs(TUNNEL, 1, 'k', false).at(-2), '--')
+})
+
+test('Windows OpenSSH gets the environment it needs; a silent exit says its code', async () => {
+  // Orca's reduced worker environment: no ProgramData, so ssh.exe would exit 255 without a word.
+  const env = sshEnvironment({ HOME: 'C:\\Users\\example', USERPROFILE: 'C:\\Users\\example', SystemRoot: 'D:\\Windows' }, 'win32')
+  assert.equal(env.ProgramData, 'D:\\ProgramData')
+  assert.equal(env.SystemDrive, 'D:')
+  assert.equal(env.windir, 'D:\\Windows')
+  assert.equal(env.USERPROFILE, 'C:\\Users\\example')
+  // What is there is kept (whatever its case), and other systems are left alone.
+  assert.equal(sshEnvironment({ PROGRAMDATA: 'E:\\Data', SystemRoot: 'C:\\Windows' }, 'win32').PROGRAMDATA, 'E:\\Data')
+  assert.equal(sshEnvironment({ PROGRAMDATA: 'E:\\Data', SystemRoot: 'C:\\Windows' }, 'win32').ProgramData, undefined)
+  assert.deepEqual(sshEnvironment({ HOME: '/home/x' }, 'linux'), { HOME: '/home/x' })
+  // ssh that exits without a word: the error says how it exited.
+  const { m } = manager((_args, child) => child.exit(255))
+  await assert.rejects(m.ensure('c-1@r1', TUNNEL), /did not come up: ssh exited with code 255 and said nothing/)
+  // Its last words otherwise, without debug lines.
+  assert.match(sshFailure(TUNNEL, 'debug1: x\r\nkex_exchange_identification: read: Connection reset\r\nConnection reset by 203.0.113.9 port 22\r\n').message, /kex_exchange_identification: read: Connection reset \/ Connection reset by 203\.0\.113\.9 port 22/)
 })

@@ -795,7 +795,10 @@ Step 4's import file, once per host, waiting for each import's log lines before 
 }
 ```
 
-`identityFile` is the absolute path on Orca's machine. `nodeMap` names the node in PDM as
+`identityFile` is the absolute path on Orca's machine; on Windows `"C:\\Users\\you\\.ssh\\orca-proxmox-tunnel"`
+(backslashes escaped, as JSON requires) or `"C:/Users/you/.ssh/orca-proxmox-tunnel"`. Write the
+file from PowerShell (`ConvertTo-Json`) or Python there: a POSIX shell heredoc in Git Bash can drop
+the backslashes, and the plugin then reports the path as it received it. `nodeMap` names the node in PDM as
 `remote/node`: the plugin then knows which PDM cluster this server belongs to. Without it, the
 plugin learns the cluster only while every PDM cluster is visible and exactly one has these node
 names; otherwise it waits and says so. An import without `hostKey` is refused (it cannot show

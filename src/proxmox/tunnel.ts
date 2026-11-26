@@ -63,6 +63,26 @@ export function findSsh(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, exist
   return candidates.find((p) => exists(p)) ?? null
 }
 
+/**
+ * The environment for ssh: the worker's, with what Windows OpenSSH cannot start without filled in.
+ * Orca starts workers with a reduced environment, and ssh.exe exits at once (255, no message)
+ * without %ProgramData% (where it keeps its own settings); SystemRoot and its relatives too.
+ */
+export function sshEnvironment(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): NodeJS.ProcessEnv {
+  if (platform !== 'win32') return env
+  const out: NodeJS.ProcessEnv = { ...env }
+  const get = (name: string) => Object.entries(out).find(([k]) => k.toLowerCase() === name.toLowerCase())?.[1]
+  const systemRoot = get('SystemRoot') ?? get('windir') ?? 'C:\\Windows'
+  const systemDrive = get('SystemDrive') ?? systemRoot.slice(0, 2)
+  const programData = get('ProgramData') ?? get('ALLUSERSPROFILE') ?? `${systemDrive}\\ProgramData`
+  if (!get('SystemRoot')) out.SystemRoot = systemRoot
+  if (!get('windir')) out.windir = systemRoot
+  if (!get('SystemDrive')) out.SystemDrive = systemDrive
+  if (!get('ProgramData')) out.ProgramData = programData
+  if (!get('ALLUSERSPROFILE')) out.ALLUSERSPROFILE = programData
+  return out
+}
+
 /** `ssh-ed25519 AAAA…` -> `SHA256:…` as `ssh-keygen -l` prints it; null if it is not a key. */
 export function hostKeyFingerprint(hostKey: string): string | null {
   const parts = hostKey.trim().split(/\s+/)
@@ -166,8 +186,9 @@ export function sshFailure(t: SshTunnel, stderr: string): ApiError {
   if (/forwarding failed|open failed|administratively prohibited|port forwarding is disabled|could not request local forwarding/i.test(words)) {
     return new ApiError({ kind: 'unreachable', message: `SSH on ${t.host} would not forward to ${t.target}`, hint: 'The account’s forwarding rules (permitopen= on the key, PermitOpen in sshd’s Match block) must allow exactly this target.' })
   }
-  const last = words.split('\n').pop() ?? ''
-  return new ApiError({ kind: 'unreachable', message: `The SSH tunnel to ${at} did not come up${last ? `: ${last.slice(0, 160)}` : ''}`, hint: 'Check the SSH host, port and that this machine can reach it.' })
+  // ssh's last words (not its debug lines), so the reason is visible.
+  const last = words.split('\n').slice(-3).join(' / ')
+  return new ApiError({ kind: 'unreachable', message: `The SSH tunnel to ${at} did not come up${last ? `: ${last.slice(0, 300)}` : ''}`, hint: 'Check the SSH host, port and that this machine can reach it.' })
 }
 
 /** One ssh process: tracked from spawn to its end. */
@@ -417,12 +438,12 @@ export class TunnelManager {
         settle(new ApiError({ kind: 'invalid-config', message: `ssh could not be run: ${error.message}` }))
         if (run.ready && !wasDone) run.onLost?.()
       })
-      child.on('exit', () => {
+      child.on('exit', (code, signal) => {
         const wasDone = run.done
         run.done = true
         this.probes.delete(run)
         if (run.file) void rm(run.file, { force: true }).catch(() => undefined)
-        if (!run.ready) settle(portTaken(run.stderr, run.port) ? 'port-taken' : sshFailure(t, run.stderr || 'ssh exited'))
+        if (!run.ready) settle(portTaken(run.stderr, run.port) ? 'port-taken' : sshFailure(t, run.stderr.trim() ? run.stderr : `ssh exited with ${code !== null ? `code ${code}` : `signal ${signal}`} and said nothing`))
         else if (!wasDone) run.onLost?.()
       })
     })

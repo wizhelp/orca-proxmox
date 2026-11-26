@@ -23,7 +23,7 @@ import { CompositeSource, type EnrichBindings, type FailedPart, type Part } from
 import type { ConfigAnswer, ConnectionInput, ImportStatus, SecretsProtection, SshHostKey, TestAnswer } from './protocol'
 import { ApiError, normalizeBaseUrl, ProxmoxClient } from './proxmox/client'
 import { nodeTransport, type ConnectTo, type Transport } from './proxmox/http'
-import { findSsh, freeLocalPort, hostKeyFingerprint, TunnelManager, type SpawnSsh } from './proxmox/tunnel'
+import { findSsh, freeLocalPort, hostKeyFingerprint, sshEnvironment, TunnelManager, type SpawnSsh } from './proxmox/tunnel'
 import { safeTarget } from './features/targets'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -73,7 +73,7 @@ const TOKEN_ID = /^[^\s@!]+@[^\s@!]+![A-Za-z0-9][A-Za-z0-9._-]*$/
 let transport: Transport = nodeTransport
 let probe: ((url: URL, connectTo?: ConnectTo) => Promise<string | null>) | undefined
 /** SSH tunnels (tunnel.ts); tests swap in a fake ssh. */
-let spawnSsh: SpawnSsh = (command, args) => spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, shell: false, env: cliEnvironment() })
+let spawnSsh: SpawnSsh = (command, args) => spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, shell: false, env: sshEnvironment(cliEnvironment(), process.platform) })
 let sshPath: () => string | null = () => findSsh(process.platform, cliEnvironment())
 let tunnelDir: () => string = () => join(dirname(keyFile()), 'tunnels')
 let tunnelManager: TunnelManager | undefined
@@ -211,7 +211,7 @@ function validTunnel(raw: Partial<Record<keyof SshTunnel, unknown>>, kind: Sourc
   const user = text(raw.user)
   if (!SSH_USER.test(user)) throw new InputError('The SSH user must be a plain user name.')
   const identityFile = text(raw.identityFile)
-  if (!isAbsolute(identityFile) || identityFile.startsWith('-') || /[\0\r\n]/.test(identityFile)) throw new InputError('The identity file must be the absolute path of a private key on this machine.')
+  if (!isAbsolute(identityFile) || identityFile.startsWith('-') || /[\0\r\n]/.test(identityFile)) throw new InputError(`The identity file must be the absolute path of a private key on this machine; it was given as ${JSON.stringify(identityFile)} (backslashes lost on the way, e.g. in a shell, make a Windows path relative: write it from PowerShell or use forward slashes).`)
   const target = text(raw.target) || (kind === 'pbs' ? '127.0.0.1:8007' : '127.0.0.1:8006')
   const t = /^([^:\s]+):(\d{1,5})$/.exec(target)
   if (!t || safeTarget(t[1]) !== t[1] || Number(t[2]) < 1 || Number(t[2]) > 65535) throw new InputError('The tunnel target must be host:port as the SSH server reaches the API, e.g. 127.0.0.1:8006.')

@@ -155,3 +155,16 @@ test('once the worker is stopping, no tunnel manager is created and no ssh start
   assert.equal(read.state, 'error')
   assert.equal(tested.ok, false)
 })
+
+test('a Windows key path with backslashes is accepted; one that lost them says what it got', async () => {
+  await mounted()
+  if (process.platform === 'win32') {
+    const answer = await worker!.request('connection.test', { ...PVE, tunnel: { ...TUNNEL, identityFile: 'C:\\Users\\example\\.ssh\\orca_proxmox_tunnel' } })
+    // Past validation: the next check is whether the file can be read.
+    assert.ok(!answer.ok && /cannot be read/.test(answer.error.message), JSON.stringify(answer))
+  }
+  await assert.rejects(
+    worker!.request('config.save', { ...PVE, tunnel: { ...TUNNEL, hostKey: HOST_KEY, identityFile: 'C:Usersexample.sshorca_proxmox_tunnel' } }),
+    /given as "C:Usersexample\.sshorca_proxmox_tunnel" \(backslashes lost/
+  )
+})
