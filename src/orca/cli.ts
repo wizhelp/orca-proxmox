@@ -70,7 +70,8 @@ export function findOrcaCli(lookup: Partial<CliLookup> = {}): string {
   return found
 }
 
-function cliEnvironment(): NodeJS.ProcessEnv {
+/** The worker's environment with what Orca leaves out of it filled in (home folders), for child processes. */
+export function cliEnvironment(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env }
   delete env.ELECTRON_RUN_AS_NODE
   const home = homedir()

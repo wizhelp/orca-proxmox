@@ -12,7 +12,8 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 /** What a sealed secret is bound to. */
-export type Binding = { id: string; revision?: string; kind: string; baseUrl: string; tokenId: string; fingerprint: string }
+/** `route`: how the endpoint is reached when not directly (an SSH tunnel), absent otherwise. */
+export type Binding = { id: string; revision?: string; kind: string; baseUrl: string; tokenId: string; fingerprint: string; route?: string }
 
 export type Vault = {
   /** The text to store for `plain`, bound to `binding`. */
@@ -29,7 +30,8 @@ const PREFIX = 'sealed:v2:'
 
 /** The associated data: every field that decides where the secret goes, in a fixed order. */
 export function bindingData(b: Binding): Buffer {
-  return Buffer.from(JSON.stringify(['orca-proxmox token v2', b.id, b.revision ?? '', b.kind, b.baseUrl, b.tokenId, b.fingerprint]))
+  // A route is appended only when there is one, so secrets sealed before tunnels still open.
+  return Buffer.from(JSON.stringify(['orca-proxmox token v2', b.id, b.revision ?? '', b.kind, b.baseUrl, b.tokenId, b.fingerprint, ...(b.route ? [b.route] : [])]))
 }
 
 /** The per-user folder for the worker's key, by platform convention. */

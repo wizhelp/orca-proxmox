@@ -16,22 +16,28 @@ import {
   type EstateSnapshot,
   type PluginSettings,
   type SourceError,
-  type SourceKind
+  type SourceKind,
+  type SshTunnel
 } from './model'
 import { CompositeSource, type FailedPart, type Part } from './proxmox/composite'
-import type { ConfigAnswer, ConnectionInput, ImportStatus, SecretsProtection, TestAnswer } from './protocol'
+import type { ConfigAnswer, ConnectionInput, ImportStatus, SecretsProtection, SshHostKey, TestAnswer } from './protocol'
 import { ApiError, normalizeBaseUrl, ProxmoxClient } from './proxmox/client'
-import { nodeTransport, type Transport } from './proxmox/http'
+import { nodeTransport, type ConnectTo, type Transport } from './proxmox/http'
+import { findSsh, freeLocalPort, hostKeyFingerprint, TunnelManager, waitForLocalPort, type SpawnSsh } from './proxmox/tunnel'
+import { safeTarget } from './features/targets'
+import { spawn } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { dirname, isAbsolute, join } from 'node:path'
 import { createSource, type AccessCheck } from './proxmox/source'
-import { nodeCliRunner } from './orca/cli'
+import { cliEnvironment, nodeCliRunner } from './orca/cli'
 import type { CliRunner } from './orca/inventory'
 import { parseLink, type OrcaLinks } from './orca/match'
 import { OrcaService } from './orca/service'
 import { switchArgs, terminalPlan } from './orca/terminal'
 import { Background } from './background'
 import { outboundSnapshot, redactDeep, scrubLine } from './scrub'
-import { fileVault, memoryVault, type Binding, type Vault } from './vault'
-import { cleanupText, importFile, takeImport } from './importer'
+import { fileVault, keyFile, memoryVault, type Binding, type Vault } from './vault'
+import { cleanupText, importFile, takeImport, type ImportedConnection } from './importer'
 import type { AlertState } from './features/alerts'
 import type { JsonValue } from 'orca/worker'
 
@@ -51,13 +57,28 @@ const secretKey = (connection: Pick<ConnectionConfig, 'id' | 'revision'>) =>
  * trust (pin): changing any of them needs the secret entered again.
  */
 const sameEndpoint = (a: ConnectionConfig, b: ConnectionConfig) =>
-  a.baseUrl === b.baseUrl && a.tokenId === b.tokenId && a.kind === b.kind && a.fingerprint === b.fingerprint
+  a.baseUrl === b.baseUrl && a.tokenId === b.tokenId && a.kind === b.kind && a.fingerprint === b.fingerprint && routeOf(a) === routeOf(b)
+/** How a connection is reached when not directly: its SSH tunnel, every field that decides where. */
+const routeOf = (c: ConnectionConfig): string | undefined => {
+  const t = c.tunnel
+  return t ? JSON.stringify(['ssh', t.host, t.port, t.user, t.identityFile, t.target, t.hostKey]) : undefined
+}
 /** What a sealed secret is bound to: everything that decides where it is sent. */
-const binding = (c: ConnectionConfig): Binding => ({ id: c.id, revision: c.revision, kind: c.kind, baseUrl: c.baseUrl, tokenId: c.tokenId, fingerprint: c.fingerprint })
+const binding = (c: ConnectionConfig): Binding => {
+  const route = routeOf(c)
+  return { id: c.id, revision: c.revision, kind: c.kind, baseUrl: c.baseUrl, tokenId: c.tokenId, fingerprint: c.fingerprint, ...(route ? { route } : {}) }
+}
 const TOKEN_ID = /^[^\s@!]+@[^\s@!]+![A-Za-z0-9][A-Za-z0-9._-]*$/
 
 let transport: Transport = nodeTransport
-let probe: ((url: URL) => Promise<string | null>) | undefined
+let probe: ((url: URL, connectTo?: ConnectTo) => Promise<string | null>) | undefined
+/** SSH tunnels (tunnel.ts); tests swap in a fake ssh. */
+let spawnSsh: SpawnSsh = (command, args) => spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, shell: false, env: cliEnvironment() })
+let sshPath: () => string | null = () => findSsh(process.platform, cliEnvironment())
+let tunnelDir: () => string = () => join(dirname(keyFile()), 'tunnels')
+let tunnelManager: TunnelManager | undefined
+const tunnels = () =>
+  (tunnelManager ??= new TunnelManager({ spawn: spawnSsh, sshPath: () => sshPath(), dir: tunnelDir(), freePort: freeLocalPort, waitForPort: waitForLocalPort, now: () => clock() }))
 let clock: () => number = Date.now
 let cliRunner: (() => CliRunner) | undefined
 let vault: Vault | undefined
@@ -75,8 +96,11 @@ type OpenedTerminal = { handle: string; environment?: string; hostKey: string; a
 /** Tests replace the network (and the clock) with recorded answers. Orca never calls this. */
 export function useTestDoubles(doubles: {
   transport: Transport
-  probe?: (url: URL) => Promise<string | null>
+  probe?: (url: URL, connectTo?: ConnectTo) => Promise<string | null>
   now?: () => number
+  spawnSsh?: SpawnSsh
+  sshPath?: string | null
+  tunnelDir?: string
   orcaCli?: CliRunner
   background?: boolean
   vault?: Vault
@@ -92,6 +116,14 @@ export function useTestDoubles(doubles: {
   transport = doubles.transport
   probe = doubles.probe
   clock = doubles.now ?? Date.now
+  // Never the real ssh in tests: without a fake one, a tunnel cannot start.
+  tunnelManager?.stopAll()
+  tunnelManager = undefined
+  spawnSsh = doubles.spawnSsh ?? (() => {
+    throw new Error('no ssh in tests')
+  })
+  sshPath = () => (doubles.sshPath === undefined ? '/usr/bin/ssh' : doubles.sshPath)
+  tunnelDir = () => doubles.tunnelDir ?? join(tmpdir(), 'orca-proxmox-test-tunnels')
   // Tests never run the real orca CLI: without a recorded one, reading Orca's inventory fails.
   const cli: CliRunner = doubles.orcaCli ?? (async () => Promise.reject(new Error('no orca CLI in tests')))
   cliRunner = () => cli
@@ -149,7 +181,55 @@ function validate(input: ConnectionInput, id: string): ConnectionConfig {
     if (!normalized) throw new InputError('The fingerprint must be a SHA-256 fingerprint: 32 hex bytes, colons optional')
     fingerprint = normalized
   }
-  return { id, kind, baseUrl, tokenId, fingerprint, ...(name ? { name } : {}) }
+  const out: ConnectionConfig = { id, kind, baseUrl, tokenId, fingerprint, ...(name ? { name } : {}) }
+  if (input.tunnel) {
+    if (kind === 'pdm') throw new InputError('An SSH tunnel is for a direct PVE or PBS connection.')
+    out.tunnel = validTunnel(input.tunnel, kind)
+  }
+  if (input.enrichOnly) {
+    if (kind !== 'pve') throw new InputError('Only a direct PVE connection can add to what PDM shows (enrich only).')
+    out.enrichOnly = true
+    const nodeMap = validNodeMap(input.nodeMap)
+    if (Object.keys(nodeMap).length) out.nodeMap = nodeMap
+  }
+  return out
+}
+
+const SSH_USER = /^[A-Za-z_][A-Za-z0-9._-]{0,31}$/
+const NODE_NAME = /^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$/
+
+/** An SSH tunnel's fields, checked one by one; they become ssh arguments (never through a shell). */
+function validTunnel(raw: Partial<Record<keyof SshTunnel, unknown>>, kind: SourceKind): SshTunnel {
+  const text = (v: unknown) => (typeof v === 'string' ? v.trim() : typeof v === 'number' ? String(v) : '')
+  const host = text(raw.host)
+  if (!host || safeTarget(host) !== host) throw new InputError('The SSH host must be a DNS name or an IP address.')
+  const port = Number(text(raw.port) || 22)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new InputError('The SSH port must be a number from 1 to 65535.')
+  const user = text(raw.user)
+  if (!SSH_USER.test(user)) throw new InputError('The SSH user must be a plain user name.')
+  const identityFile = text(raw.identityFile)
+  if (!isAbsolute(identityFile) || identityFile.startsWith('-') || /[\0\r\n]/.test(identityFile)) throw new InputError('The identity file must be the absolute path of a private key on this machine.')
+  const target = text(raw.target) || (kind === 'pbs' ? '127.0.0.1:8007' : '127.0.0.1:8006')
+  const t = /^([^:\s]+):(\d{1,5})$/.exec(target)
+  if (!t || safeTarget(t[1]) !== t[1] || Number(t[2]) < 1 || Number(t[2]) > 65535) throw new InputError('The tunnel target must be host:port as the SSH server reaches the API, e.g. 127.0.0.1:8006.')
+  const hostKey = text(raw.hostKey).split(/\s+/).slice(0, 2).join(' ')
+  if (hostKey && !hostKeyFingerprint(hostKey)) throw new InputError('The SSH host key must be one public key, like "ssh-ed25519 AAAA…".')
+  return { host, port, user, identityFile, target, hostKey }
+}
+
+/** Node names here -> PDM node names (or remote/node), for enrich only. */
+function validNodeMap(raw: unknown): Record<string, string> {
+  if (raw === undefined || raw === null) return {}
+  if (typeof raw !== 'object' || Array.isArray(raw)) throw new InputError('The node mapping must name nodes.')
+  const out: Record<string, string> = {}
+  for (const [from, to] of Object.entries(raw as Record<string, unknown>)) {
+    const target = typeof to === 'string' ? to.trim() : ''
+    const [a, b] = target.split('/')
+    const ok = NODE_NAME.test(from) && (b === undefined ? NODE_NAME.test(a) : NAME.test(a) && NODE_NAME.test(b) && target.split('/').length === 2)
+    if (!ok) throw new InputError('Each node mapping is a node name here and a node name (or remote/node) in PDM.')
+    out[from] = target
+  }
+  return out
 }
 
 export default function activate(orca: OrcaWorkerApi): void {
@@ -234,6 +314,11 @@ export default function activate(orca: OrcaWorkerApi): void {
     estate.reset()
     latest = undefined
     loop?.reset()
+    // A replaced or removed connection's tunnel stops now, not at the next read.
+    if (tunnelManager) {
+      const current = await loadConnections()
+      tunnelManager.retain(new Set(current.filter((c) => c.tunnel).map(connectionScope)))
+    }
     await orca.storage.set(ALERT_STATE_KEY, null).catch(() => undefined)
     for (const old of previous) retiring.set(connectionScope(old), old)
     if (previous.length) await sweepRetired()
@@ -324,6 +409,31 @@ export default function activate(orca: OrcaWorkerApi): void {
   })
 
   /** Saves a connection as the Settings form does: new revision, sealed and bound secret, switch. */
+  /** A client for reading the estate: through the connection's SSH tunnel when it has one. */
+  function clientFor(c: ConnectionConfig, secret: string): ProxmoxClient {
+    const tunnel = c.tunnel
+    return new ProxmoxClient({ connection: c, secret, transport, probe, ...(tunnel ? { route: () => tunnels().ensure(connectionScope(c), tunnel) } : {}) })
+  }
+
+  /**
+   * Runs a one-off check (a test in Settings, an import) with a client for `c`: directly, or
+   * through a tunnel started for this check only and stopped after it. A tunnel without a pinned
+   * host key learns it (accept-new) and reports it in `seen`, to be shown and saved.
+   */
+  async function checkWith<T>(c: ConnectionConfig, secret: string, seen: { sshHostKey?: SshHostKey }, work: (client: ProxmoxClient) => Promise<T>): Promise<T> {
+    if (!c.tunnel) return work(new ProxmoxClient({ connection: c, secret, transport, probe }))
+    const opened = await tunnels().probe(c.tunnel)
+    try {
+      if (!c.tunnel.hostKey) {
+        if (!opened.hostKey) throw new ApiError({ kind: 'unreachable', message: `SSH did not report the host key of ${c.tunnel.host}` })
+        seen.sshHostKey = { key: opened.hostKey, fingerprint: hostKeyFingerprint(opened.hostKey) ?? '' }
+      }
+      return await work(new ProxmoxClient({ connection: c, secret, transport, probe, route: async () => opened.connectTo }))
+    } finally {
+      opened.stop()
+    }
+  }
+
   async function saveConnection(input: ConnectionInput): Promise<ConnectionConfig> {
     const list = await loadConnections()
     // An id changes that connection; `new` (or none while there is none) adds one.
@@ -331,6 +441,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     const current = list.find((c) => c.id === id) ?? null
     if (input.id && input.id !== 'new' && !current) throw new InputError('That connection no longer exists; reload Settings.')
     const next: ConnectionConfig = { ...validate(input, id), revision: randomUUID() }
+    if (next.tunnel && !next.tunnel.hostKey) throw new InputError('Test the connection first: the test shows the SSH server’s host key to compare, and saving pins it.')
     if (list.some((c) => c.id !== id && c.baseUrl === next.baseUrl)) throw new InputError('Another connection already uses this URL.')
     // One PDM: its remotes keep PDM's ids, which a second PDM could repeat.
     if (next.kind === 'pdm' && list.some((c) => c.id !== id && c.kind === 'pdm')) throw new InputError('There is a PDM connection already; edit it, or remove it first. Add PVE and PBS servers beside it.')
@@ -402,7 +513,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   }
 
   async function useImported(
-    imported: { baseUrl: string; tokenId: string; fingerprint: string; secret: string; kind?: string; name?: string },
+    imported: ImportedConnection,
     fileFate: string,
     epoch: number,
     trigger: string,
@@ -417,8 +528,20 @@ export default function activate(orca: OrcaWorkerApi): void {
       await finish(false, `${problem} Nothing was changed.`, fileFate)
       return true
     }
-    const input: ConnectionInput = { ...fields, kind: fields.kind as SourceKind | undefined, secret }
-    const candidate: ConnectionConfig = { ...validate(input, 'import') }
+    const { tunnel: rawTunnel, ...plain } = fields
+    const input: ConnectionInput = { ...plain, kind: plain.kind as SourceKind | undefined, secret, ...(rawTunnel ? { tunnel: rawTunnel as unknown as SshTunnel } : {}) }
+    let candidate: ConnectionConfig
+    try {
+      candidate = { ...validate(input, 'import') }
+    } catch (error) {
+      await finish(false, `${error instanceof Error ? error.message : 'The connection is not valid.'} Nothing was changed.`, fileFate)
+      return true
+    }
+    // An import cannot show a host key to anyone: it must bring the one already verified.
+    if (candidate.tunnel && !candidate.tunnel.hostKey) {
+      await finish(false, 'The tunnel has no hostKey: put the SSH server’s verified host key in the file. Nothing was changed.', fileFate)
+      return true
+    }
     const existing = await loadConnections()
     if (candidate.kind === 'pdm' && existing.some((c) => c.kind === 'pdm' && c.baseUrl !== candidate.baseUrl)) {
       await finish(false, 'There is a PDM connection already: a second one is not imported (remove the current one in Settings first). Nothing was changed.', fileFate)
@@ -426,8 +549,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
     let access: AccessCheck
     try {
-      const client = new ProxmoxClient({ connection: candidate, secret: secret.trim(), transport, probe })
-      access = await createSource(candidate.kind, client, candidate).checkAccess()
+      access = await checkWith(candidate, secret.trim(), {}, (client) => createSource(candidate.kind, client, candidate).checkAccess())
     } catch (error) {
       const info = toSourceError(error)
       await finish(
@@ -542,16 +664,17 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (!secret) {
       return { ok: false, error: { kind: 'not-configured', message: 'Enter the token secret to test the connection.' } }
     }
+    const seen: { sshHostKey?: SshHostKey } = {}
+    const target = next
     try {
-      const client = new ProxmoxClient({ connection: next, secret, transport, probe })
-      const access = await createSource(next.kind, client, next).checkAccess(signal)
-      log(`Connection test to ${next.baseUrl}: ${KINDS[next.kind]} ${access.version}, ${access.remotes} ${access.unit ?? 'remotes'} visible`)
+      const access = await checkWith(target, secret, seen, (client) => createSource(target.kind, client, target).checkAccess(signal))
+      log(`Connection test to ${next.baseUrl}${next.tunnel ? ` through SSH to ${next.tunnel.host}` : ''}: ${KINDS[next.kind]} ${access.version}, ${access.remotes} ${access.unit ?? 'remotes'} visible`)
       // Scrubbed like every answer: a server could put anything in what it calls its version.
-      return toJson<TestAnswer>(redactDeep({ ok: true, version: scrubLine(access.version, knownSecrets, 40), remotes: access.remotes, ...(access.unit ? { unit: access.unit } : {}) }, [...knownSecrets]))
+      return toJson<TestAnswer>(redactDeep({ ok: true, version: scrubLine(access.version, knownSecrets, 40), remotes: access.remotes, ...(access.unit ? { unit: access.unit } : {}), ...(seen.sshHostKey ? { sshHostKey: seen.sshHostKey } : {}) }, [...knownSecrets]))
     } catch (error) {
       const info = toSourceError(error)
       log(`Connection test to ${next.baseUrl} failed: ${info.kind}: ${info.message}`)
-      return toJson<TestAnswer>({ ok: false, error: info })
+      return toJson<TestAnswer>({ ok: false, error: info, ...(seen.sshHostKey ? { sshHostKey: seen.sshHostKey } : {}) })
     }
   })
 
@@ -636,9 +759,11 @@ export default function activate(orca: OrcaWorkerApi): void {
     const noSecret: SourceError = { kind: 'not-configured', message: 'No token secret is stored for this connection.', hint: 'Open Settings in this panel and enter the token secret.' }
     const parts: Part[] = []
     const failed: FailedPart[] = []
+    // Only the current configuration's tunnels run: a changed or removed connection's is stopped.
+    if (tunnelManager || list.some((c) => c.tunnel)) tunnels().retain(new Set(list.filter((c) => c.tunnel).map(connectionScope)))
     for (const c of list) {
       const secret = await readSecret(c)
-      if (secret) parts.push({ connection: c, source: createSource(c.kind, new ProxmoxClient({ connection: c, secret, transport, probe }), c) })
+      if (secret) parts.push({ connection: c, source: createSource(c.kind, clientFor(c, secret), c) })
       else failed.push({ connection: c, reason: noSecret.message })
     }
     if (!parts.length) return { state: 'error', refreshSeconds, error: list.length > 1 ? { ...noSecret, message: 'No token secret is stored for these connections.' } : noSecret }
@@ -756,6 +881,7 @@ let stopped = false
 /** Orca awaits this before stopping the worker. */
 export function deactivate(): void {
   stopped = true
+  tunnelManager?.stopAll()
   clearTimeout(timer)
   timer = undefined
 }

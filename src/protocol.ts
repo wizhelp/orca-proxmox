@@ -1,6 +1,6 @@
 // The panel <-> worker contract, declared once: src/panel.tsx and src/worker.ts both read it.
 // Nothing here ever carries the token secret back to the panel.
-import type { ConnectionView, EstateResponse, PluginSettings, SourceError, SourceKind } from './model'
+import type { ConnectionView, EstateResponse, PluginSettings, SourceError, SourceKind, SshTunnel } from './model'
 
 export type ConnectionInput = {
   /** Which connection: an existing id to change it, `new` to add one; absent means the first (or a new one). */
@@ -14,7 +14,16 @@ export type ConnectionInput = {
   fingerprint: string
   /** A new secret; empty keeps the stored one (only for the same URL, token and pin). */
   secret?: string
+  /** Reach a direct connection through an SSH tunnel (`hostKey` empty until a test showed it). */
+  tunnel?: SshTunnel
+  /** A direct PVE that only adds to PDM's guests and nodes (see ConnectionConfig). */
+  enrichOnly?: boolean
+  /** For enrich only: node name here -> node (or `remote/node`) in PDM. */
+  nodeMap?: Record<string, string>
 }
+
+/** The SSH server's host key a test saw (learnt, when none was pinned): to compare and save. */
+export type SshHostKey = { key: string; fingerprint: string }
 
 export type SecretsProtection = 'os-keyring' | 'unavailable' | 'unknown'
 
@@ -37,8 +46,8 @@ export type ConfigAnswer = {
 }
 
 export type TestAnswer =
-  | { ok: true; version: string; remotes: number; unit?: 'nodes' | 'datastores' }
-  | { ok: false; error: SourceError }
+  | { ok: true; version: string; remotes: number; unit?: 'nodes' | 'datastores'; sshHostKey?: SshHostKey }
+  | { ok: false; error: SourceError; sshHostKey?: SshHostKey }
 
 declare module 'orca' {
   interface PluginRequests {

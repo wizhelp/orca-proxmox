@@ -31,7 +31,18 @@ export function importFile(): string {
 }
 
 /** What the file holds: the Settings form's fields. */
-export type ImportedConnection = { baseUrl: string; tokenId: string; fingerprint: string; secret: string; kind?: string; name?: string }
+export type ImportedConnection = {
+  baseUrl: string
+  tokenId: string
+  fingerprint: string
+  secret: string
+  kind?: string
+  name?: string
+  /** Checked field by field by the worker's validation. */
+  tunnel?: Record<string, string | number>
+  enrichOnly?: boolean
+  nodeMap?: Record<string, string>
+}
 
 /**
  * The file's final state. `untouched`: never taken, still under the public name at `path`.
@@ -53,7 +64,9 @@ export const MAX_BYTES = 16 * 1024
 /** Wiped in pieces of this size, up to WIPE_LIMIT; a larger file is only wiped in part. */
 const WIPE_CHUNK = 64 * 1024
 const WIPE_LIMIT = 64 * 1024 * 1024
-const FIELDS = new Set(['baseUrl', 'tokenId', 'fingerprint', 'secret', 'kind', 'name'])
+const FIELDS = new Set(['baseUrl', 'tokenId', 'fingerprint', 'secret', 'kind', 'name', 'tunnel', 'enrichOnly', 'nodeMap'])
+const TUNNEL_FIELDS = new Set(['host', 'port', 'user', 'identityFile', 'target', 'hostKey'])
+const isPlain = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 
 type Env = { platform: NodeJS.Platform; uid: number | undefined }
 const here = (): Env => ({ platform: process.platform, uid: typeof process.getuid === 'function' ? process.getuid() : undefined })
@@ -258,8 +271,25 @@ async function consume(claimed: string, env: Env, track: (handle: FileHandle, id
     !Array.isArray(raw) &&
     Object.keys(raw).every((k) => FIELDS.has(k)) &&
     ['baseUrl', 'tokenId', 'secret'].every((k) => typeof (raw as Record<string, unknown>)[k] === 'string') &&
-    ['fingerprint', 'kind', 'name'].every((k) => ['undefined', 'string'].includes(typeof (raw as Record<string, unknown>)[k]))
-  if (!ok) return refuse('The import file must be a JSON object with baseUrl, tokenId, secret and optionally fingerprint, kind and name, all strings.', cleanup)
-  const r = raw as Record<string, string>
-  return { state: 'imported', connection: { baseUrl: r.baseUrl, tokenId: r.tokenId, fingerprint: r.fingerprint ?? '', secret: r.secret, ...(r.kind !== undefined ? { kind: r.kind } : {}), ...(r.name !== undefined ? { name: r.name } : {}) }, cleanup }
+    ['fingerprint', 'kind', 'name'].every((k) => ['undefined', 'string'].includes(typeof (raw as Record<string, unknown>)[k])) &&
+    ['undefined', 'boolean'].includes(typeof (raw as Record<string, unknown>).enrichOnly) &&
+    ((raw as Record<string, unknown>).tunnel === undefined || (isPlain((raw as Record<string, unknown>).tunnel) && Object.entries((raw as { tunnel: Record<string, unknown> }).tunnel).every(([k, v]) => TUNNEL_FIELDS.has(k) && (typeof v === 'string' || (k === 'port' && typeof v === 'number'))))) &&
+    ((raw as Record<string, unknown>).nodeMap === undefined || (isPlain((raw as Record<string, unknown>).nodeMap) && Object.values((raw as { nodeMap: Record<string, unknown> }).nodeMap).every((v) => typeof v === 'string')))
+  if (!ok) return refuse('The import file must be a JSON object with baseUrl, tokenId, secret and optionally fingerprint, kind and name (strings), tunnel (host, port, user, identityFile, target, hostKey), enrichOnly (true or false) and nodeMap (names to names).', cleanup)
+  const r = raw as Record<string, string> & { tunnel?: Record<string, string | number>; enrichOnly?: boolean; nodeMap?: Record<string, string> }
+  return {
+    state: 'imported',
+    connection: {
+      baseUrl: r.baseUrl,
+      tokenId: r.tokenId,
+      fingerprint: r.fingerprint ?? '',
+      secret: r.secret,
+      ...(r.kind !== undefined ? { kind: r.kind } : {}),
+      ...(r.name !== undefined ? { name: r.name } : {}),
+      ...(r.tunnel !== undefined ? { tunnel: r.tunnel } : {}),
+      ...(r.enrichOnly !== undefined ? { enrichOnly: r.enrichOnly } : {}),
+      ...(r.nodeMap !== undefined ? { nodeMap: r.nodeMap } : {})
+    },
+    cleanup
+  }
 }
