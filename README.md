@@ -60,9 +60,12 @@ panel's **Settings → Connect via Orca**:
    result is shown under the host.
 5. **Undo…** is per run, and waits for no other Orca step on the host (it stops if one runs). It
    reads what that run recorded there and removes only what the run recorded as made and that
-   still carries its label: the token, the user only when the run made it and it has no token
-   left, the user's permission only when the run added it and it is still there. Never what was
-   there before; what the run started but did not record as done is kept and named for you to
+   still carries its label: the token; the user's permission only when the run added it and it is
+   still exactly the entry the run recorded (path, role, propagation); the user only when the run
+   made it, it has no token left, its permissions are exactly that entry and (on PVE) it is in no
+   group. The permission is removed first, and afterwards none may be left for the user or its
+   token (PBS keeps a removed user's permissions otherwise). Never what was there before; what the
+   run started but did not record as done, or what was changed since, is kept and named for you to
    check. Every list it reads must succeed. Then it removes the connection that run saved, if it
    is still that revision.
 

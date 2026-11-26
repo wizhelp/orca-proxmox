@@ -216,10 +216,16 @@ the guided manual path (docs/AGENT_SETUP.md).
 - **Undo** is bound to one recorded run, takes the same lock, and works from the host's own
   journal of it, each step checked and stopping at the first that fails. It removes only what
   that run recorded as **done**, never what it found there (`existing`) and never what it only
-  meant to do (`intent`): the token only while its comment is that run's, the user only while
-  labelled with that run and with no token left at all, the user's permission only when that run
-  added it and it is still granted. What the run started but did not record as done is kept,
-  named to the person, and the journal and the plugin's record stay for a check by hand. What it
+  meant to do (`intent`): the token only while its comment is that run's; the user's permission
+  only when that run added it and it is still exactly the entry the run read back and journaled
+  right after making it (path, role, propagation, user), as both PVE and PBS delete a grant by
+  user, role and path alone; the user only while labelled with that run, with no token left, with
+  no permission but that entry, and (on PVE, where deleting a user also drops its group
+  memberships) in no group. Its permission is removed explicitly before the user, because PBS
+  keeps a removed user's permissions, and afterwards the permission list is read again: if
+  anything is left for the user or its token, Undo stops. What the run started but did not record
+  as done, or what was changed since, is kept, named to the person, and the journal and the
+  plugin's record stay for a check by hand. What it
   undid is recorded on the host, so it can be run again after a stop. The plugin then removes the
   connection that run saved only if it is still that revision.
 - **PDM** is recognized but not set up: it has no root-only local command for tokens, and the
