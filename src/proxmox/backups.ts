@@ -82,7 +82,7 @@ export function attachBackups(
   for (const guest of guests) {
     const key = `${GUEST_BACKUP_TYPE[guest.type]}/${guest.vmid}`
     const remotes = remotesPerVmid.get(key) ?? new Set<string>()
-    remotes.add(guest.remote)
+    remotes.add(guest.remote.toLowerCase())
     remotesPerVmid.set(key, remotes)
   }
 
@@ -91,17 +91,23 @@ export function attachBackups(
     const key = `${GUEST_BACKUP_TYPE[guest.type]}/${guest.vmid}`
     const remote = guest.remote.toLowerCase()
     const all = byGuest.get(key) ?? []
-    const mine = all.filter((e) => e.owners.includes(remote))
+    const holders = remotesPerVmid.get(key) ?? new Set<string>()
+    // A hint that names several remotes which all have this VMID (a PDM remote and a cluster
+    // reached directly, both called "lab") cannot say whose snapshot it is.
+    const disputed = (e: { owners: string[] }) => e.owners.filter((o) => holders.has(o)).length > 1
+    const mine = all.filter((e) => e.owners.includes(remote) && !disputed(e))
+    const contested = all.filter((e) => e.owners.includes(remote) && disputed(e))
     const unattributed = all.filter((e) => e.owners.length === 0)
-    const candidates = mine.length > 0 ? mine : unattributed
-    const shared = (remotesPerVmid.get(key)?.size ?? 0) > 1
-    const ambiguous = mine.length === 0 && shared && candidates.length > 0
+    const candidates = mine.length > 0 ? mine : contested.length > 0 ? contested : unattributed
+    const shared = holders.size > 1
+    const ambiguous = mine.length === 0 && candidates.length > 0 && (contested.length > 0 || shared)
 
     let newest: BackupRecord | undefined
     for (const { record } of candidates) {
       if (!newest || record.time > newest.time) newest = record
     }
-    const state = backupStateFor(newest?.time, options)
+    // Only a contested snapshot found: it may be another guest's, so the state is unknown.
+    const state = mine.length === 0 && contested.length > 0 ? 'unknown' : backupStateFor(newest?.time, options)
     if (!guest.template && (state === 'none' || state === 'stale')) missing += 1
     // No undefined fields: the answer crosses to the panel as JSON.
     const next: Guest = { ...guest, backupState: state }

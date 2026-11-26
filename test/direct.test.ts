@@ -3,6 +3,7 @@ import { assert, test } from 'orca/testing'
 import { EstateService } from '../src/estate'
 import { estateMarkdown } from '../src/features/insights'
 import { DEFAULT_SETTINGS, estateScope, type ConnectionConfig, type Guest } from '../src/model'
+import { attachBackups } from '../src/proxmox/backups'
 import { ProxmoxClient } from '../src/proxmox/client'
 import { CompositeSource, directRemoteIds, type FailedPart, type Part } from '../src/proxmox/composite'
 import { createSource, type BackupScan, type EstateSource, type Inventory } from '../src/proxmox/source'
@@ -246,4 +247,21 @@ test('a refusal names the right role for the product', async () => {
   assert.match(await hint(pve), /PVEAuditor role on \//)
   assert.match(await hint(pbs), /Audit role on \//)
   assert.match(await hint(pdm), /Auditor role on \/resource/)
+})
+
+test('a backup hint shared by two remotes with the same VMID proves neither: unknown, flagged', () => {
+  // PDM's remote "lab" and a cluster reached directly whose own name is also "lab": both have VM 501.
+  const both = [vm('lab', 501), vm('lab (direct)', 501), vm('lab (direct)', 502)]
+  const record = (id: number, ns: string) => ({ remote: 'backup-x', datastore: 'store', ns, type: 'vm' as const, id: String(id), time: NOW - 3600_000 })
+  const options = { now: NOW, staleHours: 26, available: true, complete: true, aliases: { 'lab (direct)': 'lab' } }
+  const out = attachBackups(both, [record(501, 'lab'), record(502, 'lab')], options).guests
+  const state = (remote: string, vmid: number) => out.find((g) => g.remote === remote && g.vmid === vmid)!
+  assert.equal(state('lab', 501).backupState, 'unknown')
+  assert.equal(state('lab', 501).backupAmbiguous, true)
+  assert.equal(state('lab (direct)', 501).backupState, 'unknown')
+  // Where only one of them has the VMID, the hint is enough.
+  assert.equal(state('lab (direct)', 502).backupState, 'ok')
+  // A hint naming one remote only still decides, alias or id.
+  const solo = attachBackups([vm('lab (direct)', 501), vm('pve-z', 501)], [record(501, 'lab')], options).guests
+  assert.deepEqual(solo.map((g) => g.backupState), ['ok', 'none'])
 })
