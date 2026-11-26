@@ -174,17 +174,21 @@ export function placeVm(snap: EstateSnapshot, req: VmRequest): Placement[] {
         notes.push('not enough free memory')
       }
       if (c.diskCheck === 'unknown') notes.push('disk space unknown')
-      else if (c.diskCheck === 'unverified') notes.push(diskAfter < 0 ? 'disk may be short (unverified)' : 'disk unverified')
       else if (diskAfter < 0) {
+        // Too small even for the roomiest storage that may hold it: no fit, verified or not.
         fits = false
-        notes.push('not enough free disk')
-      }
+        notes.push(c.diskCheck === 'verified' ? 'not enough free disk' : 'not enough free disk (unverified storage)')
+      } else if (c.diskCheck === 'unverified') notes.push('disk unverified')
       if (req.cores > c.cores) {
         fits = false
         notes.push(`only ${c.cores} cores`)
-      } else if (coresAfter < 0) notes.push('CPU is busy')
-      if (fits && c.memCommitted + mem > c.memTotal) notes.push('memory over-committed')
-      const score = fits ? Math.min(1, memAfter / c.memTotal) * 0.5 + (c.diskCheck !== 'verified' ? 0 : Math.min(1, diskAfter / Math.max(disk, GiB) / 10) * 0.3) + Math.max(0, coresAfter / Math.max(1, c.cores)) * 0.2 : -1
+      } else if (req.cores === c.cores) notes.push(`uses all ${c.cores} cores`)
+      // Busy: what is idle now does not cover the VM (a VM taking every core is said above).
+      else if (coresAfter < 0) notes.push('CPU is busy')
+      const overCommitted = fits && c.memCommitted + mem > c.memTotal
+      if (overCommitted) notes.push('memory over-committed')
+      // Disk room counts whether the storage is verified or only likely (a "best fit" still needs verified).
+      const score = fits ? Math.min(1, memAfter / c.memTotal) * 0.5 + (c.diskCheck === 'unknown' ? 0 : Math.min(1, diskAfter / Math.max(disk, GiB) / 10) * 0.3) + Math.max(0, coresAfter / Math.max(1, c.cores)) * 0.2 - (overCommitted ? 0.2 : 0) : -1
       return { ...c, fits, notes, score, confirmed: fits && c.diskCheck === 'verified' }
     })
     .sort((a, b) => b.score - a.score)

@@ -201,3 +201,36 @@ test('without addresses also takes out mixed-separator addresses and file paths;
   const full = estateMarkdown(snap, { mode: 'full', now: RENAMED_AT })
   assert.ok(!full.includes('db7') && !full.includes('host7'))
 })
+
+test('the planner on PDM-shaped nodes (no content types): every core, short storage, ranking by room', () => {
+  const GiB = 1024 ** 3
+  const node = (name: string, cores: number, cpu: number, memUsed: number, localFree: number) => ({
+    key: `r/${name}`, remote: 'r', remoteType: 'pve', node: name, online: true, status: 'online', cpu, maxcpu: cores, mem: memUsed * GiB, maxmem: 64 * GiB, disk: 100 * GiB, maxdisk: 436 * GiB,
+    storages: [
+      { name: 'local', node: name, disk: (436 - localFree) * GiB, maxdisk: 436 * GiB, shared: false, status: 'available' },
+      { name: 'pbs-x', node: name, disk: 190 * GiB, maxdisk: 436 * GiB, shared: true, status: 'available' }
+    ]
+  })
+  const snap = { hosts: [node('n-a', 20, 0.002, 11, 319), node('n-b', 8, 0.002, 3, 246), node('n-c', 12, 0.03, 25, 167), node('n-d', 8, 0.002, 3, 120)], guests: [] } as never
+  const big = placeVm(snap, { cores: 8, memGiB: 32, diskGiB: 200 })
+  const by = (n: string) => big.find((p) => p.host.node === n)!
+  // A VM taking every core of an idle 8-core node uses all of them; the node is not "busy".
+  assert.ok(by('n-b').fits && by('n-b').notes.includes('uses all 8 cores') && !by('n-b').notes.includes('CPU is busy'))
+  // Even the roomiest storage that may hold disks is too small: no fit, said so.
+  assert.equal(by('n-c').fits, false)
+  assert.ok(by('n-c').notes.includes('not enough free disk (unverified storage)'))
+  assert.equal(by('n-d').fits, false)
+  // The PBS mount is never the disk storage.
+  assert.ok(big.every((p) => p.diskStorage === 'local'))
+  // Same memory and CPU, more free disk ranks first, though unverified.
+  const small = placeVm(snap, { cores: 2, memGiB: 4, diskGiB: 32 })
+  assert.ok(small.findIndex((p) => p.host.node === 'n-b') < small.findIndex((p) => p.host.node === 'n-d'))
+  // A node whose running guests may already claim its memory ranks after one that is not over-committed.
+  const busy = { ...(snap as { hosts: unknown[] }), guests: [{ key: 'r/900', remote: 'r', node: 'n-a', vmid: 900, type: 'qemu', status: 'running', maxmem: 40 * GiB }] } as never
+  const ranked = placeVm(busy, { cores: 4, memGiB: 32, diskGiB: 32 })
+  assert.ok(ranked.find((p) => p.host.node === 'n-a')!.notes.includes('memory over-committed'))
+  assert.equal(ranked[0].host.node, 'n-b')
+  // Fits nowhere: every node says why.
+  const huge = placeVm(snap, { cores: 64, memGiB: 512, diskGiB: 5000 })
+  assert.ok(huge.every((p) => !p.fits && p.notes.includes('not enough free memory') && p.notes.some((n) => n.startsWith('only '))))
+})
