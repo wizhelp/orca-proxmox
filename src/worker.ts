@@ -308,6 +308,11 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   orca.panels.handle('config.get', () => configAnswer())
 
+  orca.panels.handle('config.dismissImport', async () => {
+    await orca.storage.set(IMPORT_STATUS_KEY, null).catch(() => undefined)
+    return configAnswer()
+  })
+
   // Saved or removed by hand: an earlier import's outcome no longer applies.
   orca.panels.handle('config.save', async (input) => {
     await withConfigLock(async () => {

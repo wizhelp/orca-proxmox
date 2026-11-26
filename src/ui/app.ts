@@ -46,9 +46,11 @@ export const app = {
 
   form: { baseUrl: '', tokenId: '', fingerprint: '', secret: '' } as ConnectionInput,
   formDirty: false,
+  /** The connection form is shown: after Edit or Add, or while there is no connection yet. */
+  formOpen: false,
   testResult: null as TestAnswer | null,
   settingsMessage: null as { tone: Tone; text: string } | null,
-  busy: null as 'test' | 'save' | 'clear' | 'import' | null
+  busy: null as 'test' | 'save' | 'clear' | 'import' | 'dismiss' | null
 }
 
 type Actions = {

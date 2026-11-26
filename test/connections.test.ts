@@ -93,6 +93,9 @@ test('editing one connection keeps the others; a URL can be used once; names are
   await assert.rejects(worker!.request('config.save', { ...PDM, id: 'new', baseUrl: 'https://pdm2.example.test:8443', name: 'x' }), /PDM connection has no name/)
   // One PDM at most: its remotes keep PDM's ids, which a second PDM could repeat.
   await assert.rejects(worker!.request('config.save', { ...PDM, id: 'new', baseUrl: 'https://pdm2.example.test:8443' }), /There is a PDM connection already/)
+  // The last import's outcome can be dismissed from Settings.
+  await worker!.request('config.dismissImport', undefined as never)
+  assert.equal((await worker!.request('config.get', undefined as never)).importStatus, null)
 })
 
 test('a connection without its secret is one unreachable remote; the others still load', async () => {

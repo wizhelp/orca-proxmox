@@ -48,6 +48,8 @@ declare module 'orca' {
     'config.save': { input: ConnectionInput; output: ConfigAnswer }
     /** Removes one connection (`id`) and its stored secret, or all of them. */
     'config.clear': { input: { id?: string }; output: ConfigAnswer }
+    /** Forgets the last import's outcome (the panel's dismiss button). */
+    'config.dismissImport': { output: ConfigAnswer }
     /** Imports the import file now, if there is one. */
     'config.import': { output: ConfigAnswer & { found: boolean } }
     /** Tries the given (unsaved) connection: PDM version and how many remotes the token sees. */

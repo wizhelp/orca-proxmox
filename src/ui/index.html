@@ -707,9 +707,42 @@
         border: 1px solid var(--line);
         border-radius: 8px;
       }
-      .conn-row.current {
-        border-color: var(--accent, var(--line));
-        box-shadow: inset 3px 0 0 var(--info);
+      .conn-row.editing {
+        background: color-mix(in srgb, var(--orca-muted) 35%, transparent);
+      }
+      .conn-edit {
+        padding: 4px 2px 8px;
+      }
+      .conn-form h4 {
+        margin: 0;
+        font-size: 13px;
+      }
+      .import-line {
+        display: flex;
+        align-items: flex-start;
+        gap: 6px;
+        padding: 4px 8px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+      }
+      .import-line details {
+        flex: 1;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .import-line summary {
+        cursor: pointer;
+      }
+      .import-line details[open] > div {
+        margin-top: 4px;
+      }
+      details.help-kind summary {
+        cursor: pointer;
+        margin: 4px 0;
+      }
+      ul.options {
+        margin: 4px 0 0;
+        padding-left: 18px;
       }
       .conn-name {
         flex: 1;
