@@ -138,3 +138,20 @@ test('a tunnel is checked field by field, and an import must bring a verified ho
   assert.equal(config.connections.length, 0)
   assert.equal(ssh.runs.length, before)
 })
+
+test('once the worker is stopping, no tunnel manager is created and no ssh starts, even the first', async () => {
+  const ssh = fakeSsh()
+  main.useTestDoubles({ transport: mockTransport(pveRoutes(NOW) as never), probe: async () => PIN, now: () => NOW, vault: memoryVault(), spawnSsh: ssh.spawn, sshPath: '/usr/bin/ssh', tunnelDir: dir })
+  worker = await mountWorker(main, { host: mockHost() })
+  // Saved with the key already verified: saving starts no tunnel, so no manager exists yet.
+  await worker.request('config.save', { ...PVE, tunnel: { ...TUNNEL, hostKey: HOST_KEY } })
+  assert.equal(ssh.runs.length, 0)
+  // Orca stops the worker while requests are still arriving (a refresh, a test from Settings).
+  main.deactivate()
+  const read = await worker.request('estate.get', {})
+  const tested = await worker.request('connection.test', { ...PVE, tunnel: { ...TUNNEL, hostKey: HOST_KEY } })
+  await new Promise((r) => setTimeout(r, 50))
+  assert.equal(ssh.runs.length, 0, 'no ssh after the worker stopped')
+  assert.equal(read.state, 'error')
+  assert.equal(tested.ok, false)
+})

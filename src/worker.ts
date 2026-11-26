@@ -77,8 +77,11 @@ let spawnSsh: SpawnSsh = (command, args) => spawn(command, args, { stdio: ['igno
 let sshPath: () => string | null = () => findSsh(process.platform, cliEnvironment())
 let tunnelDir: () => string = () => join(dirname(keyFile()), 'tunnels')
 let tunnelManager: TunnelManager | undefined
-const tunnels = () =>
-  (tunnelManager ??= new TunnelManager({ spawn: spawnSsh, sshPath: () => sshPath(), dir: tunnelDir(), freePort: freeLocalPort, now: () => clock() }))
+/** The tunnel manager; none is created once the worker is stopping (a read still in flight then fails). */
+const tunnels = () => {
+  if (stopped) throw new ApiError({ kind: 'unreachable', message: 'The plugin is stopping; no SSH tunnel is started' })
+  return (tunnelManager ??= new TunnelManager({ spawn: spawnSsh, sshPath: () => sshPath(), dir: tunnelDir(), freePort: freeLocalPort, now: () => clock() }))
+}
 let clock: () => number = Date.now
 let cliRunner: (() => CliRunner) | undefined
 let vault: Vault | undefined
@@ -233,6 +236,7 @@ function validNodeMap(raw: unknown): Record<string, string> {
 }
 
 export default function activate(orca: OrcaWorkerApi): void {
+  stopped = false
   /** Which PDM cluster each enrich-only connection adds to, for the current configuration. */
   const enrichBindings: EnrichBindings = new Map()
   const estate = new EstateService(() => clock())
@@ -765,7 +769,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     const failed: FailedPart[] = []
     // Only the current configuration's tunnels run: a changed or removed connection's is stopped.
     // Only a refresh of the current configuration decides; an older one changes nothing (switched() retains).
-    if (started === generation && (tunnelManager || list.some((c) => c.tunnel))) tunnels().retain(new Set(list.filter((c) => c.tunnel).map(connectionScope)))
+    if (!stopped && started === generation && (tunnelManager || list.some((c) => c.tunnel))) tunnels().retain(new Set(list.filter((c) => c.tunnel).map(connectionScope)))
     for (const c of list) {
       const secret = await readSecret(c)
       if (secret) parts.push({ connection: c, source: createSource(c.kind, clientFor(c, secret), c) })
