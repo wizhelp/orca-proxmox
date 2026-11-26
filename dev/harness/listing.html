@@ -30,9 +30,9 @@
       const params = new URLSearchParams(location.search)
       const shot = params.get('shot') ?? '1'
       const SHOTS = {
-        1: [['cards', 'light', 'Hosts with live charts'], ['tree', 'dark', 'The estate as a tree, dark theme'], ['guests', 'light', 'Every guest, with its actions']],
+        1: [['cards', 'light', 'Hosts with live charts'], ['tree', 'dark', 'The estate as a tree, dark theme'], ['guests', 'light', 'Every guest, with disk use']],
         2: [['tasks', 'dark', 'Tasks of every remote'], ['planner', 'light', 'Where a new VM fits'], ['orca', 'light', 'Where Orca runs']],
-        3: [['ai', 'light', 'Copy for AI, previewed'], ['backups', 'light', 'Backups by age'], ['settings', 'dark', 'A read-only token, pinned TLS']],
+        3: [['ai', 'light', 'Copy for AI, previewed'], ['backups', 'light', 'Backups by age'], ['settings', 'dark', 'PDM, PVE and PBS: read-only, pinned']],
         cover: [['cards', 'light', ''], ['tree', 'dark', '']]
       }
       const GLYPH =

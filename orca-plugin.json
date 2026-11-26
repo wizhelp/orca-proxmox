@@ -18,7 +18,7 @@
   "screenshots": [
     {
       "path": "docs/listing/screenshot-1.png",
-      "alt": "Host cards with CPU, memory and network charts; the estate tree in the dark theme; the guests table with one guest opened",
+      "alt": "Host cards with CPU, memory and network charts; the estate tree in the dark theme; the guests table with disk use and one guest opened",
       "caption": "Hosts, the estate tree and guests"
     },
     {
@@ -28,8 +28,8 @@
     },
     {
       "path": "docs/listing/screenshot-3.png",
-      "alt": "The Copy for AI preview without addresses; backups by age; the settings form with a read-only token and a pinned fingerprint",
-      "caption": "Copy for AI, backups and a read-only setup"
+      "alt": "The Copy for AI preview without addresses; backups by age; the settings with a PDM, a PVE and a PBS connection, each read-only and pinned",
+      "caption": "Copy for AI, backups and the connections"
     }
   ],
   "engines": {

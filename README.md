@@ -40,7 +40,7 @@ Rendered from the bundled example estate (no real servers):
 <p>
   <img src="docs/screenshots/hosts-cards.png" alt="Host cards with CPU, memory and network sparklines, disk bars, update and version badges, notes and copy and open actions" width="240">
   <img src="docs/screenshots/tree-drag.png" alt="The tree of remotes, nodes, Orca hosts and guests in the dark theme, with a guest being dragged within its node" width="240">
-  <img src="docs/screenshots/guests.png" alt="The guests table with CPU and memory sparklines and disk use, one guest opened with its actions, tags, notes, charts and details" width="240">
+  <img src="docs/screenshots/guests.png" alt="The guests table sorted by disk use, with a VM's use from its guest agent and others' allocated size marked unknown, one guest opened with its actions, tags, notes, charts and details" width="240">
   <img src="docs/screenshots/tasks.png" alt="The tasks of all remotes, with two failed backups in red" width="240">
   <img src="docs/screenshots/planner.png" alt="Where a new VM fits: free memory, disk and CPU per node, best fit first" width="240">
   <img src="docs/screenshots/orca.png" alt="The Orca tab: one Orca server per Proxmox node, with its bot and workspaces" width="240">
@@ -105,7 +105,7 @@ follow [Setup](#setup).
 - **Where should a new VM go?**: free memory, disk and CPU per node for a VM of a given size, best
   fit first.
 - **Copy for AI**: a clean Markdown summary of the estate (hosts, guests with tags, state and
-  addresses, backups, warnings, where Orca runs) to paste into an agent, shown first and copied on
+  addresses, disk use, backups, warnings, where Orca runs) to paste into an agent, shown first and copied on
   request: with addresses; without addresses, a **best-effort filter** that takes IP addresses,
   DNS names, URLs and file paths out of names and tags but cannot recognize every way of writing
   them; or anonymized (every name a placeholder, no tags, VMIDs or addresses), **the mode to use
