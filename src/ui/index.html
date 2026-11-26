@@ -29,6 +29,43 @@
       * {
         box-sizing: border-box;
       }
+      /* Scrollbars: thin, rounded, no track; a faint thumb that shows clearly on hover and while
+         scrolling (main.ts sets .is-scrolling), so where you are stays visible. Chromium uses the
+         ::-webkit-scrollbar rules (6 px); other engines the standard properties. */
+      :root {
+        --scroll-thumb: color-mix(in srgb, var(--orca-foreground, #808080) 14%, transparent);
+        --scroll-thumb-active: color-mix(in srgb, var(--orca-foreground, #808080) 38%, transparent);
+      }
+      @supports not selector(::-webkit-scrollbar) {
+        * {
+          scrollbar-width: thin;
+          scrollbar-color: var(--scroll-thumb) transparent;
+        }
+        *:hover,
+        .is-scrolling {
+          scrollbar-color: var(--scroll-thumb-active) transparent;
+        }
+      }
+      ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+        background: transparent;
+      }
+      ::-webkit-scrollbar-track,
+      ::-webkit-scrollbar-corner {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: var(--scroll-thumb);
+        border-radius: 3px;
+      }
+      :hover::-webkit-scrollbar-thumb,
+      .is-scrolling::-webkit-scrollbar-thumb {
+        background: var(--scroll-thumb-active);
+      }
+      ::-webkit-scrollbar-button {
+        display: none;
+      }
       body {
         margin: 0;
         padding: 10px 12px 24px;
@@ -114,7 +151,6 @@
         border-bottom: 1px solid var(--line);
         margin: 6px 0 10px;
         overflow-x: auto;
-        scrollbar-width: none;
       }
       .tabs button {
         display: flex;

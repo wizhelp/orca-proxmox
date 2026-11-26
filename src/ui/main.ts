@@ -334,6 +334,18 @@ async function start(): Promise<void> {
       if (renderPending && !isDragging()) render()
     }, 10000)
   }
+  // While an area scrolls, its scrollbar thumb shows clearly (index.html), then fades back.
+  const scrolling = new Map<Element, ReturnType<typeof setTimeout>>()
+  document.addEventListener(
+    'scroll',
+    (event) => {
+      const el = event.target instanceof Element ? event.target : document.documentElement
+      el.classList.add('is-scrolling')
+      clearTimeout(scrolling.get(el))
+      scrolling.set(el, setTimeout(() => (el.classList.remove('is-scrolling'), scrolling.delete(el)), 800))
+    },
+    { capture: true, passive: true }
+  )
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return stop()
     resume()
