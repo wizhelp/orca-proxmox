@@ -154,6 +154,28 @@ test('answers: only whole numbered lines of this run, kept across reads, complet
   assert.equal(cipherOf({ pairs: [['secret', '2 REVG'], ['secret', '1 QUJD']] }), null)
 })
 
+test('Undo owns only what the run recorded as done, never what it found there; one script at a time per host', () => {
+  const setup = setupScript(request())
+  // What was there before is recorded as such; the token's permission is journaled too.
+  assert.ok(setup.includes('  mark existing user\n  say reused_user 1'))
+  assert.ok(setup.includes('else\n  mark existing user_acl\nfi'))
+  assert.ok(setup.includes('mark intent token_acl') && setup.includes('mark done token_acl'))
+  const undo = undoScript('pve', RUN, 'fedcba9876543210')
+  assert.ok(undo.includes('made() { grep -q "^done $1') && undo.includes('&& ! grep -qx "existing $1" "$STATE"; }'))
+  for (const item of ['token', 'user', 'user_acl']) assert.ok(undo.includes(`made ${item} && ! undone ${item}`), item)
+  assert.ok(!/\bdid (token|user|user_acl) &&/.test(undo), 'intent alone never removes anything')
+  // An ACL is removed only while it is still there as granted, and intent-only items are reported.
+  assert.ok(undo.indexOf('AL=$(pveum acl list --output-format json) || stop') > undo.indexOf('made user_acl'))
+  assert.ok(undo.includes('say unconfirmed "$UNSURE"'))
+  // Setup, finalize and Undo take the same host-side lock, without waiting, before touching the journal.
+  for (const script of [setup, undo, finalizeScript('pve', RUN, 'fedcba9876543210', TUN, '202611251215Z')]) {
+    const lock = script.indexOf('flock -n 9 || stop')
+    assert.ok(lock > 0 && lock < script.indexOf('STATE='), 'lock first')
+    assert.ok(script.includes('[ "$(stat -c %u "$D")" = 0 ]'), 'the state folder must be root’s own')
+  }
+  assert.ok(setup.includes('( set -C; : > "$STATE" )'), 'a run’s journal is created exclusively')
+})
+
 test('Undo removes only what carries the run’s label, from the host’s own record, key first', () => {
   const tokenOnly = undoScript('pve', RUN, 'fedcba9876543210')
   assert.ok(tokenOnly.includes(`STATE=/var/lib/orca-proxmox-setup/$S`))
@@ -178,9 +200,14 @@ test('Undo removes only what carries the run’s label, from the host’s own re
   assert.ok(policyBlock(8006).includes('PermitOpen 127.0.0.1:8006'))
 })
 
-test('the API permission list gives every privilege name', () => {
-  assert.deepEqual(main.privilegeNames({ '/': { 'Sys.Audit': 1, 'VM.Audit': 1 }, '/vms': { 'VM.Audit': 1, 'VM.PowerMgmt': 0 } }), ['Sys.Audit', 'VM.Audit'])
-  assert.deepEqual(main.privilegeNames(null), [])
+test('the API permission list: every listed privilege counts, whatever its propagate bit; any other shape is refused', () => {
+  // PVE answers 1/0, PBS true/false: 0 and false mean "not inherited further", not "not granted".
+  assert.deepEqual(main.privilegeNames({ '/': { 'Sys.Audit': 1, 'VM.Audit': 1 }, '/vms/100': { 'VM.Audit': 1, 'VM.PowerMgmt': 0 } }), ['Sys.Audit', 'VM.Audit', 'VM.PowerMgmt'])
+  assert.deepEqual(main.privilegeNames({ '/datastore/store1': { 'Datastore.Modify': false }, '/': { 'Sys.Audit': true } }), ['Datastore.Modify', 'Sys.Audit'])
+  assert.deepEqual(main.privilegeNames({}), [])
+  for (const bad of [null, [], 'x', { '/': ['VM.Audit'] }, { '/': null }, { vms: { 'VM.Audit': 1 } }, { '/': { 'VM.Audit': 'yes' } }, { '/': { 'bad name': 1 } }]) {
+    assert.throws(() => main.privilegeNames(bad), /unexpected shape/)
+  }
 })
 
 type Server = (script: string, runId: string) => string[]
@@ -376,7 +403,8 @@ test('Connect via Orca with a tunnel, end to end: checked from this machine befo
 })
 
 test('a token with more than read rights, or an account that is not refused, is not saved', async () => {
-  await mounted(server(), { privileges: { '/': { 'Sys.Audit': 1, 'VM.PowerMgmt': 1 } } })
+  // A write privilege granted on one guest only, not propagating: still refused.
+  await mounted(server(), { privileges: { '/': { 'Sys.Audit': 1, 'VM.Audit': 1 }, '/vms/100': { 'VM.PowerMgmt': 0 } } })
   await worker!.request('setup.detect', { hostKey: X1 })
   const rights = await runJob((await plan()).planId)
   assert.equal(rights.ok, false)

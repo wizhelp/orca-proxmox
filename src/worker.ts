@@ -111,11 +111,20 @@ const TERMINALS_KEY = 'terminals'
 type OpenedTerminal = { handle: string; environment?: string; hostKey: string; at: number }
 
 /** Every privilege name in an /access/permissions answer (path -> privilege -> set). */
+/**
+ * Every privilege name in an /access/permissions answer: path -> privilege -> propagate bit. A
+ * privilege that is listed is granted at that path whatever its bit (0 or false only means it is
+ * not inherited further down), so every listed name counts. Any other shape is refused.
+ */
 export function privilegeNames(answer: unknown): string[] {
+  const isMap = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
+  if (!isMap(answer)) throw new Error('The permission list has an unexpected shape')
   const out = new Set<string>()
-  if (answer && typeof answer === 'object' && !Array.isArray(answer)) {
-    for (const privs of Object.values(answer as Record<string, unknown>)) {
-      if (privs && typeof privs === 'object' && !Array.isArray(privs)) for (const [name, on] of Object.entries(privs as Record<string, unknown>)) if (on) out.add(name)
+  for (const [path, privs] of Object.entries(answer)) {
+    if (!path.startsWith('/') || !isMap(privs)) throw new Error('The permission list has an unexpected shape')
+    for (const [name, bit] of Object.entries(privs)) {
+      if (!/^[A-Za-z][A-Za-z0-9.]*$/.test(name) || !(typeof bit === 'number' || typeof bit === 'boolean')) throw new Error('The permission list has an unexpected shape')
+      out.add(name)
     }
   }
   return [...out].sort()
