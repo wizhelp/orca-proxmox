@@ -78,10 +78,13 @@ function hostOf(baseUrl: string): string {
   }
 }
 
-/** A name for the remote: what the person called the connection, else what the server says. */
-function remoteName(connection: ConnectionConfig, fallback: string | undefined): string {
-  const named = connection.name?.trim()
-  return named || fallback || hostOf(connection.baseUrl)
+/**
+ * The remote's id: what the person called the connection, else its URL's host. Never what the
+ * server answers, so the id (and every key, cache and placement under it) is known from the
+ * configuration alone and stays the same whether or not the server could be read.
+ */
+function remoteName(connection: ConnectionConfig): string {
+  return connection.name?.trim() || hostOf(connection.baseUrl)
 }
 
 const noBackups = (): BackupScan => ({ records: [], available: false, complete: false, gaps: [], warnings: [] })
@@ -89,8 +92,6 @@ const noBackups = (): BackupScan => ({ records: [], available: false, complete: 
 /** One PVE cluster or node, reached directly. */
 export class PveSource implements EstateSource {
   readonly kind = 'pve' as const
-  /** Set by the first inventory; the composite source may rename it when two remotes share a name. */
-  remoteId: string | undefined
 
   constructor(
     private readonly client: ProxmoxClient,
@@ -123,9 +124,10 @@ export class PveSource implements EstateSource {
     if (skipped) warnings.push(`${skipped} malformed entries in the cluster's resource list were skipped.`)
     const cluster = (Array.isArray(status) ? status : []).find((s) => isObj(s) && s.type === 'cluster')
     const nodes = resources.filter((r): r is Extract<PdmResource, { type: 'pve-node' }> => r.type === 'pve-node')
-    this.remoteId ??= remoteName(this.connection, (isObj(cluster) && str(cluster.name)) || (nodes.length === 1 ? nodes[0].node : undefined))
-    const id = this.remoteId
-    const remote: Remote = { id, type: 'pve', online: true, webUrl: this.client.baseUrl, direct: true }
+    const id = remoteName(this.connection)
+    // The cluster's own name (or a standalone node's), for backups whose namespace or owner is named after it.
+    const own = (isObj(cluster) && str(cluster.name)) || (nodes.length === 1 ? nodes[0].node : undefined)
+    const remote: Remote = { id, type: 'pve', online: true, webUrl: this.client.baseUrl, direct: true, ...(own && own !== id ? { alias: own } : {}) }
     const address = safeTarget(hostOf(this.connection.baseUrl))
     const hosts: Host[] = nodes.map((n) => ({
       key: `${id}/${n.node}`,
@@ -193,7 +195,7 @@ export class PveSource implements EstateSource {
   }
 
   async fetchTasks(signal?: AbortSignal): Promise<Task[]> {
-    const id = this.remoteId ?? remoteName(this.connection, undefined)
+    const id = remoteName(this.connection)
     const list = listOf(await this.client.get<unknown>('/cluster/tasks', {}, signal), '/cluster/tasks')
     return list
       .map((t) => (isObj(t) && typeof t.upid === 'string' ? toTask({ upid: `pve:${id}!${t.upid}`, node: str(t.node), starttime: t.starttime as number, endtime: num(t.endtime), status: str(t.status), user: str(t.user), worker_type: str(t.type), worker_id: str(t.id) ?? null }) : null))
@@ -274,7 +276,6 @@ function fromPveResource(r: Record<string, unknown>): Record<string, unknown> | 
 /** One Proxmox Backup Server, reached directly. */
 export class PbsSource implements EstateSource {
   readonly kind = 'pbs' as const
-  remoteId: string | undefined
 
   constructor(
     private readonly client: ProxmoxClient,
@@ -300,8 +301,7 @@ export class PbsSource implements EstateSource {
   }
 
   async fetchInventory({ signal }: { maxAgeSeconds: number; signal?: AbortSignal }): Promise<Inventory> {
-    this.remoteId ??= remoteName(this.connection, undefined)
-    const id = this.remoteId
+    const id = remoteName(this.connection)
     const [version, status, stores] = await Promise.all([
       this.client.get<unknown>('/version', {}, signal).catch(() => ({})),
       this.client.get<unknown>('/nodes/localhost/status', {}, signal).catch((error: unknown) => {
@@ -374,7 +374,7 @@ export class PbsSource implements EstateSource {
   }
 
   async fetchTasks(signal?: AbortSignal): Promise<Task[]> {
-    const id = this.remoteId ?? remoteName(this.connection, undefined)
+    const id = remoteName(this.connection)
     const list = listOf(await this.client.get<unknown>('/nodes/localhost/tasks', { limit: 50 }, signal), '/nodes/localhost/tasks')
     return list
       .map((t) => (isObj(t) && typeof t.upid === 'string' ? toTask({ upid: `pbs:${id}!${t.upid}`, node: 'localhost', starttime: t.starttime as number, endtime: num(t.endtime), status: str(t.status), user: str(t.user), worker_type: str(t.worker_type), worker_id: str(t.worker_id) ?? null }) : null))

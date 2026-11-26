@@ -53,8 +53,13 @@ export type DiskEntry = { at: number; used?: number; total?: number; unknown?: D
 export const DISK_PER_REFRESH = 24
 export const DISK_PARALLEL = 2
 export const DISK_EVERY_MS = 10 * 60 * 1000
-/** After an 'unsupported' or 'no-permission' answer, that remote is not asked again for this long. */
+/**
+ * After an 'unsupported' answer (the API has no agent call) that remote, after 'no-permission'
+ * that VM (a token's rights can differ per VM), is not asked again for this long.
+ */
 export const DISK_BACKOFF_MS = 6 * 60 * 60 * 1000
+/** No new agent read starts after this long in one refresh, so slow agents never hold it up. */
+export const DISK_BUDGET_MS = 20 * 1000
 
 /**
  * Brings the per-guest cache up to date: reads the agent of running VMs whose entry is missing or
@@ -65,19 +70,21 @@ export async function refreshGuestDisks(
   cache: Map<string, DiskEntry>,
   read: (guest: Guest) => Promise<unknown>,
   now: number,
-  blocked: Map<string, { until: number; reason: DiskUnknown }>
+  blocked: Map<string, { until: number; reason: DiskUnknown }>,
+  clock: () => number = Date.now
 ): Promise<void> {
+  const started = clock()
   const due = guests
     .filter((g) => g.type === 'qemu' && g.status === 'running' && !g.template)
     .filter((g) => !((blocked.get(g.remote)?.until ?? 0) > now))
     .filter((g) => {
       const entry = cache.get(g.key)
-      return !entry || now - entry.at >= DISK_EVERY_MS
+      return !entry || now - entry.at >= (entry.unknown === 'no-permission' ? DISK_BACKOFF_MS : DISK_EVERY_MS)
     })
     .sort((a, b) => (cache.get(a.key)?.at ?? -Infinity) - (cache.get(b.key)?.at ?? -Infinity))
     .slice(0, DISK_PER_REFRESH)
   await mapLimit(due, DISK_PARALLEL, async (guest) => {
-    if ((blocked.get(guest.remote)?.until ?? 0) > now) return
+    if ((blocked.get(guest.remote)?.until ?? 0) > now || clock() - started > DISK_BUDGET_MS) return
     try {
       const usage = fsUsage(await read(guest))
       cache.set(guest.key, usage ? { at: now, ...usage } : { at: now, unknown: 'no-agent' })
@@ -85,7 +92,7 @@ export async function refreshGuestDisks(
       if (error instanceof ApiError && (error.info.kind === 'auth' || error.info.kind === 'fingerprint-mismatch')) throw error
       const reason = unknownReason(error)
       cache.set(guest.key, { at: now, unknown: reason })
-      if (reason === 'unsupported' || reason === 'no-permission') blocked.set(guest.remote, { until: now + DISK_BACKOFF_MS, reason })
+      if (reason === 'unsupported') blocked.set(guest.remote, { until: now + DISK_BACKOFF_MS, reason })
     }
   })
 }
@@ -95,7 +102,7 @@ export async function refreshGuestDisks(
  * A running container's use is remembered in `cache`, so that once stopped (Proxmox then reports
  * 0) it shows the last use measured, marked as such, rather than an empty disk.
  */
-export function withDiskUsage(guests: readonly Guest[], cache: Map<string, DiskEntry> | undefined, blocked: Map<string, { until: number; reason: DiskUnknown }> | undefined, now: number): Guest[] {
+export function withDiskUsage(guests: readonly Guest[], cache: Map<string, DiskEntry> | undefined, blocked: Map<string, { until: number; reason: DiskUnknown }> | undefined, now: number, agentOff = false): Guest[] {
   return guests.map((g) => {
     const next: Guest = { ...g }
     delete next.diskUsage
@@ -115,7 +122,8 @@ export function withDiskUsage(guests: readonly Guest[], cache: Map<string, DiskE
       return next
     }
     const block = blocked?.get(g.remote)
-    if (entry && entry.total) next.diskUsage = { used: entry.used ?? 0, total: entry.total, from }
+    if (agentOff) next.diskUnknown = 'off'
+    else if (entry && entry.total) next.diskUsage = { used: entry.used ?? 0, total: entry.total, from }
     else if (block && block.until > now) next.diskUnknown = block.reason
     else next.diskUnknown = entry?.unknown ?? 'not-read'
     return next

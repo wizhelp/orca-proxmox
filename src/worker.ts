@@ -246,6 +246,7 @@ export default function activate(orca: OrcaWorkerApi): void {
       backupStaleHours: numberSetting(raw.backupStaleHours, DEFAULT_SETTINGS.backupStaleHours, 1, 24 * 90),
       backupRefreshMinutes: numberSetting(raw.backupRefreshMinutes, DEFAULT_SETTINGS.backupRefreshMinutes, 1, 24 * 60),
       orcaAwareness: flag(raw.orcaAwareness, DEFAULT_SETTINGS.orcaAwareness),
+      guestAgentDisk: flag(raw.guestAgentDisk, DEFAULT_SETTINGS.guestAgentDisk),
       statusBar: flag(raw.statusBar, DEFAULT_SETTINGS.statusBar),
       alertRemoteOffline: flag(raw.alertRemoteOffline, DEFAULT_SETTINGS.alertRemoteOffline),
       alertGuestStopped: flag(raw.alertGuestStopped, DEFAULT_SETTINGS.alertGuestStopped),
@@ -326,6 +327,8 @@ export default function activate(orca: OrcaWorkerApi): void {
     if (input.id && input.id !== 'new' && !current) throw new InputError('That connection no longer exists; reload Settings.')
     const next: ConnectionConfig = { ...validate(input, id), revision: randomUUID() }
     if (list.some((c) => c.id !== id && c.baseUrl === next.baseUrl)) throw new InputError('Another connection already uses this URL.')
+    // One PDM: its remotes keep PDM's ids, which a second PDM could repeat.
+    if (next.kind === 'pdm' && list.some((c) => c.id !== id && c.kind === 'pdm')) throw new InputError('There is a PDM connection already; edit it, or remove it first. Add PVE and PBS servers beside it.')
     const fresh = cleanSecret(input.secret)
     if (fresh && (await secretsProtection()) === 'unavailable') {
       throw new InputError('Orca cannot encrypt secrets on this machine (no OS keyring), and this plugin will not store the token in plain text.')
@@ -411,6 +414,11 @@ export default function activate(orca: OrcaWorkerApi): void {
     }
     const input: ConnectionInput = { ...fields, kind: fields.kind as SourceKind | undefined, secret }
     const candidate: ConnectionConfig = { ...validate(input, 'import') }
+    const existing = await loadConnections()
+    if (candidate.kind === 'pdm' && existing.some((c) => c.kind === 'pdm' && c.baseUrl !== candidate.baseUrl)) {
+      await finish(false, 'There is a PDM connection already: a second one is not imported (remove the current one in Settings first). Nothing was changed.', fileFate)
+      return true
+    }
     let access: AccessCheck
     try {
       const client = new ProxmoxClient({ connection: candidate, secret: secret.trim(), transport, probe })

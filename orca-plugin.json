@@ -83,6 +83,13 @@
         "default": true
       },
       {
+        "key": "guestAgentDisk",
+        "title": "Disk use inside VMs",
+        "description": "Read each running VM's filesystem use from its QEMU guest agent (get-fsinfo; on PVE 9 the PVEAuditor role allows it). Off: the plugin never asks the agent, and VMs show their allocated size.",
+        "type": "boolean",
+        "default": true
+      },
+      {
         "key": "statusBar",
         "title": "Status bar item",
         "description": "Show remotes up and the main issue (stale backups, failed tasks, filling disks) in the status bar; pressing it opens the panel.",

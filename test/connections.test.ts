@@ -62,8 +62,8 @@ test('PDM plus a direct PVE and PBS: each tested and saved with its own secret, 
   if (answer.state !== 'ok') return
   assert.equal(answer.snapshot.connectionId, estateScope(config.connections))
   const remotes = answer.snapshot.remotes.map((r) => r.id)
-  assert.ok(remotes.includes('lab') && remotes.includes('backup-x') && remotes.includes('pve-fsn'), remotes.join(','))
-  assert.ok(answer.snapshot.guests.some((g) => g.key === 'lab/501'))
+  assert.ok(remotes.includes('lab (direct)') && remotes.includes('backup-x (direct)') && remotes.includes('pve-fsn'), remotes.join(','))
+  assert.ok(answer.snapshot.guests.some((g) => g.key === 'lab (direct)/501'))
   assert.equal(answer.snapshot.pdmUrl, 'https://pdm.example.test:8443')
   // Each server only ever saw its own token, in its own header form.
   const auth = (host: string) => new Set(requests.filter((r) => r.url.host === host).map((r) => r.headers.Authorization))
@@ -91,6 +91,8 @@ test('editing one connection keeps the others; a URL can be used once; names are
   await assert.rejects(worker!.request('config.save', { ...PBS, baseUrl: PVE.baseUrl }), /already uses this URL/)
   await assert.rejects(worker!.request('config.save', { ...PBS, name: 'bad name!' }), /The name may hold/)
   await assert.rejects(worker!.request('config.save', { ...PDM, id: 'new', baseUrl: 'https://pdm2.example.test:8443', name: 'x' }), /PDM connection has no name/)
+  // One PDM at most: its remotes keep PDM's ids, which a second PDM could repeat.
+  await assert.rejects(worker!.request('config.save', { ...PDM, id: 'new', baseUrl: 'https://pdm2.example.test:8443' }), /There is a PDM connection already/)
 })
 
 test('a connection without its secret is one unreachable remote; the others still load', async () => {
@@ -100,7 +102,7 @@ test('a connection without its secret is one unreachable remote; the others stil
   const answer = await worker!.request('estate.get', {})
   assert.equal(answer.state, 'ok')
   if (answer.state !== 'ok') return
-  const lab = answer.snapshot.remotes.find((r) => r.id === 'lab')!
+  const lab = answer.snapshot.remotes.find((r) => r.id === 'lab (direct)')!
   assert.equal(lab.online, false)
   assert.ok(answer.snapshot.remotes.some((r) => r.id === 'pve-fsn' && r.online))
 })

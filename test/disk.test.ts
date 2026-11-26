@@ -2,7 +2,7 @@
 // time and seldom; unknown (with the reason) rather than 0 % when it cannot be read.
 import { assert, test } from 'orca/testing'
 import { ApiError } from '../src/proxmox/client'
-import { DISK_EVERY_MS, DISK_PER_REFRESH, fsUsage, refreshGuestDisks, unknownReason, withDiskUsage, type DiskEntry } from '../src/proxmox/agent'
+import { DISK_BACKOFF_MS, DISK_BUDGET_MS, DISK_EVERY_MS, DISK_PER_REFRESH, fsUsage, refreshGuestDisks, unknownReason, withDiskUsage, type DiskEntry } from '../src/proxmox/agent'
 import type { DiskUnknown, Guest } from '../src/model'
 import { diskShare, diskUnknownText, sortGuests } from '../src/ui/logic'
 import { diskWarnings } from '../src/features/capacity'
@@ -113,4 +113,48 @@ test('a stopped container is not an empty one: its last use while running, else 
   assert.equal(never.diskUsage, undefined)
   assert.equal(diskShare(never), undefined)
   assert.equal(diskUnknownText(never), 'unknown (stopped)')
+})
+
+test('a refusal is about that VM: the others are still read, it is asked again only after hours', async () => {
+  const vms = [guest(110, 'qemu'), guest(111, 'qemu'), guest(112, 'qemu')]
+  const cache = new Map<string, DiskEntry>()
+  const blocked = new Map<string, { until: number; reason: DiskUnknown }>()
+  const asked: number[] = []
+  const read = async (g: Guest) => {
+    asked.push(g.vmid)
+    if (g.vmid === 110) throw new ApiError({ kind: 'forbidden', status: 403, message: 'no' })
+    return LINUX_FS
+  }
+  await refreshGuestDisks(vms, cache, read, 1_000, blocked)
+  assert.deepEqual(asked.sort(), [110, 111, 112])
+  assert.equal(blocked.size, 0, 'a 403 does not stop the whole remote')
+  const shown = withDiskUsage(vms, cache, blocked, 1_000)
+  assert.deepEqual(shown.map((g) => g.diskUnknown ?? 'known'), ['no-permission', 'known', 'known'])
+  asked.length = 0
+  await refreshGuestDisks(vms, cache, read, 1_000 + DISK_EVERY_MS, blocked)
+  assert.deepEqual(asked.sort(), [111, 112], 'the refused VM waits longer')
+  asked.length = 0
+  await refreshGuestDisks(vms, cache, read, 1_000 + DISK_BACKOFF_MS, blocked)
+  assert.ok(asked.includes(110))
+})
+
+test('slow agents cannot hold a refresh up: no new read starts after the time budget', async () => {
+  const vms = Array.from({ length: 10 }, (_, i) => guest(120 + i, 'qemu'))
+  let t = 0
+  let calls = 0
+  await refreshGuestDisks(vms, new Map(), async () => {
+    calls++
+    t += DISK_BUDGET_MS / 2 // every read takes half the budget
+    return LINUX_FS
+  }, 1_000, new Map(), () => t)
+  assert.ok(calls <= 4, String(calls))
+})
+
+test('reading the guest agent turned off: VMs show their allocated size, nothing from agents', () => {
+  const cache = new Map<string, DiskEntry>([['r/130', { at: 1, used: GiB, total: 2 * GiB }]])
+  const [vm, ct] = withDiskUsage([guest(130, 'qemu'), guest(131, 'lxc', { disk: GiB, maxdisk: 4 * GiB })], cache, undefined, 5, true)
+  assert.equal(vm.diskUnknown, 'off')
+  assert.equal(vm.diskUsage, undefined)
+  assert.equal(diskUnknownText(vm), 'unknown (reading the guest agent is off in Settings)')
+  assert.deepEqual(ct.diskUsage, { used: GiB, total: 4 * GiB, from: 'container' }, 'containers are not the agent')
 })

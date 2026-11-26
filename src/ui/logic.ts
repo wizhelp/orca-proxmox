@@ -89,7 +89,8 @@ const DISK_UNKNOWN_TEXT: Record<NonNullable<Guest['diskUnknown']>, string> = {
   'no-permission': 'unknown (the token may not ask the guest agent)',
   unsupported: 'unknown (the API offers no guest agent call)',
   stopped: 'unknown (stopped)',
-  'not-read': 'unknown (not read yet)'
+  'not-read': 'unknown (not read yet)',
+  off: 'unknown (reading the guest agent is off in Settings)'
 }
 
 /** Why a guest's disk use is unknown, in words. */

@@ -32,6 +32,11 @@ export type BackupOptions = {
   complete?: boolean
   /** Remotes PDM cannot reach: their guests are not listed, so their snapshots are no orphans. */
   offlineRemotes?: readonly string[]
+  /**
+   * Remote id -> the name its own server uses, where they differ (a cluster reached directly
+   * beside PDM): a namespace or owner named either way points at that remote.
+   */
+  aliases?: Readonly<Record<string, string>>
 }
 
 const GUEST_BACKUP_TYPE = { qemu: 'vm', lxc: 'ct' } as const
@@ -60,11 +65,15 @@ export function attachBackups(
   records: readonly BackupRecord[],
   options: BackupOptions
 ): { guests: Guest[]; missing: number; orphans: OrphanBackup[] } {
-  const knownRemotes = new Set(guests.map((g) => g.remote.toLowerCase()))
+  // A hint (namespace part or owner) -> the remotes it names: by id, and by the server's own name.
+  const named = new Map<string, Set<string>>()
+  const name = (hint: string, remote: string) => named.set(hint.toLowerCase(), (named.get(hint.toLowerCase()) ?? new Set()).add(remote.toLowerCase()))
+  for (const g of guests) name(g.remote, g.remote)
+  for (const [remote, alias] of Object.entries(options.aliases ?? {})) name(alias, remote)
   const byGuest = new Map<string, { record: BackupRecord; owners: string[] }[]>()
   for (const record of records) {
     const key = `${record.type}/${record.id}`
-    const entry = { record, owners: recordHints(record).filter((hint) => knownRemotes.has(hint)) }
+    const entry = { record, owners: [...new Set(recordHints(record).flatMap((hint) => [...(named.get(hint) ?? [])]))] }
     const list = byGuest.get(key)
     if (list) list.push(entry)
     else byGuest.set(key, [entry])
@@ -133,9 +142,9 @@ function findOrphans(
     if (type !== 'vm' && type !== 'ct') continue
     for (const { record, owners } of entries) {
       const owner = owners[0]
-      // A guest on a remote PDM cannot reach is simply not listed: its snapshot proves nothing.
-      if (owner ? offline.has(owner) : offline.size > 0) continue
-      const orphaned = owner ? !present.has(`${owner}|${key}`) : !anywhere.has(key)
+      // A guest on a remote that cannot be reached is simply not listed: its snapshot proves nothing.
+      if (owner ? owners.some((o) => offline.has(o)) : offline.size > 0) continue
+      const orphaned = owner ? !owners.some((o) => present.has(`${o}|${key}`)) : !anywhere.has(key)
       if (!orphaned) continue
       const orphanKey = `${owner ?? ''}|${key}`
       const previous = newest.get(orphanKey)

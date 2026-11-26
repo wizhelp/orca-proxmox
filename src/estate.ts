@@ -198,7 +198,10 @@ export class EstateService {
     // VM disk use from guest agents: a few VMs per refresh, each every few minutes (agent.ts).
     if (this.disks?.scope !== scope) this.disks = { scope, cache: new Map(), blocked: new Map() }
     const disks = this.disks
-    if (source.readGuestFs) {
+    const agentOff = !settings.guestAgentDisk
+    // Turned off in Settings: nothing read from agents before is shown either.
+    if (agentOff) for (const g of inventory.guests) if (g.type === 'qemu') disks.cache.delete(g.key)
+    if (source.readGuestFs && !agentOff) {
       try {
         await refreshGuestDisks(inventory.guests, disks.cache, (g) => source.readGuestFs!(g, signal), this.now(), disks.blocked)
       } catch (error) {
@@ -206,13 +209,14 @@ export class EstateService {
       }
       live()
     }
-    inventory.guests = withDiskUsage(inventory.guests, disks.cache, disks.blocked, this.now())
+    inventory.guests = withDiskUsage(inventory.guests, disks.cache, disks.blocked, this.now(), agentOff)
     const { guests, missing, orphans } = attachBackups(inventory.guests, backups.scan?.records ?? [], {
       now,
       staleHours: settings.backupStaleHours,
       available,
       complete,
-      offlineRemotes
+      offlineRemotes,
+      aliases: Object.fromEntries(inventory.remotes.filter((r) => r.alias).map((r) => [r.id, r.alias!]))
     })
     const pbsRemotes = inventory.remotes.filter((r) => r.type === 'pbs')
     const snapshot: EstateSnapshot = {

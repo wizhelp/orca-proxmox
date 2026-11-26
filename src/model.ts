@@ -83,6 +83,8 @@ export type Remote = {
   nodePort?: number
   /** Not one of PDM's remotes (reached directly, or a connection that could not be read): PDM has no page for it. */
   direct?: boolean
+  /** The name its own server uses (a cluster, node or host name), where the id differs from it. */
+  alias?: string
 }
 
 /** A PVE storage on a node (from /resources/list; `content` only where PDM reports it). */
@@ -204,7 +206,7 @@ export type Guest = {
  * token may not ask the agent, the API offers no agent call (PDM), the VM is stopped, or not read
  * yet (it is read every few minutes, a few VMs at a time).
  */
-export type DiskUnknown = 'no-agent' | 'no-permission' | 'unsupported' | 'stopped' | 'not-read'
+export type DiskUnknown = 'no-agent' | 'no-permission' | 'unsupported' | 'stopped' | 'not-read' | 'off'
 
 export type Datastore = {
   key: string
@@ -358,6 +360,8 @@ export type PluginSettings = {
   backupRefreshMinutes: number
   /** Show Orca hosts, bots and workspaces on the estate (read with the orca CLI). */
   orcaAwareness: boolean
+  /** Read disk use inside running VMs from their QEMU guest agent (`get-fsinfo`). */
+  guestAgentDisk: boolean
   /** Show the estate in the status bar. */
   statusBar: boolean
   /** Notify when a remote goes offline, a running guest stops, a backup fails or goes stale. */
@@ -372,6 +376,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   backupStaleHours: 26,
   backupRefreshMinutes: 5,
   orcaAwareness: true,
+  guestAgentDisk: true,
   statusBar: true,
   alertRemoteOffline: true,
   alertGuestStopped: true,

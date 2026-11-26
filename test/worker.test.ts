@@ -62,6 +62,7 @@ test('starts unconfigured', async () => {
     backupStaleHours: 26,
     backupRefreshMinutes: 5,
     orcaAwareness: true,
+    guestAgentDisk: true,
     statusBar: true,
     alertRemoteOffline: true,
     alertGuestStopped: true,

@@ -178,7 +178,7 @@ export function settingsView(): HTMLElement {
             'set-kind',
             'Connect to',
             kind,
-            (['pdm', 'pve', 'pbs'] as SourceKind[]).map((k) => ({ value: k, label: KIND_LABEL[k] })),
+            (['pdm', 'pve', 'pbs'] as SourceKind[]).filter((k) => k !== 'pdm' || !list.some((c) => c.kind === 'pdm')).map((k) => ({ value: k, label: KIND_LABEL[k] })),
             (v) => edit({ kind: v as SourceKind, name: v === 'pdm' ? '' : f.name })
           )
         )
