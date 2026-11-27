@@ -63,6 +63,10 @@ export function orcaView(snap: EstateSnapshot): HTMLElement {
   if (!view) return emptyState('bot', 'Orca awareness is off', 'Turn on “Show where Orca runs” under Settings → Plugins → Proxmox.')
   const places = orcaByPlace(view)
   const elsewhere = orcaElsewhere(view)
+  // This machine, and hosts set to "not on Proxmox" by hand, are where they belong; every other
+  // host without a place is listed apart, each with its own Place selector.
+  const settled = elsewhere.filter((o) => o.kind === 'local' || o.match === 'manual')
+  const unplaced = elsewhere.filter((o) => !settled.includes(o))
   const working = view.workspaces.reduce((n, w) => n + w.agents.filter((a) => a.state === 'working').length, 0)
   const refs = applyOrder([...places.keys()], orderKey, app.order)
 
@@ -87,8 +91,8 @@ export function orcaView(snap: EstateSnapshot): HTMLElement {
     })
   )
   makeSortable({ container: cards, handle: '.card-head', onDrop: (keys) => actions.saveOrder(withLevel(app.order, keys)) })
-
   const options = placementOptions(snap)
+
   return h(
     'div',
     { class: 'view stack' },
@@ -103,8 +107,25 @@ export function orcaView(snap: EstateSnapshot): HTMLElement {
       working ? chip(`${working} agent${working === 1 ? '' : 's'} working`, 'info', 'activity') : null
     ),
     cards,
-    elsewhere.length
-      ? h('article', { class: 'card' }, h('header', { class: 'card-head' }, icon('monitor', 16), h('span', { class: 'card-title' }, 'Not on Proxmox')), h('div', { class: 'muted small' }, 'This machine, and Orca hosts not placed on the estate.'), elsewhere.map((o) => hostBlock(o, view)))
+    unplaced.length
+      ? h(
+          'article',
+          { class: 'card unplaced' },
+          h('header', { class: 'card-head' }, icon('alert', 16), h('span', { class: 'card-title' }, 'Not placed yet'), chip(String(unplaced.length), 'warn')),
+          h('div', { class: 'muted small' }, 'Orca does not say where these run, and no node or guest matched them. Paired servers without an SSH target are asked once for their own host name and addresses; place any that remain here.'),
+          unplaced.map((o) =>
+            h(
+              'div',
+              { class: 'stack-sm' },
+              hostBlock(o, view),
+              o.identity ? h('div', { class: 'muted small' }, `${o.identity.from === 'server' ? 'It reports' : 'Its endpoint is'} ${[...o.identity.names, ...o.identity.addresses].join(', ')}; no node or guest has that name or address.`) : null,
+              select(`place-now-${o.key}`, `Place ${orcaHostLabel(o)} on`, placementValue(o), options, (value) => void link(o.key, value), false)
+            )
+          )
+        )
+      : null,
+    settled.length
+      ? h('article', { class: 'card' }, h('header', { class: 'card-head' }, icon('monitor', 16), h('span', { class: 'card-title' }, 'Not on Proxmox')), h('div', { class: 'muted small' }, 'This machine, and Orca hosts set as not on Proxmox.'), settled.map((o) => hostBlock(o, view)))
       : null,
     h(
       'details',
