@@ -43,7 +43,8 @@ export function endpointHost(env: CliEnvironment | undefined): string | undefine
   } catch {
     return undefined
   }
-  if (!host || host === 'localhost' || host === '::1' || host === '0.0.0.0' || /^127\./.test(host) || /^::ffff:127\./.test(host)) return undefined
+  host = host.replace(/\.$/, '')
+  if (!host || host === 'localhost' || host === '::1' || host === '0.0.0.0' || host === '::' || /^127\./.test(host) || /^::ffff:(127\.|7f[0-9a-f]{2}:)/.test(host)) return undefined
   return /^[a-z0-9.:-]{1,253}$/.test(host) ? host : undefined
 }
 type CliBot = { id?: string; name?: string; agent?: string; paused?: boolean; server?: { name?: string; on?: string } }
@@ -91,6 +92,7 @@ function toWorkspaces(worktrees: CliWorktree[], runtimeHostKey: string, server?:
         status: w.sidebarStatus ?? w.status ?? 'inactive',
         agents
       }
+      if (w.hostId === 'local') workspace.ownRuntime = true
       if (w.bot) workspace.bot = w.bot
       if (w.worktreeId) workspace.worktreeId = w.worktreeId
       if (server) {

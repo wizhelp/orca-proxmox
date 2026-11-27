@@ -360,6 +360,11 @@ export type OrcaWorkspace = {
   environment?: string
   /** That server's name, to show. */
   serverName?: string
+  /**
+   * The runtime that lists it runs it itself (its `hostId` is `local` there), rather than over an
+   * SSH target of its own: for a paired server, a workspace on that very machine.
+   */
+  ownRuntime?: boolean
 }
 
 export type OrcaBot = {
