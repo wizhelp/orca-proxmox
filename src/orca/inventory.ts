@@ -23,7 +23,29 @@ export type OrcaInventory = {
 }
 
 type CliHost = { kind?: string; name?: string; id?: string; machineName?: string; connected?: boolean }
-type CliEnvironment = { id?: string; name?: string; orcadDeployment?: { sshTargetId?: string } }
+type CliEnvironment = {
+  id?: string
+  name?: string
+  runtimeId?: string
+  endpoints?: { id?: string; endpoint?: string }[]
+  preferredEndpointId?: string
+  orcadDeployment?: { sshTargetId?: string }
+}
+
+/** The host of a paired server's endpoint when it names the machine (not loopback), else undefined. */
+export function endpointHost(env: CliEnvironment | undefined): string | undefined {
+  const list = Array.isArray(env?.endpoints) ? env!.endpoints : []
+  const chosen = list.find((e) => e?.id && e.id === env?.preferredEndpointId) ?? list[0]
+  if (typeof chosen?.endpoint !== 'string') return undefined
+  let host: string
+  try {
+    host = new URL(chosen.endpoint).hostname.replace(/^\[|\]$/g, '').toLowerCase()
+  } catch {
+    return undefined
+  }
+  if (!host || host === 'localhost' || host === '::1' || host === '0.0.0.0' || /^127\./.test(host) || /^::ffff:127\./.test(host)) return undefined
+  return /^[a-z0-9.:-]{1,253}$/.test(host) ? host : undefined
+}
 type CliBot = { id?: string; name?: string; agent?: string; paused?: boolean; server?: { name?: string; on?: string } }
 type CliWorktree = {
   worktreeId?: string
@@ -109,8 +131,12 @@ export async function readOrcaInventory(run: CliRunner): Promise<OrcaInventory> 
       hosts.push(host)
     } else if (h.kind === 'environment') {
       const host: OrcaHost = { key: `env:${h.id}`, kind: 'environment', name: h.name || h.id }
-      const via = environments.get(h.id)?.orcadDeployment?.sshTargetId
+      const env = environments.get(h.id)
+      const via = env?.orcadDeployment?.sshTargetId
       if (via) host.viaSsh = sshKey(via)
+      if (typeof env?.runtimeId === 'string' && env.runtimeId) host.runtimeId = env.runtimeId.slice(0, 120)
+      const endpoint = endpointHost(env)
+      if (endpoint) host.identity = /^[0-9.]+$|:/.test(endpoint) ? { names: [], addresses: [endpoint], from: 'endpoint' } : { names: [endpoint], addresses: [], from: 'endpoint' }
       hosts.push(host)
     }
   }

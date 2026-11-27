@@ -3,8 +3,10 @@
 // In order, the first that applies wins:
 //   1. manual: a link the person set in the panel (or "not on Proxmox");
 //   2. via-ssh: a paired server runs where the SSH target its orcad was deployed over runs;
-//   3. address: the host's name is an IP address one node or guest has;
-//   4. name: the host's name is a node's, a single-node remote's, a guest's name or hostname.
+//   3. identified: a paired server's own addresses, then names (its endpoint's host, or what it
+//      reported itself: orca/identify.ts), as below;
+//   4. address: the host's name is an IP address one node or guest has;
+//   5. name: the host's name is a node's, a single-node remote's, a guest's name or hostname.
 // Only a unique match counts: a name or private address shared by two guests places nothing.
 import type { Guest, Host, OrcaHost, OrcaMatch, ProxmoxRef } from '../model'
 
@@ -100,6 +102,8 @@ export function placeOrcaHosts(
       const via = placed.get(host.viaSsh)
       if (via?.runsOn) set(via.runsOn, 'via-ssh')
     }
+    for (const address of host.identity?.addresses ?? []) set(byAddress(address), 'identified')
+    for (const name of host.identity?.names ?? []) set(byAddress(name) ?? byName(name), 'identified')
     set(byAddress(host.name), 'address')
     set(byName(host.name), 'name')
     return out

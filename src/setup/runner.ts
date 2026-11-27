@@ -41,8 +41,9 @@ export function hostShell(host: OrcaHost, workspaces: readonly OrcaWorkspace[]):
  * through `sudo -n` (never a password prompt). Only base64 is typed, so the line itself can never
  * look like one of the script's answers. A leading space keeps it out of most shells' history.
  */
-export function commandLine(script: string): string {
+export function commandLine(script: string, asRoot = true): string {
   const b64 = gzipSync(Buffer.from(script, 'utf8'), { level: 9 }).toString('base64')
+  if (!asRoot) return ` sh -c 's=$(printf %s ${b64} | base64 -d | gunzip) && exec sh -c "$s"'`
   return ` sh -c 's=$(printf %s ${b64} | base64 -d | gunzip) && if [ "$(id -u)" = 0 ]; then exec sh -c "$s"; else exec sudo -n sh -c "$s"; fi'`
 }
 
@@ -83,8 +84,8 @@ export type RunResult = ScriptAnswer & {
 
 const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex')
 
-export async function runScript(deps: RunDeps, shell: HostShell, script: string, runId: string, title: string, timeoutMs: number): Promise<RunResult> {
-  const created = (await deps.run(['terminal', 'create', ...env(shell), `--worktree=${shell.worktree}`, `--title=${title.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 60)}`, `--command=${commandLine(script)}`], 30000)) as {
+export async function runScript(deps: RunDeps, shell: HostShell, script: string, runId: string, title: string, timeoutMs: number, asRoot = true): Promise<RunResult> {
+  const created = (await deps.run(['terminal', 'create', ...env(shell), `--worktree=${shell.worktree}`, `--title=${title.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 60)}`, `--command=${commandLine(script, asRoot)}`], 30000)) as {
     terminal?: { handle?: unknown }
   } | null
   const handle = typeof created?.terminal?.handle === 'string' ? created.terminal.handle : ''

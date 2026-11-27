@@ -32,6 +32,7 @@ import { createSource, type AccessCheck } from './proxmox/source'
 import { cliEnvironment, nodeCliRunner } from './orca/cli'
 import type { CliRunner } from './orca/inventory'
 import { parseLink, type OrcaLinks } from './orca/match'
+import { ServerIdentities } from './orca/identify'
 import { OrcaService } from './orca/service'
 import { switchArgs, terminalPlan } from './orca/terminal'
 import { Background } from './background'
@@ -264,7 +265,14 @@ export default function activate(orca: OrcaWorkerApi): void {
   /** Which PDM cluster each enrich-only connection adds to, for the current configuration. */
   const enrichBindings: EnrichBindings = new Map()
   const estate = new EstateService(() => clock())
-  const orcaView = new OrcaService(() => (cliRunner ?? nodeCliRunner)(), () => clock())
+  const identities = new ServerIdentities(() => ({
+    run: (cliRunner ?? nodeCliRunner)(),
+    sleep: (ms) => sleep(ms),
+    now: () => clock(),
+    log: (text) => log(text),
+    storage: { get: (key) => orca.storage.get(key), set: (key, value) => orca.storage.set(key, value as JsonValue) }
+  }))
+  const orcaView = new OrcaService(() => (cliRunner ?? nodeCliRunner)(), () => clock(), identities)
 
   /** Every message logged passes through here, so a secret that slipped into one is masked. */
   const knownSecrets = new Set<string>()

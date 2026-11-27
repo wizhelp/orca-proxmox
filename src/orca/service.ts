@@ -2,6 +2,7 @@
 // the CLI on every panel poll, and places it on an estate snapshot.
 import type { EstateSnapshot, OrcaView } from '../model'
 import { readOrcaInventory, type CliRunner, type OrcaInventory } from './inventory'
+import type { ServerIdentities } from './identify'
 import { placeOrcaHosts, type OrcaLinks } from './match'
 
 const MAX_AGE_MS = 20000
@@ -12,7 +13,9 @@ export class OrcaService {
 
   constructor(
     private readonly run: () => CliRunner,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    /** Paired servers Orca does not identify: asked themselves, once per runtime (identify.ts). */
+    private readonly identities?: ServerIdentities
   ) {}
 
   private async refresh(force: boolean): Promise<void> {
@@ -39,9 +42,12 @@ export class OrcaService {
     await this.refresh(force)
     const cached = this.cached!
     const inventory = cached.inventory ?? { hosts: [], workspaces: [], bots: [], warnings: [] }
+    const hosts = this.identities ? await this.identities.apply(inventory.hosts) : inventory.hosts
+    const placed = placeOrcaHosts(hosts, snapshot, links)
+    this.identities?.ask(placed, inventory.workspaces)
     const view: OrcaView = {
       fetchedAt: cached.at,
-      hosts: placeOrcaHosts(inventory.hosts, snapshot, links),
+      hosts: placed,
       workspaces: inventory.workspaces,
       bots: inventory.bots,
       warnings: inventory.warnings

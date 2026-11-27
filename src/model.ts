@@ -312,7 +312,7 @@ export type EstateSnapshot = {
 export type ProxmoxRef = { kind: 'node' | 'guest'; key: string }
 
 /** How an Orca host was placed: set by hand, by name, by IP address, or through the SSH target its orcad was deployed over. */
-export type OrcaMatch = 'manual' | 'name' | 'address' | 'via-ssh'
+export type OrcaMatch = 'manual' | 'name' | 'address' | 'via-ssh' | 'identified'
 
 export type OrcaHostKind = 'local' | 'ssh' | 'environment'
 
@@ -333,6 +333,13 @@ export type OrcaHost = {
   paired?: { key: string; name: string }
   runsOn?: ProxmoxRef
   match?: OrcaMatch
+  /** Paired servers: the runtime Orca reaches now (an identification is kept per runtime). */
+  runtimeId?: string
+  /**
+   * Paired servers: what identifies the machine beyond its label: the host of a non-loopback
+   * endpoint, or the names and addresses the server reported itself (orca/identify.ts).
+   */
+  identity?: { names: string[]; addresses: string[]; from: 'endpoint' | 'server' }
 }
 
 export type OrcaAgent = { agent: string; state: string }

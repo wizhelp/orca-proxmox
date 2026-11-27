@@ -160,6 +160,22 @@ stop() { say stop "$1"; finish stop; exit 1; }
 `
 }
 
+/**
+ * Read-only, any user: the machine's own names and addresses, nothing else (orca/identify.ts
+ * places a paired server with them). Addresses from `hostname -I`, else `ip`; at most 32.
+ */
+export function identifyScript(runId: string): string {
+  if (!RUN_ID.test(runId)) throw new ScriptError('The run id is not valid.')
+  return `${prelude(runId, 'tell the plugin this machine\'s names and addresses (read-only, changes nothing)')}
+say hostname "$(hostname)"
+say fqdn "$(hostname -f 2>/dev/null)"
+A=$(hostname -I 2>/dev/null) || A=$(ip -o addr show scope global 2>/dev/null | awk '{ print $4 }' | cut -d/ -f1)
+I=0
+for X in $A; do I=$((I + 1)); [ "$I" -le 32 ] && say addr "$X"; done
+finish ok
+`
+}
+
 /** Read-only: what this host runs, who the shell is, and where it was reached. */
 export function detectScript(runId: string): string {
   if (!RUN_ID.test(runId)) throw new ScriptError('The run id is not valid.')
@@ -382,11 +398,11 @@ finish ok
 
 /** What a script may answer, and which keys may come more than once. */
 const KEYS = new Set([
-  'root', 'pve', 'pbs', 'pdm', 'hostname', 'fqdn', 'via',
+  'root', 'pve', 'pbs', 'pdm', 'hostname', 'fqdn', 'via', 'addr',
   'reused_user', 'created_user', 'replaced_token', 'created_token', 'added_user_acl', 'api_fp', 'secret',
   'nothing', 'unconfirmed', 'changed', 'removed_token', 'kept_token', 'removed_user', 'removed_user_acl', 'kept_user', 'stop'
 ])
-const REPEATED = new Set(['secret'])
+const REPEATED = new Set(['secret', 'addr'])
 
 export type ScriptAnswer = {
   /** Every `key value`, in order, from 1 without a gap (only what was seen in full). */
