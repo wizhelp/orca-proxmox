@@ -50,7 +50,7 @@ export class OrcaService {
       hosts: placed,
       workspaces: inventory.workspaces,
       bots: inventory.bots,
-      warnings: inventory.warnings
+      warnings: [...inventory.warnings, ...(this.identities?.warnings() ?? [])]
     }
     if (cached.error) view.error = cached.error
     return view

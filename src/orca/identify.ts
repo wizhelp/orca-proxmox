@@ -12,7 +12,8 @@
 import { randomBytes } from 'node:crypto'
 import type { OrcaHost, OrcaWorkspace } from '../model'
 import { safeIp, safeTarget } from '../features/targets'
-import { hostShell, runScript, type RunDeps } from '../setup/runner'
+import { closeTerminal, runScript, type HostShell, type OpenTerminal, type RunDeps } from '../setup/runner'
+import { pick, worktreeSelector } from './terminal'
 import { identifyScript, valueOf } from '../setup/script'
 
 export type ServerIdentity = { runtimeId: string; at: number; names: string[]; addresses: string[] }
@@ -56,8 +57,12 @@ export function identityOf(answer: { end?: string; pairs: [string, string][] }, 
 export class ServerIdentities {
   private known = new Map<string, ServerIdentity>()
   private loaded = false
-  private running = false
+  private stopped = false
+  private inflight: Promise<void> | undefined
+  /** By server and runtime: a new runtime is not held back by the old one's failure. */
   private retryAt = new Map<string, number>()
+  /** Terminals a probe opened that could not be closed yet: retried before any new probe. */
+  private unclosed: OpenTerminal[] = []
 
   constructor(private readonly deps: () => IdentifyDeps) {}
 
@@ -73,9 +78,26 @@ export class ServerIdentities {
     }
   }
 
-  /** The hosts with what is known of paired servers without an identity from Orca itself. */
+  private save(): Promise<void> {
+    return this.deps().storage.set(KEY, JSON.parse(JSON.stringify(Object.fromEntries(this.known))))
+  }
+
+  /**
+   * The hosts with what is known of paired servers without an identity from Orca itself. What
+   * is kept for a server Orca no longer lists is dropped.
+   */
   async apply(hosts: readonly OrcaHost[]): Promise<OrcaHost[]> {
     await this.load()
+    const servers = new Set(hosts.filter((h) => h.kind === 'environment').map((h) => h.key))
+    const merged = new Set(hosts.flatMap((h) => (h.paired ? [h.paired.key] : [])))
+    let pruned = false
+    for (const key of [...this.known.keys()]) {
+      if (!servers.has(key) && !merged.has(key)) {
+        this.known.delete(key)
+        pruned = true
+      }
+    }
+    if (pruned) await this.save().catch(() => undefined)
     return hosts.map((h) => {
       if (h.kind !== 'environment' || h.identity || !h.runtimeId) return h
       const known = this.known.get(h.key)
@@ -83,43 +105,67 @@ export class ServerIdentities {
     })
   }
 
+  /** What the Orca view should say about probes: terminals that could not be closed. */
+  warnings(): string[] {
+    return this.unclosed.map((t) => `A terminal the plugin opened to identify an Orca server (${t.tag}) could not be closed; close it in Orca.`)
+  }
+
   /**
    * Asks, in the background, the first paired server that is still not placed and that nothing
-   * identifies yet (one at a time); the next read of the Orca view uses the answer.
+   * identifies yet (one at a time); the next read of the Orca view uses the answer. Only in a
+   * workspace the server runs itself (`hostId` local in its own listing): never one it reaches
+   * over an SSH target of its own, which would describe another machine.
    */
   ask(placed: readonly OrcaHost[], workspaces: readonly OrcaWorkspace[]): void {
-    if (this.running) return
-    const now = this.deps().now()
-    const next = placed.find(
-      (h) => h.kind === 'environment' && !h.viaSsh && !h.runsOn && h.match !== 'manual' && !h.identity && h.runtimeId && (this.retryAt.get(h.key) ?? 0) <= now
-    )
-    if (!next) return
-    const shell = hostShell(next, workspaces)
-    if ('error' in shell) {
-      this.retryAt.set(next.key, now + RETRY_MS)
-      return
-    }
-    this.running = true
+    if (this.inflight || this.stopped) return
     const deps = this.deps()
-    const runId = randomBytes(8).toString('hex')
-    void runScript(deps, shell, identifyScript(runId), runId, 'Proxmox: identify this server', TIMEOUT_MS, false)
-      .then(async (answer) => {
-        const identity = identityOf(answer, next.runtimeId!, deps.now())
+    const now = deps.now()
+    const retryKey = (h: OrcaHost) => `${h.key}|${h.runtimeId}`
+    const candidates = placed.filter(
+      (h) => h.kind === 'environment' && !h.viaSsh && !h.runsOn && h.match !== 'manual' && !h.identity && h.runtimeId && (this.retryAt.get(retryKey(h)) ?? 0) <= now
+    )
+    if (!candidates.length && !this.unclosed.length) return
+    const run = deps.aborted ? deps : { ...deps, aborted: () => this.stopped }
+    this.inflight = (async () => {
+      // Earlier terminals that could not be closed come first.
+      const still: OpenTerminal[] = []
+      for (const t of this.unclosed) if (await closeTerminal(run, t)) still.push(t)
+      this.unclosed = still
+      const next = candidates[0]
+      if (!next || this.stopped) return
+      const id = next.key.slice('env:'.length)
+      const ws = pick(workspaces.filter((w) => w.environment === id && w.ownRuntime === true))
+      if (!ws?.worktreeId) {
+        this.retryAt.set(retryKey(next), now + RETRY_MS)
+        deps.log(`Orca server ${next.key}: no workspace it runs itself, so it is not asked who it is`)
+        return
+      }
+      const shell: HostShell = { hostKey: next.key, environment: id, worktree: worktreeSelector(ws.worktreeId), where: `the ${ws.name} workspace of ${next.name}` }
+      const runId = randomBytes(8).toString('hex')
+      try {
+        const answer = await runScript(run, shell, identifyScript(runId), runId, 'Proxmox: identify this server', TIMEOUT_MS, false)
+        if (answer.openTerminal) this.unclosed.push(answer.openTerminal)
+        const identity = answer.aborted ? null : identityOf(answer, next.runtimeId!, deps.now())
         if (!identity) {
-          this.retryAt.set(next.key, deps.now() + RETRY_MS)
-          deps.log(`Orca server ${next.key}: no identity (${answer.invalid ?? (answer.timedOut ? 'timed out' : 'no answer')}); asked again in an hour`)
+          this.retryAt.set(retryKey(next), deps.now() + RETRY_MS)
+          if (!answer.aborted) deps.log(`Orca server ${next.key}: no identity (${answer.invalid ?? (answer.timedOut ? 'timed out' : 'no answer')}); asked again in an hour`)
           return
         }
         this.known.set(next.key, identity)
-        await deps.storage.set(KEY, JSON.parse(JSON.stringify(Object.fromEntries(this.known))))
+        await this.save()
         deps.log(`Orca server ${next.key}: identified (${identity.names.length} names, ${identity.addresses.length} addresses)`)
-      })
-      .catch((error: unknown) => {
-        this.retryAt.set(next.key, deps.now() + RETRY_MS)
+      } catch (error) {
+        this.retryAt.set(retryKey(next), deps.now() + RETRY_MS)
         deps.log(`Orca server ${next.key}: could not be identified: ${error instanceof Error ? error.message : String(error)}`)
-      })
-      .finally(() => {
-        this.running = false
-      })
+      }
+    })().finally(() => {
+      this.inflight = undefined
+    })
+  }
+
+  /** No new probe from here on; a running one ends early and its terminal is closed (awaited). */
+  stop(): Promise<void> {
+    this.stopped = true
+    return this.inflight ?? Promise.resolve()
   }
 }

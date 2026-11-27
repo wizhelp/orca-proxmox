@@ -273,6 +273,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     storage: { get: (key) => orca.storage.get(key), set: (key, value) => orca.storage.set(key, value as JsonValue) }
   }))
   const orcaView = new OrcaService(() => (cliRunner ?? nodeCliRunner)(), () => clock(), identities)
+  stopIdentities = () => identities.stop()
 
   /** Every message logged passes through here, so a secret that slipped into one is masked. */
   const knownSecrets = new Set<string>()
@@ -998,9 +999,16 @@ let timer: ReturnType<typeof setTimeout> | undefined
 let stopped = false
 
 /** Orca awaits this before stopping the worker. */
-export function deactivate(): void {
+export function deactivate(): Promise<void> {
   stopped = true
   tunnelManager?.stopAll()
   clearTimeout(timer)
   timer = undefined
+  // A paired server being identified: the probe ends early and its terminal is closed first.
+  const drain = stopIdentities?.() ?? Promise.resolve()
+  stopIdentities = undefined
+  return drain
 }
+
+/** Stops the identification of paired servers (orca/identify.ts); set at activation. */
+let stopIdentities: (() => Promise<void>) | undefined
