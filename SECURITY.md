@@ -277,8 +277,15 @@ the guided manual path (docs/AGENT_SETUP.md).
 - **Identifying a paired server** (Orca awareness on, only for a paired server Orca does not
   identify and nothing places) runs a fixed, read-only command on that server, as Orca's user
   there and never as root: `hostname`, `hostname -f` and the machine's addresses (`hostname -I`,
-  else `ip -o addr`), in a terminal of one of its workspaces that is closed afterwards. Only
-  numbered lines of that run, complete and matching their checksum, are read; names and addresses
-  are kept only in their strict form (a host name, an IP address; loopback and link-local
-  dropped), in plugin storage, and are used for placement only. The panel can rewrite that storage,
-  which can only misplace a server in the Orca view.
+  else `ip -o addr`), only in a workspace the server runs itself (its `hostId` is `local` in its
+  own listing; never one it reaches over an SSH target of its own), by Orca's exact route
+  (`--environment`, `--worktree`). Every probe's terminal is closed through one path: found by its
+  unique title when Orca's answer to the create was lost, closes retried and, when they still
+  fail, reported in the Orca view and retried before any new probe; stopping the worker ends a
+  running probe and closes its terminal before it settles. Only numbered lines of that run,
+  complete and matching their checksum, are read; names and addresses are kept only in their strict
+  form (a host name, an IP address; loopback and link-local dropped), in plugin storage. They are
+  claims of that server, not proof: they only place it in the Orca view, and only when every value
+  that matches anything agrees. A place known only that way is never used as a root SSH
+  destination (the terminal fallback refuses it; a placement by hand confirms it). The panel can
+  rewrite that storage, which can only misplace a server in the Orca view.

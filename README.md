@@ -470,13 +470,20 @@ set as "Not on Proxmox".
 **Paired servers Orca does not identify.** Orca's CLI gives a paired server's label, ids and
 endpoint, but not its machine name or addresses; when it was paired without an SSH target and its
 endpoint is a loopback tunnel, nothing else says where it runs. Then, once per paired server and
-runtime (asked again after a reconnect or redeploy), the plugin opens a terminal in one of that
-server's workspaces, runs a read-only command there as Orca's user (`hostname`, `hostname -f` and
-the machine's IPv4 and IPv6 addresses, nothing else; never `sudo`), reads the answer and closes the
-terminal. The answer is kept in plugin storage and used to place the server; a server that gives
-none is asked again after an hour, one server at a time. This only happens with **Show where Orca
-runs** on, only for paired servers that nothing else places, and only when they have a workspace
-to open the terminal in.
+runtime (asked again after a reconnect or redeploy), the plugin opens a terminal in a workspace
+that server runs itself (never one it reaches over an SSH target of its own, which is another
+machine; without one, it is not asked), runs a read-only command there as Orca's user
+(`hostname`, `hostname -f` and the machine's IPv4 and IPv6 addresses, nothing else; never
+`sudo`), reads the answer and closes the terminal. Every way a probe ends closes its terminal:
+one whose creation Orca did not confirm is found by its unique title, a close that fails is
+retried and reported in the Orca view's warnings until it succeeds, and stopping the plugin ends a
+running probe and closes its terminal first. The answer is kept in plugin storage and used only to
+place the server, when every name and address that matches anything points to the same node or
+guest; such a placement never becomes a root SSH destination: *Open terminal* then goes through
+the server's own Orca workspace, or asks you to place it by hand to confirm. A server that gives
+no answer is asked again after an hour (per runtime), one server at a time, and what is kept for a
+server Orca no longer lists is dropped. This only happens with **Show where Orca runs** on and
+only for paired servers that nothing else places.
 
 For addresses and notes, the worker reads each node's `/network` and config and each guest's
 config (only `name`, `hostname`, `netN`, `ipconfigN` and the notes in `description` are kept)
