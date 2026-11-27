@@ -454,14 +454,29 @@ single entry.
    "Not on Proxmox".
 2. **Through its SSH target**: a paired server not merged with its SSH target (see above) still
    goes where that SSH target goes.
-3. **By IP address**, when an Orca host is named by its address: matched against node interface
+3. **By what identifies a paired server** without an SSH target: the host of its endpoint when
+   that is not loopback, else the server's own host name, full name and addresses (see below),
+   matched as in 4 and 5.
+4. **By IP address**, when an Orca host is named by its address: matched against node interface
    addresses and the static addresses in guest configs (LXC `ip=`, cloud-init `ipconfigN`).
-4. **By name**: a node, a single-node remote, a guest name or an LXC hostname, ignoring case and
+5. **By name**: a node, a single-node remote, a guest name or an LXC hostname, ignoring case and
    domain; `pve-backups` also matches `pve-backup`.
 
-Only a unique match counts: a private address used on two clusters places nothing. The CLI gives
-no addresses for SSH targets or paired servers, so an Orca host named neither like its machine
-nor by its IP needs placing by hand once.
+Only a unique match counts: a private address used on two clusters places nothing. Every Orca
+host stays listed: one that nothing places is shown under **Not placed yet** in the Orca view,
+with its own *Place on* selector (one choice places it), apart from this machine and the hosts
+set as "Not on Proxmox".
+
+**Paired servers Orca does not identify.** Orca's CLI gives a paired server's label, ids and
+endpoint, but not its machine name or addresses; when it was paired without an SSH target and its
+endpoint is a loopback tunnel, nothing else says where it runs. Then, once per paired server and
+runtime (asked again after a reconnect or redeploy), the plugin opens a terminal in one of that
+server's workspaces, runs a read-only command there as Orca's user (`hostname`, `hostname -f` and
+the machine's IPv4 and IPv6 addresses, nothing else; never `sudo`), reads the answer and closes the
+terminal. The answer is kept in plugin storage and used to place the server; a server that gives
+none is asked again after an hour, one server at a time. This only happens with **Show where Orca
+runs** on, only for paired servers that nothing else places, and only when they have a workspace
+to open the terminal in.
 
 For addresses and notes, the worker reads each node's `/network` and config and each guest's
 config (only `name`, `hostname`, `netN`, `ipconfigN` and the notes in `description` are kept)

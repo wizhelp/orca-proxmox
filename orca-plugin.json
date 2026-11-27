@@ -78,7 +78,7 @@
       {
         "key": "orcaAwareness",
         "title": "Show where Orca runs",
-        "description": "Mark the hosts and guests that run Orca, with their bots and workspaces. Read with the orca CLI that comes with Orca, since the plugin API does not list hosts or bots yet; also reads node networks and guest configs for addresses.",
+        "description": "Mark the hosts and guests that run Orca, with their bots and workspaces. Read with the orca CLI that comes with Orca, since the plugin API does not list hosts or bots yet; also reads node networks and guest configs for addresses. A paired Orca server that nothing else places is asked once (per runtime) for its own host name and addresses, read-only, in a terminal of one of its workspaces.",
         "type": "boolean",
         "default": true
       },

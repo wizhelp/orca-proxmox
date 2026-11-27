@@ -274,3 +274,11 @@ the guided manual path (docs/AGENT_SETUP.md).
   certificate of a tunnelled connection.
 - **The `orca` CLI** used for Orca awareness, the status-bar command and terminals runs with your
   account's rights, like Orca itself.
+- **Identifying a paired server** (Orca awareness on, only for a paired server Orca does not
+  identify and nothing places) runs a fixed, read-only command on that server, as Orca's user
+  there and never as root: `hostname`, `hostname -f` and the machine's addresses (`hostname -I`,
+  else `ip -o addr`), in a terminal of one of its workspaces that is closed afterwards. Only
+  numbered lines of that run, complete and matching their checksum, are read; names and addresses
+  are kept only in their strict form (a host name, an IP address; loopback and link-local
+  dropped), in plugin storage, and are used for placement only. The panel can rewrite that storage,
+  which can only misplace a server in the Orca view.

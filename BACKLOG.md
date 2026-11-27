@@ -87,6 +87,12 @@ Switch Orca awareness from the `orca` CLI to the plugin API once it offers:
 
 - `hosts.list`: Orca's hosts (local, SSH targets, paired servers) with name, address, connection
   state, and for a paired server the SSH target it was deployed through;
+- **Feature request for Orca:** a paired server's `machineName` and addresses (as `orca host list`
+  gives `machineName` for this machine), in the plugin API and in `orca environment list` /
+  `orca host list`. Today they expose only the label, runtime ids and the endpoint, which is a
+  loopback tunnel for a server reached over SSH; so for a paired server without an SSH target the
+  plugin has to ask the server itself, in a terminal (README, "Paired servers Orca does not
+  identify"). With those fields it would not need to;
 - `bots.list`: bots with their agent, state and the host they live on;
 - `workspace.list` fields for the bot that owns a workspace and its agents' states.
 
