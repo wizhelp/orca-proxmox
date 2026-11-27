@@ -1,7 +1,7 @@
 // Small actions on a host or guest: copy an address, VMID or ssh command, open it in PDM or the
 // Proxmox web interface, open an Orca terminal where Orca runs. Nothing here writes to Proxmox.
 import type { EstateSnapshot, Guest, Host } from '../model'
-import type { OrcaPresence } from '../presence'
+import { terminalOffer, type OrcaPresence, type TerminalOffer } from '../presence'
 import { consoleLink, guestAddress, guestSsh, hostAddress, hostSsh, pdmLink, proxmoxLink } from '../features/links'
 import { safeTarget } from '../features/targets'
 import { app } from './app'
@@ -85,8 +85,16 @@ export async function openTerminal(hostKey: string, label: string): Promise<void
   }
 }
 
-function mini(label: string, iconName: IconName, title: string, run: () => void): HTMLButtonElement {
-  return h('button', { type: 'button', class: 'btn mini', title, onClick: (e: MouseEvent) => (e.stopPropagation(), run()) }, icon(iconName, 12), label)
+function mini(label: string, iconName: IconName, title: string, run: () => void, disabled = false): HTMLButtonElement {
+  return h('button', { type: 'button', class: 'btn mini', title, disabled, 'aria-disabled': disabled ? 'true' : undefined, onClick: (e: MouseEvent) => (e.stopPropagation(), run()) }, icon(iconName, 12), label)
+}
+
+/** The Terminal button: through Orca, a labelled local ssh, or (nodes only) disabled with the reason. */
+function terminalButton(offer: TerminalOffer | undefined, showNone: boolean): HTMLButtonElement | null {
+  if (!offer || (offer.route === 'none' && !showNone)) return null
+  const host = offer.host
+  if (offer.route === 'none' || !host) return mini('Terminal', 'terminal', offer.title, () => undefined, true)
+  return mini(offer.route === 'ssh' ? 'Terminal (ssh)' : 'Terminal', 'terminal', offer.title, () => void openTerminal(host.key, host.name))
 }
 
 /** Whether PDM has a page for this remote: not for one reached directly. */
@@ -103,13 +111,13 @@ export function hostActions(snap: EstateSnapshot, host: Host, presence: OrcaPres
   const ssh = hostSsh(host)
   const pdm = inPdm(snap, host.remote) ? pdmLink(snap.pdmUrl, host.remote, host.remoteType === 'pve' ? { node: host.node } : undefined) : undefined
   const web = proxmoxLink(snap, { host })
-  const orcaHost = presence?.hosts[0]
+  const offer = terminalOffer(snap.orca, presence, ssh, 'node')
   return bar([
     ip ? mini('IP', 'copy', `Copy ${ip}`, () => void copyText(ip, ip)) : null,
     ssh ? mini('SSH', 'terminal', `Copy: ${ssh}`, () => void copyText(ssh, 'the ssh command')) : null,
     pdm ? mini('PDM', 'external', `Open in Proxmox Datacenter Manager: ${pdm}`, () => void openLink(pdm)) : null,
     web ? mini(host.remoteType === 'pbs' ? 'PBS' : 'PVE', 'external', `Open in the Proxmox web interface: ${web}`, () => void openLink(web)) : null,
-    orcaHost ? mini('Terminal', 'terminal', `Open an Orca terminal on ${orcaHost.name}`, () => void openTerminal(orcaHost.key, orcaHost.name)) : null
+    terminalButton(offer, true)
   ])
 }
 
@@ -121,7 +129,8 @@ export function guestActions(snap: EstateSnapshot, guest: Guest, presence: OrcaP
   const pdm = inPdm(snap, guest.remote) ? pdmLink(snap.pdmUrl, guest.remote, { vmid: guest.vmid }) : undefined
   const web = proxmoxLink(snap, { guest })
   const consoleUrl = guest.status === 'running' ? consoleLink(snap, guest) : undefined
-  const orcaHost = presence?.hosts[0]
+  // On guests a missing Terminal stays hidden: most guests run no Orca.
+  const offer = terminalOffer(snap.orca, presence, ssh, 'guest')
   return bar([
     ip ? mini('IP', 'copy', `Copy ${ips.join(', ')}`, () => void copyText(ips.join(' '), ips.length > 1 ? 'the addresses' : ip)) : null,
     mini('VMID', 'hash', `Copy ${guest.vmid}`, () => void copyText(String(guest.vmid), `VMID ${guest.vmid}`)),
@@ -129,6 +138,6 @@ export function guestActions(snap: EstateSnapshot, guest: Guest, presence: OrcaP
     pdm ? mini('PDM', 'external', `Open in Proxmox Datacenter Manager: ${pdm}`, () => void openLink(pdm)) : null,
     web ? mini('PVE', 'external', `Open in the Proxmox web interface: ${web}`, () => void openLink(web)) : null,
     consoleUrl ? mini('Console', 'monitor', 'Open the console in the Proxmox web interface', () => void openLink(consoleUrl)) : null,
-    orcaHost ? mini('Terminal', 'terminal', `Open an Orca terminal on ${orcaHost.name}`, () => void openTerminal(orcaHost.key, orcaHost.name)) : null
+    terminalButton(offer, false)
   ])
 }

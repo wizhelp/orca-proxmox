@@ -10,6 +10,46 @@ export type OrcaPresence = {
   working: number
 }
 
+/**
+ * The Terminal a node or guest card offers, and what it does or why there is none:
+ *   - through Orca: an Orca host placed there has a workspace (its own, for a server placed from
+ *     its own claims), whichever of the hosts there has one;
+ *   - a local terminal running `ssh` (shown as such): placed there, but Orca has no workspace on it;
+ *   - none, said in the tooltip: nothing placed there (and how many Orca hosts are not placed
+ *     yet), or no workspace and no address.
+ * Undefined with Orca awareness off. The worker decides again on click (orca/terminal.ts).
+ */
+export type TerminalOffer = { host?: OrcaHost; route: 'workspace' | 'ssh' | 'none'; title: string }
+
+export function terminalOffer(view: OrcaView | undefined, presence: OrcaPresence | undefined, ssh: string | undefined, place: 'node' | 'guest'): TerminalOffer | undefined {
+  if (!view) return undefined
+  const candidates = presence?.hosts ?? []
+  const workspaceOf = (h: OrcaHost) =>
+    view.workspaces.find((w) => w.hostKey === h.key && w.worktreeId && (h.match !== 'identified' || (w.ownRuntime === true && w.environment === h.key.replace(/^env:/, ''))))
+  for (const h of candidates) {
+    const ws = workspaceOf(h)
+    if (ws) return { host: h, route: 'workspace', title: `Open a terminal on ${h.name} through Orca (its ${ws.name} workspace)` }
+  }
+  const viaSsh = candidates.find((h) => h.match !== 'identified')
+  if (viaSsh && ssh) {
+    return {
+      host: viaSsh,
+      route: 'ssh',
+      title: `Orca has no workspace on ${viaSsh.name}: this opens a local terminal running “${ssh}”. Open a folder on ${viaSsh.name} in Orca (e.g. /root) for a terminal through Orca’s own connection.`
+    }
+  }
+  if (candidates.length) {
+    return { route: 'none', title: `Orca has no workspace on ${candidates.map((h) => h.name).join(', ')}${viaSsh ? ' and there is no address to ssh to' : ''}: open a folder on it in Orca (e.g. /root).` }
+  }
+  const unplaced = view.hosts.filter((h) => !h.runsOn && h.kind !== 'local' && h.match !== 'manual')
+  return {
+    route: 'none',
+    title: unplaced.length
+      ? `No Orca host is placed on this ${place}. ${unplaced.length} Orca host${unplaced.length > 1 ? 's are' : ' is'} not placed yet (${unplaced.map((h) => h.name).join(', ')}): place one in the Orca view.`
+      : `No Orca SSH target or paired server runs on this ${place}.`
+  }
+}
+
 /** `node:<remote/node>` or `guest:<remote/vmid>`: how a place on the estate is named. */
 export const nodeRef = (host: Host) => `node:${host.key}`
 export const guestRef = (guest: Guest) => `guest:${guest.key}`
