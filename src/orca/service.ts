@@ -1,11 +1,13 @@
 // Keeps the Orca inventory fresh enough for the panel (it changes as agents work) without running
 // the CLI on every panel poll, and places it on an estate snapshot.
-import type { EstateSnapshot, OrcaView } from '../model'
+import type { EstateSnapshot, OrcaHost, OrcaView } from '../model'
+import { safeIp, safeTarget } from '../features/targets'
 import { readOrcaInventory, type CliRunner, type OrcaInventory } from './inventory'
 import type { ServerIdentities } from './identify'
 import { placeOrcaHosts, type OrcaLinks } from './match'
 
 const MAX_AGE_MS = 20000
+const RESOLVE_MS = 10 * 60_000
 
 export class OrcaService {
   private cached: { at: number; inventory?: OrcaInventory; error?: string } | undefined
@@ -15,8 +17,30 @@ export class OrcaService {
     private readonly run: () => CliRunner,
     private readonly now: () => number = Date.now,
     /** Paired servers Orca does not identify: asked themselves, once per runtime (identify.ts). */
-    private readonly identities?: ServerIdentities
+    private readonly identities?: ServerIdentities,
+    /** The IP addresses a DNS name resolves to here (SSH targets named by one). */
+    private readonly resolve?: (name: string) => Promise<string[]>
   ) {}
+
+  private resolvedAt = new Map<string, { at: number; addresses: string[] }>()
+
+  /** SSH targets named by a DNS name get the addresses it resolves to (kept 10 minutes). */
+  private async withResolved(hosts: readonly OrcaHost[]): Promise<OrcaHost[]> {
+    if (!this.resolve) return [...hosts]
+    return Promise.all(
+      hosts.map(async (h) => {
+        const name = h.name.trim().toLowerCase().replace(/\.$/, '')
+        if (h.kind !== 'ssh' || !name.includes('.') || safeIp(name) || safeTarget(name) !== name) return h
+        let entry = this.resolvedAt.get(name)
+        if (!entry || this.now() - entry.at > RESOLVE_MS) {
+          const addresses = await this.resolve!(name).catch(() => [] as string[])
+          entry = { at: this.now(), addresses: addresses.filter((a) => safeIp(a) === a).slice(0, 16) }
+          this.resolvedAt.set(name, entry)
+        }
+        return entry.addresses.length ? { ...h, resolved: entry.addresses } : h
+      })
+    )
+  }
 
   private async refresh(force: boolean): Promise<void> {
     if (!force && this.cached && this.now() - this.cached.at < MAX_AGE_MS) return
@@ -42,7 +66,8 @@ export class OrcaService {
     await this.refresh(force)
     const cached = this.cached!
     const inventory = cached.inventory ?? { hosts: [], workspaces: [], bots: [], warnings: [] }
-    const hosts = this.identities ? await this.identities.apply(inventory.hosts) : inventory.hosts
+    const named = await this.withResolved(inventory.hosts)
+    const hosts = this.identities ? await this.identities.apply(named) : named
     const placed = placeOrcaHosts(hosts, snapshot, links)
     this.identities?.ask(placed, inventory.workspaces)
     const view: OrcaView = {

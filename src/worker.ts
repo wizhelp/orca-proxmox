@@ -40,6 +40,7 @@ import { outboundSnapshot, redactDeep, scrubLine } from './scrub'
 import { fileVault, keyFile, memoryVault, type Binding, type Vault } from './vault'
 import { cleanupText, importFile, takeImport, type ImportedConnection } from './importer'
 import { SetupService } from './setup/service'
+import { lookup } from 'node:dns/promises'
 import type { AlertState } from './features/alerts'
 import type { JsonValue } from 'orca/worker'
 
@@ -85,6 +86,8 @@ const tunnels = () => {
   return (tunnelManager ??= new TunnelManager({ spawn: spawnSsh, sshPath: () => sshPath(), dir: tunnelDir(), freePort: freeLocalPort, now: () => clock() }))
 }
 let clock: () => number = Date.now
+/** What a DNS name resolves to (SSH targets named by one, for placement); tests resolve nothing. */
+let resolveName: (name: string) => Promise<string[]> = async (name) => (await lookup(name, { all: true })).map((a) => a.address)
 let sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms))
 let cliRunner: (() => CliRunner) | undefined
 let vault: Vault | undefined
@@ -128,6 +131,7 @@ export function useTestDoubles(doubles: {
   sshPath?: string | null
   tunnelDir?: string
   orcaCli?: CliRunner
+  resolveName?: (name: string) => Promise<string[]>
   background?: boolean
   vault?: Vault
   importPath?: string
@@ -136,6 +140,7 @@ export function useTestDoubles(doubles: {
 }): void {
   sleep = doubles.sleep ?? ((ms) => new Promise((r) => setTimeout(r, Math.min(ms, 5))))
   background = doubles.background ?? false
+  resolveName = doubles.resolveName ?? (async () => [])
   // Never the real import file in tests: a path that does not exist unless a test makes it.
   importPath = doubles.importPath ?? '\0no-import-file-in-tests'
   importPlatform = doubles.importPlatform ?? process.platform
@@ -272,7 +277,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     log: (text) => log(text),
     storage: { get: (key) => orca.storage.get(key), set: (key, value) => orca.storage.set(key, value as JsonValue) }
   }))
-  const orcaView = new OrcaService(() => (cliRunner ?? nodeCliRunner)(), () => clock(), identities)
+  const orcaView = new OrcaService(() => (cliRunner ?? nodeCliRunner)(), () => clock(), identities, (name) => resolveName(name))
   stopIdentities = () => identities.stop()
   // What earlier probes left open (also before a restart) is closed now, in the background.
   if (background) identities.resume()

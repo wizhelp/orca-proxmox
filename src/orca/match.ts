@@ -133,6 +133,12 @@ export function placeOrcaHosts(
       if (decided === null && !out.runsOn) return out
     }
     set(byAddress(host.name), 'address')
+    // An SSH target named by a DNS name: what that name resolves to here, when all of it that
+    // matches anything points to one node or guest.
+    if (host.resolved?.length && !out.runsOn) {
+      const refs = host.resolved.map((a) => byAddress(a)).filter((r): r is ProxmoxRef => !!r)
+      if (refs.length && new Set(refs.map(linkOf)).size === 1) set(refs[0], 'address')
+    }
     set(byName(host.name), 'name')
     return out
   }

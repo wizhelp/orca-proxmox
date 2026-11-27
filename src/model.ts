@@ -333,6 +333,8 @@ export type OrcaHost = {
   paired?: { key: string; name: string }
   runsOn?: ProxmoxRef
   match?: OrcaMatch
+  /** SSH targets named by a DNS name: the addresses it resolves to here, to match nodes by address. */
+  resolved?: string[]
   /** Paired servers: the runtime Orca reaches now (an identification is kept per runtime). */
   runtimeId?: string
   /**
