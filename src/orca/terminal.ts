@@ -48,6 +48,11 @@ export function terminalPlan(hostKey: string, view: OrcaView | undefined, snap: 
       args: ['terminal', 'create', ...(ws.environment ? [`--environment=${ws.environment}`] : []), `--worktree=${worktreeSelector(ws.worktreeId)}`, `--title=${label}`, '--focus']
     }
   }
+  // A place known only from what a server reported (or its endpoint) never becomes a root SSH
+  // destination: only a placement by hand, by Orca's own records or by a configured name does.
+  if (host.match === 'identified') {
+    return { error: `${host.name} is placed from what it reported about itself, which is not enough to open a root SSH session to that machine. Open a terminal in one of its Orca workspaces, or place it by hand in the Orca view to confirm.` }
+  }
   let ssh: string | undefined
   if (snap && host.runsOn?.kind === 'node') {
     const node = snap.hosts.find((h) => h.key === host.runsOn!.key)

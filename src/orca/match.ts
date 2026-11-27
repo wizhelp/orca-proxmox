@@ -102,8 +102,16 @@ export function placeOrcaHosts(
       const via = placed.get(host.viaSsh)
       if (via?.runsOn) set(via.runsOn, 'via-ssh')
     }
-    for (const address of host.identity?.addresses ?? []) set(byAddress(address), 'identified')
-    for (const name of host.identity?.names ?? []) set(byAddress(name) ?? byName(name), 'identified')
+    // What identifies a paired server places it only when every value that matches anything
+    // points to the same node or guest: claims that disagree place nothing.
+    if (host.identity) {
+      const refs = [
+        ...host.identity.addresses.map((a) => byAddress(a)),
+        ...host.identity.names.map((n) => byAddress(n) ?? byName(n))
+      ].filter((r): r is ProxmoxRef => !!r)
+      const distinct = new Set(refs.map(linkOf))
+      if (distinct.size === 1) set(refs[0], 'identified')
+    }
     set(byAddress(host.name), 'address')
     set(byName(host.name), 'name')
     return out
