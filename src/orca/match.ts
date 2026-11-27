@@ -19,6 +19,17 @@ function isAddress(name: string): boolean {
   return IPV4.test(name) || (name.includes(':') && /^[0-9a-f:]+$/i.test(name))
 }
 
+/** An address used again and again in other networks: RFC 1918, shared (CGNAT), IPv6 unique local. */
+export function isPrivate(address: string): boolean {
+  const a = address.toLowerCase()
+  const m = /^(\d{1,3})\.(\d{1,3})\./.exec(a)
+  if (m) {
+    const [x, y] = [Number(m[1]), Number(m[2])]
+    return x === 10 || (x === 172 && y >= 16 && y <= 31) || (x === 192 && y === 168) || (x === 100 && y >= 64 && y <= 127)
+  }
+  return /^f[cd][0-9a-f]{0,2}:/.test(a)
+}
+
 /** Lowercase, domain dropped (`pve1.example.com` -> `pve1`), unless it is an address. */
 export function normalizeName(name: string): string {
   const lower = name.trim().toLowerCase()
@@ -103,14 +114,21 @@ export function placeOrcaHosts(
       if (via?.runsOn) set(via.runsOn, 'via-ssh')
     }
     // What identifies a paired server places it only when every value that matches anything
-    // points to the same node or guest: claims that disagree place nothing.
+    // points to the same node or guest: claims that disagree place nothing. Its names and public
+    // addresses decide; private ones (which repeat from one network to the next) only when
+    // nothing else matches, and then they too must agree.
     if (host.identity) {
-      const refs = [
-        ...host.identity.addresses.map((a) => byAddress(a)),
+      const agreed = (values: (ProxmoxRef | undefined)[]): ProxmoxRef | null | undefined => {
+        const refs = values.filter((r): r is ProxmoxRef => !!r)
+        if (!refs.length) return undefined
+        return new Set(refs.map(linkOf)).size === 1 ? refs[0] : null
+      }
+      const strong = agreed([
+        ...host.identity.addresses.filter((a) => !isPrivate(a)).map((a) => byAddress(a)),
         ...host.identity.names.map((n) => byAddress(n) ?? byName(n))
-      ].filter((r): r is ProxmoxRef => !!r)
-      const distinct = new Set(refs.map(linkOf))
-      if (distinct.size === 1) set(refs[0], 'identified')
+      ])
+      const decided = strong !== undefined ? strong : agreed(host.identity.addresses.filter(isPrivate).map((a) => byAddress(a)))
+      if (decided) set(decided, 'identified')
     }
     set(byAddress(host.name), 'address')
     set(byName(host.name), 'name')

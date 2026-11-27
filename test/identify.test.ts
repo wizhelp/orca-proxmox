@@ -45,6 +45,14 @@ test('a paired server is placed by its own addresses or names only when they all
   assert.deepEqual([byName.runsOn, byName.match], [{ kind: 'node', key: 'lab/pve-x1' }, 'identified'])
   // Claims that point to two machines place nothing.
   assert.equal(placed(server({ identity: { names: ['pve-x1'], addresses: ['198.51.100.22'], from: 'server' } })).runsOn, undefined)
+  // A private address (they repeat across networks) does not outvote names and public addresses…
+  const lan = { hosts: [...estate.hosts, node('pve-y1', ['10.20.0.5'])], guests: [] as Guest[] }
+  const withLan = placeOrcaHosts([server({ identity: { names: ['pve-x1'], addresses: ['198.51.100.21', '10.20.0.5'], from: 'server' } })], lan)[0]
+  assert.deepEqual(withLan.runsOn, { kind: 'node', key: 'lab/pve-x1' })
+  // …it decides only when nothing else matches, and private addresses that disagree place nothing.
+  assert.deepEqual(placeOrcaHosts([server({ identity: { names: ['host-z'], addresses: ['10.20.0.5'], from: 'server' } })], lan)[0].runsOn, { kind: 'node', key: 'lab/pve-y1' })
+  const lan2 = { hosts: [...lan.hosts, node('pve-y2', ['192.168.7.2'])], guests: [] as Guest[] }
+  assert.equal(placeOrcaHosts([server({ identity: { names: [], addresses: ['10.20.0.5', '192.168.7.2'], from: 'server' } })], lan2)[0].runsOn, undefined)
   // A manual "not on Proxmox" still wins.
   assert.equal(placeOrcaHosts([server({ identity: { names: ['pve-x1'], addresses: [], from: 'server' } })], estate, { 'env:server-x': 'none' })[0].runsOn, undefined)
 })
