@@ -247,7 +247,7 @@ test('the worker answers the estate with Orca placed on it, and keeps manual lin
   await assert.rejects(w.request('orca.link', { hostKey: 'local', link: 'somewhere', scope }), (e: unknown) => (e as { code?: string }).code === 'invalid_params')
   // An action from a view of another (older) configuration is refused, not applied to this one.
   await assert.rejects(w.request('orca.link', { hostKey: 'local', link: 'guest:pve-a/314', scope: 'default@old' }), /connection changed/)
-  await assert.rejects(w.request('orca.terminal', { hostKey: 'local', scope: 'default@old' }), /connection changed/)
+  await assert.rejects(w.request('orca.terminal', { place: 'node:x', route: 'workspace', hostKey: 'local', destination: 'x', revision: 'x', scope: 'default@old' }), /connection changed/)
   assert.deepEqual(w.refusals, [])
 })
 

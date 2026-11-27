@@ -4,6 +4,7 @@ import { afterEach, assert, mockHost, mountWorker, test, type TestWorker } from 
 import { Background, type BackgroundDeps } from '../src/background'
 import { DEFAULT_SETTINGS, type EstateResponse, type EstateSnapshot } from '../src/model'
 import { switchArgs, terminalPlan, worktreeSelector } from '../src/orca/terminal'
+import { cardOffer, estateRevision } from '../src/presence'
 import * as main from '../src/worker'
 import { FIXTURE_PIN, recordedCli, renamedEstate } from './fixtures/estate'
 import { exampleRoutes } from './fixtures/extras'
@@ -111,6 +112,11 @@ test('a terminal opens in the Orca server’s workspace, else with ssh', async (
   // No workspace on it: ssh to the node through a local terminal.
   const bare = clone(snap)
   bare.orca!.workspaces = bare.orca!.workspaces.filter((w) => w.hostKey !== main1.key)
+  // Placed automatically: no local root ssh, and why.
+  const auto = terminalPlan(main1.key, bare.orca, bare)
+  assert.ok('error' in auto && /place it by hand in the Orca view/.test(auto.error), JSON.stringify(auto))
+  // Placed by hand: a local terminal running ssh to the node.
+  bare.orca!.hosts.find((h) => h.key === main1.key)!.match = 'manual'
   const ssh = terminalPlan(main1.key, bare.orca, bare)
   // In a workspace of this machine named by id: `active` would mean the worker's own folder.
   const local = bare.orca!.workspaces.filter((w) => w.hostKey === 'local' && !w.bot && w.worktreeId)
@@ -167,7 +173,17 @@ test('the worker opens terminals and the panel through the orca CLI', async () =
   await worker.request('config.save', { baseUrl: 'https://pdm.example.test:8443', tokenId: 'monitor@pdm!orca', fingerprint: FIXTURE_PIN, secret: 's' })
   const snap = ((await worker.request('estate.get', {})) as { snapshot: EstateSnapshot }).snapshot
   const lab = snap.orca!.hosts.find((h) => h.name === 'pve-lab')!
-  const shown = await worker.request('orca.terminal', { hostKey: lab.key, title: 'pve-lab', scope: snap.connectionId })
+  // What the card at lab's place shows, sent back as the panel does.
+  const place = `${lab.runsOn!.kind}:${lab.runsOn!.key}`
+  const offer = cardOffer(snap, place)!
+  assert.deepEqual([offer.route, offer.host?.key], ['workspace', lab.key])
+  const card = { place, route: offer.route as 'workspace', hostKey: lab.key, destination: offer.destination, revision: estateRevision(snap), title: 'pve-lab', scope: snap.connectionId }
+  type Opened = { how: 'workspace' | 'ssh'; navigated: boolean; where: string }
+  const opened = (answer: Opened | { stale: string }): Opened => {
+    assert.ok(!('stale' in answer), JSON.stringify(answer))
+    return answer as Opened
+  }
+  const shown = opened(await worker.request('orca.terminal', card))
   assert.equal(shown.how, 'workspace')
   assert.equal(shown.navigated, true)
   const terminalCalls = calls.filter((c) => c[0] === 'terminal')
@@ -176,13 +192,24 @@ test('the worker opens terminals and the panel through the orca CLI', async () =
   assert.deepEqual(terminalCalls[1], ['terminal', 'switch', `--environment=${labEnv}`, '--terminal=t1'])
   // Orca did not navigate: not reported as shown, with where to find it.
   switched = false
-  const hidden = await worker.request('orca.terminal', { hostKey: lab.key, title: 'pve-lab', scope: snap.connectionId })
+  const hidden = opened(await worker.request('orca.terminal', card))
   assert.equal(hidden.navigated, false)
   assert.match(hidden.where, /server-lab/)
   // The plugin keeps the handles it opened, to tell them apart later.
   const kept = host.data().storage.terminals as { handle: string; environment: string }[]
   assert.deepEqual(kept.map((k) => [k.handle, k.environment]), [['t1', labEnv], ['t1', labEnv]])
-  await assert.rejects(worker.request('orca.terminal', { hostKey: 'ssh:nope', scope: snap.connectionId }), /not known/)
+  // Anything but what the card offers now opens nothing: another host, route or destination, or a
+  // card from an estate this worker did not build.
+  const before = calls.length
+  for (const changed of [{ hostKey: 'ssh:nope' }, { route: 'ssh' as const }, { destination: 'ssh ssh root@203.0.113.9' }, { revision: `${snap.connectionId}@1/1` }, { place: 'node:nowhere/x' }]) {
+    const answer = await worker.request('orca.terminal', { ...card, ...changed })
+    assert.ok('stale' in answer && /changed since it was shown, so nothing was opened/.test(answer.stale), JSON.stringify(changed))
+  }
+  // Moved to another place since the card was drawn (same connection): stale too.
+  await worker.request('orca.link', { hostKey: lab.key, link: 'none', scope: snap.connectionId })
+  const moved = await worker.request('orca.terminal', card)
+  assert.ok('stale' in moved)
+  assert.equal(calls.length, before, 'no terminal created for a stale card')
 
   assert.equal(await worker.command('proxmox.openPanel'), 'Opened the Proxmox panel.')
   assert.deepEqual(calls[calls.length - 1], ['plugin', 'open', 'local.proxmox-visualizer', '--panel=proxmox'])

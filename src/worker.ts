@@ -34,7 +34,8 @@ import type { CliRunner } from './orca/inventory'
 import { parseLink, type OrcaLinks } from './orca/match'
 import { ServerIdentities } from './orca/identify'
 import { OrcaService } from './orca/service'
-import { switchArgs, terminalPlan } from './orca/terminal'
+import { offerPlan, switchArgs } from './orca/terminal'
+import { cardOffer, estateRevision } from './presence'
 import { Background } from './background'
 import { outboundSnapshot, redactDeep, scrubLine } from './scrub'
 import { fileVault, keyFile, memoryVault, type Binding, type Vault } from './vault'
@@ -786,6 +787,8 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   /** The newest estate with Orca placed on it, for the terminal action. */
   let latest: EstateSnapshot | undefined
+  /** The estates the terminal action accepts a card from: the last few this worker built. */
+  const revisions: string[] = []
   let loop: Background | undefined
 
   async function loadEstate(force?: boolean, retry = true): Promise<EstateResponse> {
@@ -842,7 +845,11 @@ export default function activate(orca: OrcaWorkerApi): void {
         built = { ...built, orca: orcaAnswer }
       }
       // Only the current configuration's estate becomes the terminal action's target.
-      if (started === generation) latest = built
+      if (started === generation) {
+        latest = built
+        const revision = estateRevision(built)
+        if (revisions.at(-1) !== revision && revisions.push(revision) > 8) revisions.shift()
+      }
       return toJson<EstateResponse>({ state: 'ok', snapshot: outboundSnapshot(built, [...knownSecrets]), refreshSeconds })
     } catch (error) {
       if (error instanceof StaleRefreshError || started !== generation) {
@@ -862,13 +869,24 @@ export default function activate(orca: OrcaWorkerApi): void {
 
   orca.panels.handle('estate.get', (input) => loadEstate(input?.force))
 
-  orca.panels.handle('orca.terminal', async ({ hostKey, title, scope }) => {
-    if (typeof hostKey !== 'string' || !hostKey) throw new InputError('hostKey is required')
+  orca.panels.handle('orca.terminal', async ({ place, route, hostKey, destination, revision, title, scope }) => {
+    for (const [name, value] of Object.entries({ place, route, hostKey, destination, revision })) {
+      if (typeof value !== 'string' || !value) throw new InputError(`${name} is required`)
+    }
     requireScope(scope, await loadConnections())
     if (!latest) await loadEstate(false)
     // The target must come from the estate the panel showed, not one loaded since.
     if (latest?.connectionId !== scope) throw new InputError('The connection changed since this view was loaded; it is refreshed now, try again.')
-    const plan = terminalPlan(hostKey, latest?.orca, latest, typeof title === 'string' ? title : undefined)
+    // Exactly what the card showed, or nothing: the card's offer now must be the same route to the
+    // same host and destination, and the card drawn from an estate this worker built. A refresh in
+    // between that changes none of them (the next poll, say) does not stop the click.
+    const now = latest.orca ? cardOffer(latest, place) : undefined
+    const same = !!now?.host && now.route === route && now.host.key === hostKey && now.destination === destination
+    if (!same || !revisions.includes(revision)) {
+      log(`Terminal for ${hostKey}: ${same ? 'the card is from an estate this worker did not build' : 'what the card offers changed since it was shown'}; nothing opened`)
+      return { stale: 'What this card offers changed since it was shown, so nothing was opened: the view is refreshed now. Check its Terminal and click again.' }
+    }
+    const plan = offerPlan(now, latest.orca!, typeof title === 'string' ? title : undefined)
     if ('error' in plan) throw new InputError(plan.error)
     const run = (cliRunner ?? nodeCliRunner)()
     // Created on a server, a terminal is often only a background handle: Orca opens no tab for it

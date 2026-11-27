@@ -36,7 +36,8 @@ export const MATCH_LABEL: Record<NonNullable<OrcaHost['match']>, string> = {
   name: 'matched by name',
   address: 'matched by IP address',
   'via-ssh': 'deployed over its SSH target',
-  identified: 'matched by the server’s own host name or addresses'
+  identified: 'matched by the server’s own host name or addresses',
+  resolved: 'matched by what its DNS name resolves to here (a hint: place it by hand to confirm)'
 }
 
 /** Tone of an Orca workspace or agent state. */

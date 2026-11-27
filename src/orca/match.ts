@@ -6,7 +6,8 @@
 //   3. identified: a paired server's own addresses, then names (its endpoint's host, or what it
 //      reported itself: orca/identify.ts), as below;
 //   4. address: the host's name is an IP address one node or guest has;
-//   5. name: the host's name is a node's, a single-node remote's, a guest's name or hostname.
+//   5. resolved: an SSH target named by a DNS name, by what it resolves to here (a hint only);
+//   6. name: the host's name is a node's, a single-node remote's, a guest's name or hostname.
 // Only a unique match counts: a name or private address shared by two guests places nothing.
 import type { Guest, Host, OrcaHost, OrcaMatch, ProxmoxRef } from '../model'
 
@@ -111,7 +112,8 @@ export function placeOrcaHosts(
     if (link && exists(link)) set(link, 'manual')
     if (host.viaSsh) {
       const via = placed.get(host.viaSsh)
-      if (via?.runsOn) set(via.runsOn, 'via-ssh')
+      // Deployed over a target placed only by a DNS answer: no surer than that answer.
+      if (via?.runsOn) set(via.runsOn, via.match === 'resolved' ? 'resolved' : 'via-ssh')
     }
     // What identifies a paired server places it only when every value that matches anything
     // points to the same node or guest: claims that disagree place nothing. Its names and public
@@ -133,11 +135,12 @@ export function placeOrcaHosts(
       if (decided === null && !out.runsOn) return out
     }
     set(byAddress(host.name), 'address')
-    // An SSH target named by a DNS name: what that name resolves to here, when all of it that
-    // matches anything points to one node or guest.
+    // An SSH target named by a DNS name: what that name resolves to here, when every answer that
+    // matches anything points to one node or guest. Orca may reach it at another address (its SSH
+    // config, another resolver): a placement hint, never enough for a root SSH session.
     if (host.resolved?.length && !out.runsOn) {
       const refs = host.resolved.map((a) => byAddress(a)).filter((r): r is ProxmoxRef => !!r)
-      if (refs.length && new Set(refs.map(linkOf)).size === 1) set(refs[0], 'address')
+      if (refs.length && new Set(refs.map(linkOf)).size === 1) set(refs[0], 'resolved')
     }
     set(byName(host.name), 'name')
     return out

@@ -1,6 +1,8 @@
 // What the panel shows per node and guest: its guests and their backups, and the Orca hosts,
 // bots and workspaces on it. Pure helpers over an EstateSnapshot, shared by the panel and tests.
 import type { EstateSnapshot, Guest, Host, OrcaBot, OrcaHost, OrcaView, OrcaWorkspace } from './model'
+import { guestSsh, hostSsh } from './features/links'
+import { hostRoute, routeDestination } from './orca/terminal'
 
 export type OrcaPresence = {
   hosts: OrcaHost[]
@@ -14,40 +16,66 @@ export type OrcaPresence = {
  * The Terminal a node or guest card offers, and what it does or why there is none:
  *   - through Orca: an Orca host placed there has a workspace (its own, for a server placed from
  *     its own claims), whichever of the hosts there has one;
- *   - a local terminal running `ssh` (shown as such): placed there, but Orca has no workspace on it;
+ *   - a local terminal running `ssh` (shown as such): placed there by hand, but Orca has no
+ *     workspace on it;
  *   - none, said in the tooltip: nothing placed there (and how many Orca hosts are not placed
- *     yet), or no workspace and no address.
- * Undefined with Orca awareness off. The worker decides again on click (orca/terminal.ts).
+ *     yet), no workspace on a host placed automatically, or no address.
+ * Undefined with Orca awareness off. A click sends the route, host and destination shown; the
+ * worker runs exactly that, or refuses when the card's offer is no longer the same.
  */
-export type TerminalOffer = { host?: OrcaHost; route: 'workspace' | 'ssh' | 'none'; title: string }
+export type TerminalOffer = {
+  host?: OrcaHost
+  route: 'workspace' | 'ssh' | 'none'
+  title: string
+  /** What the click runs, compared on click: the workspace, or the ssh command; '' for none. */
+  destination: string
+  workspace?: OrcaWorkspace
+  ssh?: string
+}
 
 export function terminalOffer(view: OrcaView | undefined, presence: OrcaPresence | undefined, ssh: string | undefined, place: 'node' | 'guest'): TerminalOffer | undefined {
   if (!view) return undefined
-  const candidates = presence?.hosts ?? []
-  const workspaceOf = (h: OrcaHost) =>
-    view.workspaces.find((w) => w.hostKey === h.key && w.worktreeId && (h.match !== 'identified' || (w.ownRuntime === true && w.environment === h.key.replace(/^env:/, ''))))
-  for (const h of candidates) {
-    const ws = workspaceOf(h)
-    if (ws) return { host: h, route: 'workspace', title: `Open a terminal on ${h.name} through Orca (its ${ws.name} workspace)` }
+  const routes = (presence?.hosts ?? []).map((host) => ({ host, route: hostRoute(view, host, ssh) }))
+  for (const { host, route } of routes) {
+    if (route.route !== 'workspace') continue
+    const hint = host.match === 'resolved' ? ` (placed on this ${place} by what its DNS name resolves to here)` : ''
+    return { host, ...route, destination: routeDestination(route), title: `Open a terminal on ${host.name} through Orca (its ${route.workspace.name} workspace)${hint}` }
   }
-  const viaSsh = candidates.find((h) => h.match !== 'identified')
-  if (viaSsh && ssh) {
+  for (const { host, route } of routes) {
+    if (route.route !== 'ssh') continue
     return {
-      host: viaSsh,
-      route: 'ssh',
-      title: `Orca has no workspace on ${viaSsh.name}: this opens a local terminal running “${ssh}”. Open a folder on ${viaSsh.name} in Orca (e.g. /root) for a terminal through Orca’s own connection.`
+      host,
+      ...route,
+      destination: routeDestination(route),
+      title: `Orca has no workspace on ${host.name}: this opens a local terminal running “${route.ssh}” to the ${place} you placed it on. Open a folder on ${host.name} in Orca (e.g. /root) for a terminal through Orca’s own connection.`
     }
   }
-  if (candidates.length) {
-    return { route: 'none', title: `Orca has no workspace on ${candidates.map((h) => h.name).join(', ')}${viaSsh ? ' and there is no address to ssh to' : ''}: open a folder on it in Orca (e.g. /root).` }
-  }
+  if (routes.length) return { route: 'none', destination: '', title: routes.map(({ route }) => (route.route === 'none' ? route.why : '')).join(' ') }
   const unplaced = view.hosts.filter((h) => !h.runsOn && h.kind !== 'local' && h.match !== 'manual')
   return {
     route: 'none',
+    destination: '',
     title: unplaced.length
       ? `No Orca host is placed on this ${place}. ${unplaced.length} Orca host${unplaced.length > 1 ? 's are' : ' is'} not placed yet (${unplaced.map((h) => h.name).join(', ')}): place one in the Orca view.`
       : `No Orca SSH target or paired server runs on this ${place}.`
   }
+}
+
+/** The offer of the card at `place` (`node:…` or `guest:…`), as the panel draws it and the worker checks it. */
+export function cardOffer(snap: EstateSnapshot, place: string, presence: OrcaPresence | undefined = orcaByPlace(snap.orca).get(place)): TerminalOffer | undefined {
+  const m = /^(node|guest):(.+)$/.exec(place)
+  if (!m) return undefined
+  if (m[1] === 'node') {
+    const host = snap.hosts.find((h) => h.key === m[2])
+    return host ? terminalOffer(snap.orca, presence, hostSsh(host), 'node') : undefined
+  }
+  const guest = snap.guests.find((g) => g.key === m[2])
+  return guest ? terminalOffer(snap.orca, presence, guestSsh(guest, snap.hosts.find((h) => h.remote === guest.remote && h.node === guest.node)), 'guest') : undefined
+}
+
+/** Which estate a card was drawn from: its connection scope, estate read and Orca read. */
+export function estateRevision(snap: EstateSnapshot): string {
+  return `${snap.connectionId}@${snap.fetchedAt}/${snap.orca?.fetchedAt ?? '-'}`
 }
 
 /** `node:<remote/node>` or `guest:<remote/vmid>`: how a place on the estate is named. */

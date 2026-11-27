@@ -1,10 +1,10 @@
 // Small actions on a host or guest: copy an address, VMID or ssh command, open it in PDM or the
 // Proxmox web interface, open an Orca terminal where Orca runs. Nothing here writes to Proxmox.
 import type { EstateSnapshot, Guest, Host } from '../model'
-import { terminalOffer, type OrcaPresence, type TerminalOffer } from '../presence'
+import { cardOffer, estateRevision, guestRef, nodeRef, type OrcaPresence, type TerminalOffer } from '../presence'
 import { consoleLink, guestAddress, guestSsh, hostAddress, hostSsh, pdmLink, proxmoxLink } from '../features/links'
 import { safeTarget } from '../features/targets'
-import { app } from './app'
+import { actions, app } from './app'
 import { h } from './dom'
 import { icon, type IconName } from './icons'
 
@@ -74,10 +74,27 @@ export async function openLink(url: string): Promise<void> {
   window.open(url, '_blank', 'noopener')
 }
 
-/** Opens a terminal on the machine an Orca host runs on, through the worker. */
-export async function openTerminal(hostKey: string, label: string): Promise<void> {
+/**
+ * Opens the terminal a card offers, through the worker: bound to what the card showed (its place,
+ * route, host and destination, and the estate it was drawn from). When the worker's offer for that
+ * card is no longer the same, nothing opens: the view is refreshed for another look and click.
+ */
+export async function openTerminal(offer: TerminalOffer, place: string): Promise<void> {
+  const snap = app.snap
+  const host = offer.host
+  if (!snap || !host || offer.route === 'none') return
+  const label = host.name
   try {
-    const answer = await orca.plugin.request('orca.terminal', { hostKey, title: label, scope: app.snap?.connectionId ?? '' }, { timeoutMs: 60000 })
+    const answer = await orca.plugin.request(
+      'orca.terminal',
+      { place, route: offer.route, hostKey: host.key, destination: offer.destination, revision: estateRevision(snap), title: label, scope: snap.connectionId },
+      { timeoutMs: 60000 }
+    )
+    if ('stale' in answer) {
+      toast(answer.stale, 'bad', 8000)
+      void actions.refresh(true)
+      return
+    }
     if (answer.navigated) toast(answer.how === 'workspace' ? `Terminal opened on ${label}` : `Terminal opened with ssh to ${label}`)
     else toast(`Terminal started on ${label}, but Orca did not switch to it: open ${answer.where}`, 'bad', 8000)
   } catch (error) {
@@ -90,11 +107,10 @@ function mini(label: string, iconName: IconName, title: string, run: () => void,
 }
 
 /** The Terminal button: through Orca, a labelled local ssh, or (nodes only) disabled with the reason. */
-function terminalButton(offer: TerminalOffer | undefined, showNone: boolean): HTMLButtonElement | null {
+function terminalButton(offer: TerminalOffer | undefined, place: string, showNone: boolean): HTMLButtonElement | null {
   if (!offer || (offer.route === 'none' && !showNone)) return null
-  const host = offer.host
-  if (offer.route === 'none' || !host) return mini('Terminal', 'terminal', offer.title, () => undefined, true)
-  return mini(offer.route === 'ssh' ? 'Terminal (ssh)' : 'Terminal', 'terminal', offer.title, () => void openTerminal(host.key, host.name))
+  if (offer.route === 'none' || !offer.host) return mini('Terminal', 'terminal', offer.title, () => undefined, true)
+  return mini(offer.route === 'ssh' ? 'Terminal (ssh)' : 'Terminal', 'terminal', offer.title, () => void openTerminal(offer, place))
 }
 
 /** Whether PDM has a page for this remote: not for one reached directly. */
@@ -111,13 +127,13 @@ export function hostActions(snap: EstateSnapshot, host: Host, presence: OrcaPres
   const ssh = hostSsh(host)
   const pdm = inPdm(snap, host.remote) ? pdmLink(snap.pdmUrl, host.remote, host.remoteType === 'pve' ? { node: host.node } : undefined) : undefined
   const web = proxmoxLink(snap, { host })
-  const offer = terminalOffer(snap.orca, presence, ssh, 'node')
+  const offer = cardOffer(snap, nodeRef(host), presence)
   return bar([
     ip ? mini('IP', 'copy', `Copy ${ip}`, () => void copyText(ip, ip)) : null,
     ssh ? mini('SSH', 'terminal', `Copy: ${ssh}`, () => void copyText(ssh, 'the ssh command')) : null,
     pdm ? mini('PDM', 'external', `Open in Proxmox Datacenter Manager: ${pdm}`, () => void openLink(pdm)) : null,
     web ? mini(host.remoteType === 'pbs' ? 'PBS' : 'PVE', 'external', `Open in the Proxmox web interface: ${web}`, () => void openLink(web)) : null,
-    terminalButton(offer, true)
+    terminalButton(offer, nodeRef(host), true)
   ])
 }
 
@@ -130,7 +146,7 @@ export function guestActions(snap: EstateSnapshot, guest: Guest, presence: OrcaP
   const web = proxmoxLink(snap, { guest })
   const consoleUrl = guest.status === 'running' ? consoleLink(snap, guest) : undefined
   // On guests a missing Terminal stays hidden: most guests run no Orca.
-  const offer = terminalOffer(snap.orca, presence, ssh, 'guest')
+  const offer = cardOffer(snap, guestRef(guest), presence)
   return bar([
     ip ? mini('IP', 'copy', `Copy ${ips.join(', ')}`, () => void copyText(ips.join(' '), ips.length > 1 ? 'the addresses' : ip)) : null,
     mini('VMID', 'hash', `Copy ${guest.vmid}`, () => void copyText(String(guest.vmid), `VMID ${guest.vmid}`)),
@@ -138,6 +154,6 @@ export function guestActions(snap: EstateSnapshot, guest: Guest, presence: OrcaP
     pdm ? mini('PDM', 'external', `Open in Proxmox Datacenter Manager: ${pdm}`, () => void openLink(pdm)) : null,
     web ? mini('PVE', 'external', `Open in the Proxmox web interface: ${web}`, () => void openLink(web)) : null,
     consoleUrl ? mini('Console', 'monitor', 'Open the console in the Proxmox web interface', () => void openLink(consoleUrl)) : null,
-    terminalButton(offer, false)
+    terminalButton(offer, guestRef(guest), false)
   ])
 }

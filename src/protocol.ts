@@ -146,8 +146,16 @@ declare module 'orca' {
      * Opens a terminal on the machine an Orca host runs on: in a workspace of its Orca server when
      * it has one, else a local terminal running ssh to it. Answers how it was opened.
      */
-    /** Opens a terminal where an Orca host runs; `navigated` when Orca switched to it, else `where` it is. */
-    'orca.terminal': { input: { hostKey: string; title?: string; scope: string }; output: { how: 'workspace' | 'ssh'; navigated: boolean; where: string } }
+    /**
+     * Opens the terminal a card offered, bound to what it showed: the card (`node:…`/`guest:…`),
+     * route, host, destination (presence.ts TerminalOffer) and estate revision. `navigated` when
+     * Orca switched to it, else `where` it is; `stale` (nothing opened) when the card's offer now
+     * differs or the revision is not one this worker built.
+     */
+    'orca.terminal': {
+      input: { place: string; route: 'workspace' | 'ssh'; hostKey: string; destination: string; revision: string; title?: string; scope: string }
+      output: { how: 'workspace' | 'ssh'; navigated: boolean; where: string } | { stale: string }
+    }
     /** Orca's servers, for "Connect via Orca", with what a check found and what was set up. */
     'setup.hosts': { output: SetupHostsAnswer }
     /** Runs the read-only check on one host (in a terminal of it, closed again). */

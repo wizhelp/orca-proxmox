@@ -8,6 +8,8 @@ import { placeOrcaHosts, type OrcaLinks } from './match'
 
 const MAX_AGE_MS = 20000
 const RESOLVE_MS = 10 * 60_000
+/** More answers than this place nothing: they are not one machine, and all of them must agree. */
+const MAX_ANSWERS = 16
 
 export class OrcaService {
   private cached: { at: number; inventory?: OrcaInventory; error?: string } | undefined
@@ -34,7 +36,8 @@ export class OrcaService {
         let entry = this.resolvedAt.get(name)
         if (!entry || this.now() - entry.at > RESOLVE_MS) {
           const addresses = await this.resolve!(name).catch(() => [] as string[])
-          entry = { at: this.now(), addresses: addresses.filter((a) => safeIp(a) === a).slice(0, 16) }
+          const usable = addresses.filter((a) => safeIp(a) === a)
+          entry = { at: this.now(), addresses: usable.length <= MAX_ANSWERS ? usable : [] }
           this.resolvedAt.set(name, entry)
         }
         return entry.addresses.length ? { ...h, resolved: entry.addresses } : h
@@ -72,7 +75,8 @@ export class OrcaService {
     this.identities?.ask(placed, inventory.workspaces)
     const view: OrcaView = {
       fetchedAt: cached.at,
-      hosts: placed,
+      // DNS answers stay here: the panel needs where a host is placed and how, not the answers.
+      hosts: placed.map(({ resolved: _answers, ...h }) => h),
       workspaces: inventory.workspaces,
       bots: inventory.bots,
       warnings: [...inventory.warnings, ...(this.identities?.warnings() ?? [])]

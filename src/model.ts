@@ -311,8 +311,12 @@ export type EstateSnapshot = {
 /** Where an Orca host runs in the estate: a node (`remote/node`) or a guest (`remote/vmid`). */
 export type ProxmoxRef = { kind: 'node' | 'guest'; key: string }
 
-/** How an Orca host was placed: set by hand, by name, by IP address, or through the SSH target its orcad was deployed over. */
-export type OrcaMatch = 'manual' | 'name' | 'address' | 'via-ssh' | 'identified'
+/**
+ * How an Orca host was placed: set by hand, by name, by IP address, through the SSH target its
+ * orcad was deployed over, from a paired server's own claims, or (`resolved`) only from what an
+ * SSH target's DNS name resolves to here: a hint, which a paired server deployed over it keeps.
+ */
+export type OrcaMatch = 'manual' | 'name' | 'address' | 'via-ssh' | 'identified' | 'resolved'
 
 export type OrcaHostKind = 'local' | 'ssh' | 'environment'
 
@@ -333,7 +337,10 @@ export type OrcaHost = {
   paired?: { key: string; name: string }
   runsOn?: ProxmoxRef
   match?: OrcaMatch
-  /** SSH targets named by a DNS name: the addresses it resolves to here, to match nodes by address. */
+  /**
+   * SSH targets named by a DNS name: the addresses it resolves to here, to match nodes by address.
+   * Kept in the worker: the panel gets the placement, not the answers.
+   */
   resolved?: string[]
   /** Paired servers: the runtime Orca reaches now (an identification is kept per runtime). */
   runtimeId?: string
