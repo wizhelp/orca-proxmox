@@ -457,8 +457,10 @@ single entry.
 3. **By what identifies a paired server** without an SSH target: the host of its endpoint when
    that is not loopback, else the server's own host name, full name and addresses (see below),
    matched as in 4 and 5.
-4. **By IP address**, when an Orca host is named by its address: matched against node interface
-   addresses and the static addresses in guest configs (LXC `ip=`, cloud-init `ipconfigN`).
+4. **By IP address**, when an Orca host is named by its address, or an SSH target by a DNS name
+   (resolved on this machine, kept 10 minutes; all of its addresses that match must agree):
+   matched against node interface addresses and the static addresses in guest configs (LXC
+   `ip=`, cloud-init `ipconfigN`).
 5. **By name**: a node, a single-node remote, a guest name or an LXC hostname, ignoring case and
    domain; `pve-backups` also matches `pve-backup`.
 
@@ -466,6 +468,14 @@ Only a unique match counts: a private address used on two clusters places nothin
 host stays listed: one that nothing places is shown under **Not placed yet** in the Orca view,
 with its own *Place on* selector (one choice places it), apart from this machine and the hosts
 set as "Not on Proxmox".
+
+**Terminal on a card.** A node or guest card's *Terminal* opens a terminal through Orca in a
+workspace of an Orca host placed there (whichever of them has one). Orca's CLI cannot open a
+terminal on an SSH target that has no workspace, so for such a host the button reads *Terminal
+(ssh)* and opens a local terminal running `ssh root@<address>`, as its tooltip says; open a folder
+on that host in Orca (e.g. `/root`) to get a terminal through Orca's own connection. A node with
+no Orca host placed on it shows the button disabled, with the reason (for example how many Orca
+hosts are not placed yet) in its tooltip.
 
 **Paired servers Orca does not identify.** Orca's CLI gives a paired server's label, ids and
 endpoint, but not its machine name or addresses; when it was paired without an SSH target and its
