@@ -285,7 +285,8 @@ the guided manual path (docs/AGENT_SETUP.md).
   running probe and closes its terminal before it settles. Only numbered lines of that run,
   complete and matching their checksum, are read; names and addresses are kept only in their strict
   form (a host name, an IP address; loopback and link-local dropped), in plugin storage. They are
-  claims of that server, not proof: they only place it in the Orca view, and only when every value
-  that matches anything agrees. A place known only that way is never used as a root SSH
+  claims of that server, not proof: they only place it in the Orca view, and only when every name and
+  public address that matches anything agrees (private addresses decide only when nothing else
+  matches, and must agree too). A place known only that way is never used as a root SSH
   destination (the terminal fallback refuses it; a placement by hand confirms it). The panel can
   rewrite that storage, which can only misplace a server in the Orca view.

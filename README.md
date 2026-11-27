@@ -478,8 +478,9 @@ machine; without one, it is not asked), runs a read-only command there as Orca's
 one whose creation Orca did not confirm is found by its unique title, a close that fails is
 retried and reported in the Orca view's warnings until it succeeds, and stopping the plugin ends a
 running probe and closes its terminal first. The answer is kept in plugin storage and used only to
-place the server, when every name and address that matches anything points to the same node or
-guest; such a placement never becomes a root SSH destination: *Open terminal* then goes through
+place the server, when every name and public address that matches anything points to the same
+node or guest (private addresses, which repeat across networks, count only when nothing else
+matches, and must agree too); such a placement never becomes a root SSH destination: *Open terminal* then goes through
 the server's own Orca workspace, or asks you to place it by hand to confirm. A server that gives
 no answer is asked again after an hour (per runtime), one server at a time, and what is kept for a
 server Orca no longer lists is dropped. This only happens with **Show where Orca runs** on and
