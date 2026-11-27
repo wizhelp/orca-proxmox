@@ -274,6 +274,8 @@ export default function activate(orca: OrcaWorkerApi): void {
   }))
   const orcaView = new OrcaService(() => (cliRunner ?? nodeCliRunner)(), () => clock(), identities)
   stopIdentities = () => identities.stop()
+  // What earlier probes left open (also before a restart) is closed now, in the background.
+  if (background) identities.resume()
 
   /** Every message logged passes through here, so a secret that slipped into one is masked. */
   const knownSecrets = new Set<string>()

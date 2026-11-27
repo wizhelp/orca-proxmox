@@ -171,6 +171,7 @@ const urlHost = (address: string) => (address.includes(':') ? `[${address}]` : a
 
 /** Why a finished run's answer cannot be relied on, in words, or undefined. */
 function unknownWhy(r: RunResult): string {
+  if (r.createError) return `Orca did not confirm opening its terminal (${r.createError})`
   if (r.invalid) return `its answer could not be trusted (${r.invalid})`
   if (r.unread) return 'its terminal could not be read to the end'
   if (r.timedOut) return 'it did not finish in time (is the shell root, or may it use sudo without a password?)'

@@ -23,6 +23,25 @@ export type IdentifyDeps = RunDeps & {
 }
 
 const KEY = 'orca.identities'
+const PENDING_KEY = 'orca.pendingTerminals'
+const GIVE_UP_MS = 24 * 60 * 60_000
+const STOP_MS = 4000
+
+/** A terminal still to close, and since when. */
+type Pending = { terminal: OpenTerminal; at: number }
+
+/** A stored pending terminal exactly in its form, or null. */
+function validPending(raw: unknown): Pending | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const p = raw as { terminal?: Record<string, unknown>; at?: unknown }
+  const t = p.terminal
+  if (!t || typeof t !== 'object' || typeof p.at !== 'number') return null
+  const str = (v: unknown, max = 300) => typeof v === 'string' && v.length > 0 && v.length <= max
+  const list = (v: unknown) => Array.isArray(v) && v.length <= 200 && v.every((x) => str(x))
+  if (!str(t.worktree) || !str(t.tag, 40) || !list(t.markers) || (t.environment !== undefined && !/^[A-Za-z0-9._:-]{1,120}$/.test(String(t.environment)))) return null
+  if ((t.handle !== undefined && !str(t.handle, 200)) || (t.before !== undefined && !list(t.before))) return null
+  return { terminal: t as unknown as OpenTerminal, at: p.at }
+}
 const RETRY_MS = 60 * 60_000
 const TIMEOUT_MS = 30_000
 const NAME = /^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$/
@@ -61,14 +80,19 @@ export class ServerIdentities {
   private inflight: Promise<void> | undefined
   /** By server and runtime: a new runtime is not held back by the old one's failure. */
   private retryAt = new Map<string, number>()
-  /** Terminals a probe opened that could not be closed yet: retried before any new probe. */
-  private unclosed: OpenTerminal[] = []
+  /**
+   * Terminals a probe opened that are not closed yet (or not certain to be): kept in plugin
+   * storage, so a restart does not lose them, and retried at start and before any new probe.
+   */
+  private unclosed: Pending[] = []
 
   constructor(private readonly deps: () => IdentifyDeps) {}
 
   private async load(): Promise<void> {
     if (this.loaded) return
     this.loaded = true
+    const pending = await this.deps().storage.get(PENDING_KEY).catch(() => null)
+    if (Array.isArray(pending)) this.unclosed = pending.map(validPending).filter((p): p is Pending => !!p).slice(0, 20)
     const stored = await this.deps().storage.get(KEY).catch(() => null)
     if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
       for (const [k, v] of Object.entries(stored as Record<string, unknown>)) {
@@ -76,6 +100,45 @@ export class ServerIdentities {
         if (identity && /^env:/.test(k)) this.known.set(k, identity)
       }
     }
+  }
+
+  private savePending(): Promise<void> {
+    return this.deps().storage.set(PENDING_KEY, JSON.parse(JSON.stringify(this.unclosed))).catch(() => undefined)
+  }
+
+  /**
+   * Closes what earlier probes left open, also from before a restart. One still not found a day
+   * later is given up (and said so): the create it came from most likely opened nothing.
+   */
+  private async cleanup(run: RunDeps): Promise<void> {
+    if (!this.unclosed.length) return
+    const still: Pending[] = []
+    for (const p of this.unclosed) {
+      if (this.stopped) {
+        still.push(p)
+        continue
+      }
+      if (!(await closeTerminal(run, p.terminal))) continue
+      if (!p.terminal.handle && run.now() - p.at > GIVE_UP_MS) run.log(`A terminal the plugin may have opened (${p.terminal.tag}) was not found for a day; no longer looked for.`)
+      else still.push(p)
+    }
+    this.unclosed = still
+    await this.savePending()
+  }
+
+  /** At start: what earlier probes (before a restart, too) left open is closed, in the background. */
+  resume(): void {
+    if (this.inflight || this.stopped) return
+    const deps = this.deps()
+    const run = { ...deps, aborted: () => this.stopped }
+    this.inflight = (async () => {
+      await this.load()
+      await this.cleanup(run)
+    })()
+      .catch(() => undefined)
+      .finally(() => {
+        this.inflight = undefined
+      })
   }
 
   private save(): Promise<void> {
@@ -107,7 +170,7 @@ export class ServerIdentities {
 
   /** What the Orca view should say about probes: terminals that could not be closed. */
   warnings(): string[] {
-    return this.unclosed.map((t) => `A terminal the plugin opened to identify an Orca server (${t.tag}) could not be closed; close it in Orca.`)
+    return this.unclosed.map((p) => `A terminal the plugin opened to identify an Orca server (${p.terminal.tag}) is not closed yet (${p.terminal.handle ? 'closing failed' : 'Orca did not confirm opening it'}); the plugin keeps trying. Close it in Orca if you see it.`)
   }
 
   /**
@@ -128,9 +191,7 @@ export class ServerIdentities {
     const run = deps.aborted ? deps : { ...deps, aborted: () => this.stopped }
     this.inflight = (async () => {
       // Earlier terminals that could not be closed come first.
-      const still: OpenTerminal[] = []
-      for (const t of this.unclosed) if (await closeTerminal(run, t)) still.push(t)
-      this.unclosed = still
+      await this.cleanup(run)
       const next = candidates[0]
       if (!next || this.stopped) return
       const id = next.key.slice('env:'.length)
@@ -144,11 +205,14 @@ export class ServerIdentities {
       const runId = randomBytes(8).toString('hex')
       try {
         const answer = await runScript(run, shell, identifyScript(runId), runId, 'Proxmox: identify this server', TIMEOUT_MS, false)
-        if (answer.openTerminal) this.unclosed.push(answer.openTerminal)
+        if (answer.openTerminal) {
+          this.unclosed.push({ terminal: answer.openTerminal, at: deps.now() })
+          await this.savePending()
+        }
         const identity = answer.aborted ? null : identityOf(answer, next.runtimeId!, deps.now())
         if (!identity) {
           this.retryAt.set(retryKey(next), deps.now() + RETRY_MS)
-          if (!answer.aborted) deps.log(`Orca server ${next.key}: no identity (${answer.invalid ?? (answer.timedOut ? 'timed out' : 'no answer')}); asked again in an hour`)
+          if (!answer.aborted) deps.log(`Orca server ${next.key}: no identity (${answer.createError ?? answer.invalid ?? (answer.timedOut ? 'timed out' : 'no answer')}); asked again in an hour`)
           return
         }
         this.known.set(next.key, identity)
@@ -163,9 +227,19 @@ export class ServerIdentities {
     })
   }
 
-  /** No new probe from here on; a running one ends early and its terminal is closed (awaited). */
+  /**
+   * No new probe from here on; a running one ends early and closes its terminal. Awaited for at
+   * most a few seconds (Orca's shutdown budget): what is still open is in storage for next start.
+   */
   stop(): Promise<void> {
     this.stopped = true
-    return this.inflight ?? Promise.resolve()
+    if (!this.inflight) return Promise.resolve()
+    return Promise.race([
+      this.inflight,
+      new Promise<void>((r) => {
+        const timer = setTimeout(r, STOP_MS)
+        ;(timer as { unref?: () => void }).unref?.()
+      })
+    ])
   }
 }

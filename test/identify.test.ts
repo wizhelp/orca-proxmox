@@ -81,12 +81,12 @@ test('what the server says is kept only in its strict form', () => {
   assert.equal(identityOf({ pairs: [['hostname', 'pve-x1']] }, 'runtime-1', 1), null, 'only a complete answer')
 })
 
-type Fail = { create?: 'lost' | 'throw'; read?: boolean; close?: number; slow?: boolean }
+type Fail = { create?: 'lost' | 'throw'; read?: boolean; close?: number; slow?: boolean; list?: boolean; existing?: string[] }
 
 /** A fake Orca CLI: terminals on the server answer the identify script with `pairs`. */
 function fakeCli(pairs: [string, string][] | null, fail: Fail = {}) {
   const typed: { worktree: string; environment?: string; command: string; title: string }[] = []
-  const open = new Map<string, string>()
+  const open = new Map<string, string>((fail.existing ?? []).map((h) => [h, 'someone else']))
   const closed: string[] = []
   let closeFailures = fail.close ?? 0
   let runId = ''
@@ -103,10 +103,13 @@ function fakeCli(pairs: [string, string][] | null, fail: Fail = {}) {
       if (fail.create === 'throw') throw new Error('timed out')
       return { terminal: { handle } }
     }
-    if (cmd === 'terminal list') return { terminals: [...open].map(([handle, title]) => ({ handle, title })) }
+    if (cmd === 'terminal list') {
+      if (fail.list) throw new Error('no list')
+      return { terminals: [...open].map(([handle, title]) => ({ handle, title })) }
+    }
     if (cmd === 'terminal read') {
       if (fail.read || !pairs) throw new Error('gone')
-      if (fail.slow) return { terminal: { status: 'running', tail: ['$'] } }
+      if (fail.slow || !arg('terminal')!.startsWith('term_')) return { terminal: { status: 'running', tail: ['$'] } }
       return { terminal: { status: 'running', tail: ['$', ...frame(runId, pairs)] } }
     }
     if (cmd === 'terminal close') {
@@ -124,7 +127,7 @@ function fakeCli(pairs: [string, string][] | null, fail: Fail = {}) {
 }
 
 function identities(cli: ReturnType<typeof fakeCli>, clock: { now: number }, store: Record<string, unknown> = {}, logs: string[] = []) {
-  return new ServerIdentities(() => ({ run: cli.run, sleep: async () => undefined, now: () => clock.now, log: (t) => logs.push(t), storage: { get: async (k) => store[k] ?? null, set: async (k, v) => void (store[k] = v) } }))
+  return new ServerIdentities(() => ({ run: cli.run, sleep: () => new Promise((r) => setImmediate(r)), now: () => clock.now, log: (t) => logs.push(t), storage: { get: async (k) => store[k] ?? null, set: async (k, v) => void (store[k] = v) } }))
 }
 
 async function settle(ids: ServerIdentities, hosts: OrcaHost[], workspaces: OrcaWorkspace[] = [own, nested]) {
@@ -200,7 +203,7 @@ test('every probe terminal is closed: a lost or failed create, a failed close (r
   await settle(ids, [server()])
   assert.equal(cli.open.size, 1)
   assert.equal(ids.warnings().length, 1)
-  assert.match(ids.warnings()[0], /could not be closed; close it in Orca/)
+  assert.match(ids.warnings()[0], /is not closed yet \(closing failed\); the plugin keeps trying/)
   await settle(ids, [server({ runtimeId: 'runtime-2' })], [])
   assert.deepEqual([cli.open.size, ids.warnings().length], [0, 0], 'retried before anything else')
   // Stopping the worker ends a running probe early and closes its terminal before stop() settles.
@@ -214,4 +217,63 @@ test('every probe terminal is closed: a lost or failed create, a failed close (r
   stopping.ask(placeOrcaHosts(await stopping.apply([server({ runtimeId: 'runtime-9' })]), estate), [own])
   await new Promise((r) => setTimeout(r, 20))
   assert.equal(slow.typed.length, 1, 'nothing starts after a stop')
+})
+
+test('a terminal whose create was not confirmed is closed only when its own output proves it; else it stays pending, across a restart', async () => {
+  // Another terminal was already open there: never touched. Ours shows nothing yet: not closed, pending.
+  const cli = fakeCli([['hostname', 'pve-x2']], { create: 'lost', slow: true, existing: ['other_1'] })
+  const store: Record<string, unknown> = {}
+  const clock = { now: 1 }
+  const ids = identities(cli, clock, store)
+  await settle(ids, [server()])
+  assert.deepEqual([cli.closed, [...cli.open.keys()].sort()], [[], ['other_1', 'term_1']])
+  assert.equal(ids.warnings().length, 1)
+  assert.match(ids.warnings()[0], /Orca did not confirm opening it/)
+  const stored = store['orca.pendingTerminals'] as { terminal: { handle?: string; before?: string[] } }[]
+  assert.equal(stored.length, 1, 'kept in storage')
+  assert.deepEqual([stored[0].terminal.handle, stored[0].terminal.before], [undefined, ['other_1']])
+  // After a restart, once its output shows the run, it is found and closed (that one only).
+  const after = fakeCli([['hostname', 'pve-x2']])
+  after.open.set('other_1', 'someone else')
+  after.open.set('term_1', 'renamed by someone')
+  const run = after.run
+  const proving: CliRunner = async (args) => (args[1] === 'read' && args.includes('--terminal=term_1') ? { terminal: { tail: [cli.typed[0].command] } } : run(args, 1000))
+  const restarted = new ServerIdentities(() => ({ run: proving, sleep: () => new Promise((r) => setImmediate(r)), now: () => clock.now, log: () => undefined, storage: { get: async (k) => store[k] ?? null, set: async (k, v) => void (store[k] = v) } }))
+  restarted.resume()
+  for (let i = 0; i < 40; i += 1) await new Promise((r) => setTimeout(r, 2))
+  assert.deepEqual([after.closed, [...after.open.keys()]], [['term_1'], ['other_1']])
+  assert.deepEqual([restarted.warnings(), store['orca.pendingTerminals']], [[], []])
+  // Not knowing what was open before (the listing failed), nothing is closed on a guess.
+  const blind = fakeCli([['hostname', 'pve-x2']], { create: 'throw', list: true })
+  const blindIds = identities(blind, { now: 1 })
+  await settle(blindIds, [server()])
+  assert.deepEqual([blind.closed, blindIds.warnings().length], [[], 1])
+})
+
+test('stopping waits for a probe a few seconds at most; what is left open stays recorded', async () => {
+  const cli = fakeCli([['hostname', 'pve-x2']], { slow: true, close: 99 })
+  const store: Record<string, unknown> = {}
+  const ids = identities(cli, { now: 1 }, store)
+  ids.ask(placeOrcaHosts(await ids.apply([server()]), estate), [own])
+  for (let i = 0; i < 20 && !cli.typed.length; i += 1) await new Promise((r) => setTimeout(r, 2))
+  const started = Date.now()
+  await ids.stop()
+  assert.ok(Date.now() - started < 4500)
+  for (let i = 0; i < 20; i += 1) await new Promise((r) => setTimeout(r, 2))
+  assert.equal((store['orca.pendingTerminals'] as unknown[]).length, 1)
+})
+
+test('Terminal on a server placed from its own claims opens only a workspace it runs itself; conflicting claims leave it unplaced', () => {
+  const snap = { hosts: [node('pve-x1', ['198.51.100.21']), node('pve-x2', ['198.51.100.22'])], guests: [] } as unknown as EstateSnapshot
+  const identified = placeOrcaHosts([server({ identity: { names: ['pve-x1'], addresses: [], from: 'server' } })], estate)[0]
+  const view: OrcaView = { fetchedAt: 0, hosts: [identified], workspaces: [own, nested], bots: [], warnings: [] }
+  const plan = terminalPlan(identified.key, view, snap)
+  assert.ok(!('error' in plan) && plan.args.includes('--worktree=id:repo::/srv/work'), JSON.stringify(plan))
+  const onlyNested = terminalPlan(identified.key, { ...view, workspaces: [nested] }, snap)
+  assert.ok('error' in onlyNested && /not enough to open a root SSH session/.test(onlyNested.error))
+  // Its label matches a node, but its claims disagree: unplaced, so no Terminal on that node.
+  const labelled = placeOrcaHosts([server({ name: 'pve-x1', identity: { names: ['pve-x1'], addresses: ['198.51.100.22'], from: 'server' } })], estate)[0]
+  assert.deepEqual([labelled.runsOn, labelled.match], [undefined, undefined])
+  // A link set by hand still places it.
+  assert.equal(placeOrcaHosts([server({ name: 'pve-x1', identity: { names: ['pve-x1'], addresses: ['198.51.100.22'], from: 'server' } })], estate, { 'env:server-x': 'node:lab/pve-x2' })[0].match, 'manual')
 })

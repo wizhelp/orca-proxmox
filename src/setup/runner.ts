@@ -86,55 +86,93 @@ export type RunResult = ScriptAnswer & {
   openTerminal?: OpenTerminal
   /** The run was ended early (the worker is stopping). */
   aborted?: boolean
-}
-
-/** A terminal a run opened: its handle, or (when Orca did not say) the unique title tag to find it by. */
-export type OpenTerminal = { environment?: string; worktree: string; handle?: string; tag: string }
-
-const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex')
-
-/** The terminals Orca lists in a workspace whose title carries `tag`, by handle. */
-async function findTerminals(deps: RunDeps, t: OpenTerminal): Promise<string[]> {
-  const listed = (await deps.run(['terminal', 'list', ...(t.environment ? [`--environment=${t.environment}`] : []), `--worktree=${t.worktree}`], 20000)) as {
-    terminals?: { handle?: unknown; title?: unknown }[]
-  } | null
-  return (Array.isArray(listed?.terminals) ? listed!.terminals : [])
-    .filter((x) => typeof x?.handle === 'string' && typeof x.title === 'string' && x.title.includes(t.tag))
-    .map((x) => x.handle as string)
+  /** Orca did not confirm opening the terminal: nothing ran that the plugin saw. */
+  createError?: string
 }
 
 /**
- * Closes a terminal a run opened: by its handle, or found by its unique title when Orca did not
- * give one (a create whose answer was lost). Tried three times; answers why it could not, or null.
- * The one way any run's terminal is closed, also for a later retry.
+ * A terminal a run opened: the handle Orca gave, or (when its answer to the create was lost) what
+ * proves which one it is: the handles open before the create, in that scope, and text only its own
+ * output can show. `tag` names it in messages.
+ */
+export type OpenTerminal = { environment?: string; worktree: string; handle?: string; before?: string[]; markers: string[]; tag: string }
+
+const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex')
+
+/** The handles of the terminals Orca lists in exactly this scope (server and workspace). */
+async function listHandles(deps: RunDeps, t: OpenTerminal): Promise<string[]> {
+  const listed = (await deps.run(['terminal', 'list', ...(t.environment ? [`--environment=${t.environment}`] : []), `--worktree=${t.worktree}`], 20000)) as {
+    terminals?: { handle?: unknown }[]
+  } | null
+  if (!Array.isArray(listed?.terminals)) throw new Error('Orca did not list the terminals')
+  return listed!.terminals.filter((x) => typeof x?.handle === 'string').map((x) => x.handle as string)
+}
+
+/**
+ * The terminal a create opened when Orca's answer was lost: one that was not there before the
+ * create, in the same scope, whose own output shows this run (the line typed into it, or an
+ * answer of this run). Never found by a title, which anyone can change; null while unconfirmed.
+ */
+async function recoverHandle(deps: RunDeps, t: OpenTerminal): Promise<string | null> {
+  if (!t.before) return null
+  for (const handle of (await listHandles(deps, t)).filter((h) => !t.before!.includes(h))) {
+    const read = (await deps.run(['terminal', 'read', ...(t.environment ? [`--environment=${t.environment}`] : []), `--terminal=${handle}`, '--limit=400'], 20000)) as TerminalRead | null
+    const text = logicalLines(read).join('\n')
+    if (t.markers.some((m) => text.includes(m))) return handle
+  }
+  return null
+}
+
+/**
+ * Closes a terminal a run opened: by the handle Orca gave, or (a create whose answer was lost)
+ * the one recoverHandle proves to be it. Tried three times; answers why it is not closed (still
+ * to do), or null. The one way any run's terminal is closed, also for a later retry.
  */
 export async function closeTerminal(deps: RunDeps, t: OpenTerminal): Promise<string | null> {
   let last = ''
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      const handles = t.handle ? [t.handle] : await findTerminals(deps, t)
-      for (const handle of handles) await deps.run(['terminal', 'close', ...(t.environment ? [`--environment=${t.environment}`] : []), `--terminal=${handle}`, '--tab'], 20000)
-      return null
+      const handle = t.handle ?? (await recoverHandle(deps, t))
+      if (!handle) {
+        last = t.before ? 'its terminal was not found (yet)' : 'what was open before it is not known'
+      } else {
+        // Its own tab when Orca named the terminal it opened; else that one terminal only.
+        await deps.run(['terminal', 'close', ...(t.environment ? [`--environment=${t.environment}`] : []), `--terminal=${handle}`, ...(t.handle ? ['--tab'] : [])], 20000)
+        return null
+      }
     } catch (error) {
       last = error instanceof Error ? error.message : String(error)
-      if (attempt < 3) await deps.sleep(500)
     }
+    if (attempt < 3) await deps.sleep(500)
   }
-  deps.log(`Could not close a terminal the plugin opened (${t.tag}): ${last}`)
+  deps.log(`A terminal the plugin opened (${t.tag}) is not closed yet: ${last}`)
   return last || 'it could not be closed'
 }
 
 export async function runScript(deps: RunDeps, shell: HostShell, script: string, runId: string, title: string, timeoutMs: number, asRoot = true): Promise<RunResult> {
-  // The run id in the title makes the terminal findable even if Orca's answer to the create is lost.
+  const command = commandLine(script, asRoot)
+  const b64 = /printf %s ([A-Za-z0-9+/=]+) \|/.exec(command)?.[1] ?? ''
   const tag = `#${runId.slice(0, 8)}`
-  const opened: OpenTerminal = { worktree: shell.worktree, tag, ...(shell.environment ? { environment: shell.environment } : {}) }
-  let result: RunResult | undefined
+  const opened: OpenTerminal = {
+    worktree: shell.worktree,
+    tag,
+    // What only this run's terminal can show: a stretch of the line typed into it, and its answers.
+    markers: [b64.slice(Math.max(0, b64.length - 60), b64.length - 8), `ORCA-SETUP-${runId} `].filter((m) => m.length > 8),
+    ...(shell.environment ? { environment: shell.environment } : {})
+  }
+  let result: RunResult = { pairs: [] }
   try {
-    const created = (await deps.run(['terminal', 'create', ...env(shell), `--worktree=${shell.worktree}`, `--title=${`${title.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 50)} ${tag}`}`, `--command=${commandLine(script, asRoot)}`], 30000)) as {
-      terminal?: { handle?: unknown }
-    } | null
-    if (typeof created?.terminal?.handle === 'string' && created.terminal.handle) opened.handle = created.terminal.handle
-    else throw new Error('Orca did not say which terminal it opened on that host.')
+    // What is open before, so that a terminal whose create answer is lost can be told apart.
+    opened.before = await listHandles(deps, opened).catch(() => undefined)
+    try {
+      const created = (await deps.run(['terminal', 'create', ...env(shell), `--worktree=${shell.worktree}`, `--title=${`${title.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 50)} ${tag}`}`, `--command=${command}`], 30000)) as {
+        terminal?: { handle?: unknown }
+      } | null
+      if (typeof created?.terminal?.handle === 'string' && created.terminal.handle) opened.handle = created.terminal.handle
+      else return (result = { pairs: [], createError: 'Orca did not say which terminal it opened on that host' })
+    } catch (error) {
+      return (result = { pairs: [], createError: error instanceof Error ? error.message : String(error) })
+    }
     const until = deps.now() + timeoutMs
     const reader = new AnswerReader(runId)
     let answer: ScriptAnswer = { pairs: [] }
@@ -158,14 +196,12 @@ export async function runScript(deps: RunDeps, shell: HostShell, script: string,
       if (read?.terminal?.status === 'exited' || deps.now() > until) return (result = { ...answer, timedOut: true })
     }
   } finally {
-    // Every way out, an error included, closes the terminal (found by its title when Orca gave
-    // no handle); if it cannot be closed, the answer says so and where it is.
+    // Every way out, a failed create included, closes the terminal; if it cannot be (or it is not
+    // certain which it is), the answer says so and carries what is needed to close it later.
     const closeError = await closeTerminal(deps, opened)
-    if (closeError && result) {
+    if (closeError) {
       result.closeError = closeError
       result.openTerminal = opened
-    } else if (closeError) {
-      deps.log(`A terminal the plugin opened on ${shell.hostKey} may still be open (${tag}).`)
     }
   }
 }
