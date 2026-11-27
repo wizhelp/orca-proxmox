@@ -279,10 +279,16 @@ the guided manual path (docs/AGENT_SETUP.md).
   there and never as root: `hostname`, `hostname -f` and the machine's addresses (`hostname -I`,
   else `ip -o addr`), only in a workspace the server runs itself (its `hostId` is `local` in its
   own listing; never one it reaches over an SSH target of its own), by Orca's exact route
-  (`--environment`, `--worktree`). Every probe's terminal is closed through one path: found by its
-  unique title when Orca's answer to the create was lost, closes retried and, when they still
-  fail, reported in the Orca view and retried before any new probe; stopping the worker ends a
-  running probe and closes its terminal before it settles. Only numbered lines of that run,
+  (`--environment`, `--worktree`). Every probe's terminal is closed through one path: by the handle
+  Orca returned; when Orca's answer to the create was lost, only a terminal of that exact scope
+  that was not listed before the create and whose own output shows this run (the line typed into
+  it, or its numbered answers) is closed, never one found by a title (titles can be changed), and
+  without knowing what was there before nothing is closed on a guess. What is not closed (a close
+  that failed, a terminal not proven yet) is kept in plugin storage, shown in the Orca view and
+  retried at start and before any new probe, so a restart does not lose it; stopping the worker
+  ends a running probe and waits at most a few seconds for its close. A server placed from its own
+  claims gets *Open terminal* only in a workspace it runs itself, and claims that disagree leave it
+  unplaced even when its label would match. Only numbered lines of that run,
   complete and matching their checksum, are read; names and addresses are kept only in their strict
   form (a host name, an IP address; loopback and link-local dropped), in plugin storage. They are
   claims of that server, not proof: they only place it in the Orca view, and only when every name and

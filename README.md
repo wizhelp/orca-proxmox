@@ -475,9 +475,12 @@ that server runs itself (never one it reaches over an SSH target of its own, whi
 machine; without one, it is not asked), runs a read-only command there as Orca's user
 (`hostname`, `hostname -f` and the machine's IPv4 and IPv6 addresses, nothing else; never
 `sudo`), reads the answer and closes the terminal. Every way a probe ends closes its terminal:
-one whose creation Orca did not confirm is found by its unique title, a close that fails is
-retried and reported in the Orca view's warnings until it succeeds, and stopping the plugin ends a
-running probe and closes its terminal first. The answer is kept in plugin storage and used only to
+one whose creation Orca did not confirm is closed only once it is proven to be it (a terminal of
+that workspace that was not there before and whose own output shows that run; never by its
+title), a close that fails or a terminal not proven yet is kept in plugin storage, reported in the
+Orca view's warnings and retried (also after a restart) until it is done, and stopping the plugin
+ends a running probe and closes its terminal first, within a few seconds. A server placed from its
+own claims gets *Open terminal* only in a workspace it runs itself. The answer is kept in plugin storage and used only to
 place the server, when every name and public address that matches anything points to the same
 node or guest (private addresses, which repeat across networks, count only when nothing else
 matches, and must agree too); such a placement never becomes a root SSH destination: *Open terminal* then goes through
