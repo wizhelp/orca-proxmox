@@ -129,6 +129,8 @@ export function placeOrcaHosts(
       ])
       const decided = strong !== undefined ? strong : agreed(host.identity.addresses.filter(isPrivate).map((a) => byAddress(a)))
       if (decided) set(decided, 'identified')
+      // Claims that disagree leave it unplaced: its label does not decide instead.
+      if (decided === null && !out.runsOn) return out
     }
     set(byAddress(host.name), 'address')
     set(byName(host.name), 'name')

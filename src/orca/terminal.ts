@@ -38,7 +38,10 @@ export function terminalPlan(hostKey: string, view: OrcaView | undefined, snap: 
   if (!host || !view) return { error: 'This Orca host is not known (any more).' }
   // A tab title only: no control characters, short.
   const label = (title ?? host.name).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 80) || 'Proxmox'
-  const ws = pick(view.workspaces.filter((w) => w.hostKey === host.key))
+  // A server placed only from its own claims: only a workspace it runs itself, never one it
+  // reaches over an SSH target of its own (another machine).
+  const own = (w: OrcaWorkspace) => w.ownRuntime === true && w.environment === host.key.replace(/^env:/, '')
+  const ws = pick(view.workspaces.filter((w) => w.hostKey === host.key && (host.match !== 'identified' || own(w))))
   if (ws?.worktreeId) {
     return {
       how: 'workspace',
